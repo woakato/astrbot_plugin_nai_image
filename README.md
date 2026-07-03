@@ -23,7 +23,7 @@
 
 ## 联动插件：astrbot_plugin_private_companion（我会永远陪着你）
 
-本插件可以作为 [`astrbot_plugin_private_companion`](https://github.com/)（"我会永远陪着你"）的联动后端使用。插件启动后会在 `127.0.0.1:8765` 起一个 **OpenAI Images API 兼容** 的本地代理，让陪伴插件把生图请求转发到这里，由 nai.sta1n.cn 完成实际生图。
+本插件可以作为 [`astrbot_plugin_private_companion`]([https://github.com/menglimi/astrbot_plugin_private_companion]（"我会永远陪着你"）的联动后端使用。插件启动后会在 `127.0.0.1:8765` 起一个 **OpenAI Images API 兼容** 的本地代理，让陪伴插件把生图请求转发到这里，由 nai.sta1n.cn 完成实际生图。
 
 ### 食用方法
 
