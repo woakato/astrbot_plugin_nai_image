@@ -79,5 +79,13 @@
         "type": "string",
         "default": "",
         "description": "自定义反向提示词，留空使用默认"
+    },
+    "proxy_port": {
+        "type": "int",
+        "default": 8765,
+        "description": "本地代理端口（陪伴插件通过此端口调用本插件的生图）",
+        "hint": "改完需要重载插件生效",
+        "min": 1024,
+        "max": 65535
     }
 }

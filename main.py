@@ -96,6 +96,20 @@ DEFAULT_NEGATIVE = (
 )
 
 
+def _format_generate_error(reason: str) -> str:
+    """把 _generate_one 返回的 reason 翻译成给用户的中文报错。"""
+    return {
+        "no_token": "❌ 插件未配置 image_gen_key，请先在插件管理面板填入 token。",
+        "no_session": "❌ 插件 session 未初始化，请重载插件。",
+        "timeout": "⏱ 生图超时（超过 180 秒）。可能原因：nai.sta1n.cn 服务繁忙、提示词过长、或网络不稳。",
+        "http_4xx": "🚫 上游返回 4xx。常见原因：token 无效、提示词含敏感词、或参数不合法。",
+        "http_5xx": "🔥 上游返回 5xx。nai.sta1n.cn 服务器内部错误，请稍后重试。",
+        "http_other": "⚠️ 上游返回非预期状态码。",
+        "empty_response": "📭 上游返回 200 但内容为空，可能是接口限流或临时异常。",
+        "exception": "💥 生图过程发生未捕获异常，请查看 AstrBot 日志获取详情。",
+    }.get(reason, f"❓ 生图失败（原因: {reason}）")
+
+
 def _parse_args(text: str) -> dict:
     import re
 
@@ -252,10 +266,23 @@ class NAIGenerateImagePlugin(Star):
             logger.warning(f"{LOG_TAG} [quota] 请求异常: {e!r}")
             return None
 
-    async def _generate_one(self, prompt: str, style: str, size: str) -> Optional[bytes]:
-        if not self.image_gen_key or not self._session:
-            logger.warning(f"{LOG_TAG} [generate] 跳过：token 或 session 缺失")
-            return None
+    async def _generate_one(
+        self, prompt: str, style: str, size: str
+    ) -> tuple[Optional[bytes], str]:
+        """生成单张图片。
+
+        Returns:
+            (img_bytes_or_None, reason)
+            reason 取值: "ok" / "no_token" / "no_session" /
+                        "timeout" / "http_4xx" / "http_5xx" / "http_other" /
+                        "empty_response" / "exception"
+        """
+        if not self.image_gen_key:
+            logger.warning(f"{LOG_TAG} [generate] 跳过：token 未配置")
+            return None, "no_token"
+        if not self._session:
+            logger.warning(f"{LOG_TAG} [generate] 跳过：session 未初始化")
+            return None, "no_session"
         artists = self._resolve_artists(style)
         from urllib.parse import quote
 
@@ -292,25 +319,37 @@ class NAIGenerateImagePlugin(Star):
             ) as resp:
                 elapsed = time.perf_counter() - start
                 if resp.status != 200:
+                    if 400 <= resp.status < 500:
+                        reason = "http_4xx"
+                    elif 500 <= resp.status < 600:
+                        reason = "http_5xx"
+                    else:
+                        reason = "http_other"
                     logger.warning(
-                        f"{LOG_TAG} [generate] 失败 | status={resp.status} "
-                        f"elapsed={elapsed:.2f}s"
+                        f"{LOG_TAG} [generate] 失败 | reason={reason} "
+                        f"status={resp.status} elapsed={elapsed:.2f}s"
                     )
-                    return None
+                    return None, reason
                 img_bytes = await resp.read()
+                if not img_bytes:
+                    logger.warning(
+                        f"{LOG_TAG} [generate] 空响应 | status=200 "
+                        f"bytes=0 elapsed={elapsed:.2f}s"
+                    )
+                    return None, "empty_response"
                 logger.info(
                     f"{LOG_TAG} [generate] 成功 | bytes={len(img_bytes)} "
                     f"elapsed={elapsed:.2f}s style={style} size={size}"
                 )
-                return img_bytes
+                return img_bytes, "ok"
         except asyncio.TimeoutError:
             logger.warning(
                 f"{LOG_TAG} [generate] 超时 (>{180}s) | prompt='{full_prompt[:60]}...'"
             )
-            return None
+            return None, "timeout"
         except Exception as e:
             logger.warning(f"{LOG_TAG} [generate] 异常: {e!r}")
-            return None
+            return None, "exception"
 
     async def _start_proxy_server(self):
         logger.info(f"{LOG_TAG} [proxy:start] 准备启动 {PROXY_HOST}:{self.proxy_port}")
@@ -385,7 +424,7 @@ class NAIGenerateImagePlugin(Star):
         )
 
         try:
-            img_bytes = await self._generate_one(prompt, self.image_style, size)
+            img_bytes, reason = await self._generate_one(prompt, self.image_style, size)
         except Exception as e:
             logger.warning(f"{LOG_TAG} [proxy:gen] _generate_one 异常: {e!r}")
             return web.json_response(
@@ -394,10 +433,18 @@ class NAIGenerateImagePlugin(Star):
             )
 
         if not img_bytes:
-            logger.warning(f"{LOG_TAG} [proxy:gen] 生图失败 (无 bytes 返回)")
+            logger.warning(f"{LOG_TAG} [proxy:gen] 生图失败 | reason={reason}")
+            user_msg = _format_generate_error(reason)
+            status = 504 if reason == "timeout" else 502
             return web.json_response(
-                {"error": {"message": "generate failed (no bytes returned)", "type": "upstream_error"}},
-                status=502,
+                {
+                    "error": {
+                        "message": f"generate failed: {reason}",
+                        "user_message": user_msg,
+                        "type": "upstream_error",
+                    }
+                },
+                status=status,
             )
 
         b64 = base64.b64encode(img_bytes).decode()
@@ -462,7 +509,7 @@ class NAIGenerateImagePlugin(Star):
         )
 
         try:
-            img_bytes = await self._generate_one(prompt, self.image_style, size)
+            img_bytes, reason = await self._generate_one(prompt, self.image_style, size)
         except Exception as e:
             logger.warning(f"{LOG_TAG} [proxy:edit] _generate_one 异常: {e!r}")
             return web.json_response(
@@ -470,10 +517,18 @@ class NAIGenerateImagePlugin(Star):
                 status=500,
             )
         if not img_bytes:
-            logger.warning(f"{LOG_TAG} [proxy:edit] 生图失败 (无 bytes 返回)")
+            logger.warning(f"{LOG_TAG} [proxy:edit] 生图失败 | reason={reason}")
+            user_msg = _format_generate_error(reason)
+            status = 504 if reason == "timeout" else 502
             return web.json_response(
-                {"error": {"message": "generate failed (no bytes returned)", "type": "upstream_error"}},
-                status=502,
+                {
+                    "error": {
+                        "message": f"generate failed: {reason}",
+                        "user_message": user_msg,
+                        "type": "upstream_error",
+                    }
+                },
+                status=status,
             )
 
         b64 = base64.b64encode(img_bytes).decode()
@@ -540,9 +595,10 @@ class NAIGenerateImagePlugin(Star):
         )
 
         success = 0
+        first_reason: Optional[str] = None
         for i in range(n):
             logger.info(f"{LOG_TAG} [cmd:image] 生成第 {i + 1}/{n} 张")
-            img_bytes = await self._generate_one(prompt, style, size)
+            img_bytes, reason = await self._generate_one(prompt, style, size)
             if img_bytes:
                 success += 1
                 logger.info(
@@ -555,11 +611,20 @@ class NAIGenerateImagePlugin(Star):
                     ]
                 )
             else:
-                logger.warning(f"{LOG_TAG} [cmd:image] 第 {i + 1}/{n} 张失败")
+                if first_reason is None:
+                    first_reason = reason
+                logger.warning(
+                    f"{LOG_TAG} [cmd:image] 第 {i + 1}/{n} 张失败 | reason={reason}"
+                )
+                yield event.plain_result(f"第 {i + 1}/{n} 张生成失败：{_format_generate_error(reason)}")
 
         if success == 0:
-            logger.error(f"{LOG_TAG} [cmd:image] 全部 {n} 张失败")
-            yield event.plain_result("全部图片生成失败，请检查 token 或网络。")
+            logger.error(
+                f"{LOG_TAG} [cmd:image] 全部 {n} 张失败 | first_reason={first_reason}"
+            )
+            yield event.plain_result(
+                f"全部 {n} 张图片生成失败。\n{_format_generate_error(first_reason or 'unknown')}"
+            )
         else:
             logger.info(f"{LOG_TAG} [cmd:image] 完成 | 成功 {success}/{n}")
 
