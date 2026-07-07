@@ -43,7 +43,22 @@
     "character_preset": {
         "type": "string",
         "default": "",
-        "description": "角色预设模板（前置提示词 + 角色外观 + 增强词），如：muelsyse(Arknights), 1girl, very long hair, masterpiece, best quality"
+        "description": "角色核心关键词与身体描述补全",
+        "hint": "填入角色名在nai里的核心关键词和补全身体描述，如muelsyse(Arknights)，mechanical headwear等。若源请求插件已经存在则不用配置。"
+    },
+    "default_outfit": {
+        "type": "string",
+        "default": "",
+        "description": "默认服装配置（SD/NAI tag 风格）。当源自然语言没有具体服装描述时使用。",
+        "hint": "用英文逗号分隔 SD/NAI tag。例如：modern fashion, dark green knit dress, fitted sweater, slim pants, leather boots"
+    },
+    "outfit_cache_ttl_seconds": {
+        "type": "int",
+        "default": 3600,
+        "description": "服装缓存池持续时间（秒），默认 3600 = 1 小时。设为 0 关闭缓存池（始终回退到默认服装）。",
+        "hint": "源 prompt 提到换装时缓存新服装并覆盖上一条；超时会自动回退到默认服装。",
+        "min": 0,
+        "max": 86400
     },
     "model": {
         "type": "string",
@@ -87,5 +102,18 @@
         "hint": "改完需要重载插件生效",
         "min": 1024,
         "max": 65535
+    },
+    "enable_translate": {
+        "type": "bool",
+        "default": false,
+        "description": "是否开启中间模型转译（建议小模型）",
+        "hint": "开启后，会先用下面选择的模型把自然语言提示词翻译成 SD/NAI 标签风格，再和预设合并并发送。转译失败会自动回退原文。"
+    },
+    "translate_provider": {
+        "type": "string",
+        "default": "",
+        "description": "选择提示词转译的模型供应商（留空选择默认模型）",
+        "hint": "从 AstrBot 已配置的 provider 中选一个。留空时使用 AstrBot 的默认 provider。建议选择便宜/快速的小模型。",
+        "_special": "select_provider"
     }
 }

@@ -16,6 +16,67 @@ IMAGE_GEN_BASE_URL_DEFAULT = "https://nai.sta1n.cn"
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8765
 
+# 自然语言 → SD/NAI 标签风格提示词 的转译系统提示
+TRANSLATE_SYSTEM_PROMPT = (
+    "You translate natural-language descriptions into compact, comma-separated "
+    "Stable Diffusion / NovelAI prompt tags. Output ONLY the tags — no "
+    "explanations, no markdown, no thinking block, no labels, no preamble.\n"
+    "\n"
+    "Output format (strict):\n"
+    "  - Single line, English, lowercase, tags separated by ', '.\n"
+    "  - Each tag = 1-3 words. Noun/adjective form. No articles, no verbs, "
+    "no full sentences.\n"
+    "  - Tag cap: 25-40 total. Stop once the input is covered; do not pad.\n"
+    "\n"
+    "Output order (mandatory):\n"
+    "  1) Subject tags (1-8): who/what is in the image, anatomy, identity.\n"
+    "  2) Action/scene tags (1-8): pose, location, props, lighting, atmosphere.\n"
+    "  3) Style tags (0-4): medium, art style, mood.\n"
+    "\n"
+    "NAI weighting (apply to 3-5 key tags, prefer subject identity & key props):\n"
+    "  - 1.2::keyword::  emphasizes; 1.5::keyword::  strong emphasis.\n"
+    "  - -1::keyword::  or 0.5::keyword::  suppresses.\n"
+    "  - {{keyword}}   ≈ 1.05× boost.\n"
+    "\n"
+    "STRICT RULES — never violate:\n"
+    "  - Do NOT add quality tags (masterpiece, best quality, absurdres, "
+    "highly detailed, etc.). Quality and artist tags are injected separately "
+    "via an artist/preset parameter; re-adding them here causes duplication "
+    "and weight conflicts.\n"
+    "  - Do NOT invent visual details not in the input — no inferring "
+    "makeup, lighting direction, weather, time-of-day, indoor/outdoor, or "
+    "accessories that are not explicitly mentioned. If a concept is "
+    "implied by a named object (e.g. 'umbrella' implies 'rainy'), that "
+    "counts as in the input; do not extend further.\n"
+    "  - Do NOT add aspect-ratio, framing-shape, or size tags — even if "
+    "the input mentions 1:1, 方形, square, 横图, portrait, landscape, etc. "
+    "These are handled by a separate size parameter; mention them only as "
+    "a passive composition tag (e.g. 'half body', 'upper body') never as "
+    "an aspect.\n"
+    "  - Do NOT add negative-prompt tags like 'no text, no watermark, "
+    "no logo' (handled via negative prompt).\n"
+    "  - Do NOT output multiple synonymous tags — pick ONE concise "
+    "descriptor per concept (e.g. 'urban style' alone, not 'urban style, "
+    "contemporary style, stylish ensemble'). Same applies to atmosphere "
+    "tags and quality concepts.\n"
+    "  - Do NOT translate character names or transliterate; keep canonical "
+    "form (e.g. 'muelsyse(Arknights)' if it appears in input, stays as-is).\n"
+    "\n"
+    "Examples (note: NO quality tags, weighted syntax on key descriptors):\n"
+    "\n"
+    "Input: 孤独的少女站在月光下的废墟里，穿着黑色连衣裙\n"
+    "Output: 1girl, solo, 1.2::black dress::, standing, ruins, 1.3::moonlight::, night, dramatic lighting, full body\n"
+    "\n"
+    "Input: 一个开朗的动漫男孩拿武士刀，日落海滩，动态姿势\n"
+    "Output: 1boy, 1.1::katana::, happy expression, beach, 1.3::sunset::, 1.2::dynamic pose::, ocean waves, wind, full body\n"
+    "\n"
+    "Input: modern living room, a cat sleeping on sofa, oil painting style\n"
+    "Output: indoor, modern living room, cat, sleeping, sofa, oil painting, soft lighting, cozy atmosphere, 0.5::cluttered::, 1.2::oil painting style::\n"
+    "\n"
+    "Input: 镜前自拍穿搭，银色长发，戴墨镜\n"
+    "Output: 1girl, mirror selfie, half body, looking at viewer, modern fashion, 1.1::sunglasses::, 0.8::casual outfit::, indoor, soft lighting"
+)
+
 IMAGE_STYLES = {
     "vertical": "韩漫小清新风",
     "comicDoujin": "漫画同人风",
@@ -123,6 +184,65 @@ def _parse_args(text: str) -> dict:
     return args
 
 
+# ==== Outfit 缓存池：具体服装词 / 换装动词 / 抽出片段 ====
+
+# 命中即视为"具体服装"的关键词（中文为主，覆盖常见服饰品类）
+_OUTFIT_CONCRETE_TOKENS = (
+    "裙", "裤", "衣", "上衣", "下装", "外套", "衬衫", "T恤", "罩衫", "卫衣",
+    "汉服", "校服", "旗袍", "和服", "西装", "风衣", "夹克", "毛衣", "针织衫",
+    "连衣裙", "半裙", "短裙", "长裙", "牛仔裤", "阔腿裤", "喇叭裤", "运动裤",
+    "皮衣", "羽绒服", "棉衣", "大衣",
+    "靴", "鞋", "袜", "丝袜", "帽", "围巾", "手套", "披风", "斗篷",
+    "JK", "jk", "洛丽塔", "lolita",
+)
+
+# 命中即视为"换装动作"的关键词（组合型，避免裸"穿"/"换"误判）
+_OUTFIT_CHANGE_KEYWORDS = (
+    "换上新", "换了新", "换上", "今天穿", "今晚穿", "早上穿",
+    "刚换上", "新换了", "换了件", "换了条", "穿上了",
+)
+
+
+def _has_specific_outfit(prompt: str) -> bool:
+    """源 prompt 中是否包含具体服装词。"""
+    return any(tok in prompt for tok in _OUTFIT_CONCRETE_TOKENS)
+
+
+def _detect_outfit_change(prompt: str) -> bool:
+    """源 prompt 中是否出现换装动作关键词。"""
+    return any(kw in prompt for kw in _OUTFIT_CHANGE_KEYWORDS)
+
+
+def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
+    """从源 prompt 中抽出服装相关片段（截第一个具体词或换装词附近的小段文字）。"""
+    # 优先匹配具体服装词，否则退到换装动词
+    candidates = []
+    for tok in _OUTFIT_CONCRETE_TOKENS:
+        i = prompt.find(tok)
+        if i >= 0:
+            candidates.append((i, tok))
+    for kw in _OUTFIT_CHANGE_KEYWORDS:
+        i = prompt.find(kw)
+        if i >= 0:
+            candidates.append((i, kw))
+    if not candidates:
+        return ""
+    candidates.sort()
+    idx, marker = candidates[0]
+    start = max(0, idx - 30)
+    end = min(len(prompt), idx + len(marker) + max_chars)
+    excerpt = prompt[start:end].strip()
+    # 找离片段中段最近的句子边界来截断
+    cut_at = -1
+    for sep in ("。", "！", "？", "；", "\n", "，", ",", ";", ":"):
+        pos = excerpt.find(sep, len(marker) + 20)
+        if pos > 0 and (cut_at < 0 or pos < cut_at):
+            cut_at = pos
+    if cut_at > 0:
+        excerpt = excerpt[: cut_at + 1]
+    return excerpt.strip() or prompt[idx:end].strip()
+
+
 @register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "1.0.0")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -161,6 +281,20 @@ class NAIGenerateImagePlugin(Star):
         self._session: Optional[aiohttp.ClientSession] = None
         self.proxy_runner: Optional[web.AppRunner] = None
         self.proxy_port: int = int(config.get("proxy_port") or PROXY_PORT)
+        self.enable_translate: bool = bool(config.get("enable_translate", False))
+        self.translate_provider: str = (config.get("translate_provider") or "").strip()
+
+        # ==== Outfit 缓存池配置 ====
+        self.default_outfit: str = (config.get("default_outfit") or "").strip()
+        try:
+            self.outfit_cache_ttl_seconds: int = max(
+                0, min(86400, int(config.get("outfit_cache_ttl_seconds") or 3600))
+            )
+        except (TypeError, ValueError):
+            self.outfit_cache_ttl_seconds = 3600
+        # 单槽位 outfit 缓存：纯内存，重载插件即清空。
+        self.outfit_cache_text: Optional[str] = None
+        self.outfit_cache_expires_at: Optional[float] = None
 
         logger.info(
             f"{LOG_TAG} [init] 配置加载完成 | "
@@ -170,6 +304,10 @@ class NAIGenerateImagePlugin(Star):
             f"count={self.image_count} | model={self.model} | "
             f"steps={self.steps} scale={self.scale} cfg={self.cfg_value} | "
             f"template={'启用' if self.enable_template and self.character_preset else '未启用'} | "
+            f"translate={'启用' if self.enable_translate else '未启用'} "
+            f"provider='{self.translate_provider or '默认'}' | "
+            f"outfit: default={'已设' if self.default_outfit else '未设'} "
+            f"cache_ttl={self.outfit_cache_ttl_seconds}s | "
             f"proxy_port={self.proxy_port}"
         )
 
@@ -180,20 +318,39 @@ class NAIGenerateImagePlugin(Star):
 
     async def initialize(self):
         logger.info(f"{LOG_TAG} [initialize] 阶段开始")
+        # 1) aiohttp session —— 失败也继续，至少把代理先起来
         try:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180))
             logger.info(f"{LOG_TAG} [initialize] aiohttp session 创建成功 (timeout=180s)")
         except Exception as e:
-            logger.error(f"{LOG_TAG} [initialize] aiohttp session 创建失败: {e!r}")
-            return
+            logger.error(f"{LOG_TAG} [initialize] aiohttp session 创建失败: {e!r}（将继续，远程出图会受影响）")
 
-        try:
-            await self._start_proxy_server()
-        except Exception as e:
-            logger.error(f"{LOG_TAG} [initialize] 代理服务器启动失败: {e!r}")
+        # 2) 本地代理 —— 永远是必备。先停掉旧实例（热重载场景），再启动新的。
+        #    带 3 次 retry，间隔 1s，应对 TIME_WAIT 等端口占用场景。
+        await self._stop_proxy_server()
+        last_err = None
+        for attempt in range(1, 4):
+            try:
+                await self._start_proxy_server()
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    f"{LOG_TAG} [initialize] 代理启动失败 attempt={attempt}/3: {e!r}"
+                )
+                if attempt < 3:
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(1.0)
+        if last_err is not None:
+            logger.error(
+                f"{LOG_TAG} [initialize] 代理服务器最终启动失败，端口 {PROXY_HOST}:{self.proxy_port} "
+                f"不可用 —— 上游 healthcheck 会走 nai.sta1n.cn, 不会被本地 8765 错误掩盖。last_err={last_err!r}"
+            )
 
         logger.info(
-            f"{LOG_TAG} [initialize] 阶段完成 | token={'OK' if self.image_gen_key else 'MISSING'}"
+            f"{LOG_TAG} [initialize] 阶段完成 | token={'OK' if self.image_gen_key else 'MISSING'} | "
+            f"proxy={'UP' if self.proxy_runner else 'DOWN'}"
         )
 
     async def terminate(self):
@@ -208,6 +365,10 @@ class NAIGenerateImagePlugin(Star):
                 logger.info(f"{LOG_TAG} [terminate] aiohttp session 已关闭")
             except Exception as e:
                 logger.warning(f"{LOG_TAG} [terminate] session 关闭异常: {e!r}")
+        # outfit 缓存是纯内存，插件重载一定会清掉，这里主动清理一次
+        if self.outfit_cache_text is not None:
+            logger.info(f"{LOG_TAG} [terminate] 清理 outfit 缓存")
+            self._outfit_cache_clear()
         logger.info(f"{LOG_TAG} [terminate] 阶段完成")
 
     def _resolve_artists(self, style: str) -> str:
@@ -217,6 +378,85 @@ class NAIGenerateImagePlugin(Star):
 
     def _resolve_size(self, size: str) -> str:
         return IMAGE_SIZES.get(size, "portrait")
+
+    # ==== Outfit 缓存池读写 ====
+    def _outfit_cache_get(self) -> Optional[str]:
+        """读缓存。TTL 到期自动清除（直接返回 None）。"""
+        if self.outfit_cache_text is None:
+            return None
+        if (
+            self.outfit_cache_expires_at is not None
+            and time.monotonic() > self.outfit_cache_expires_at
+        ):
+            self.outfit_cache_text = None
+            self.outfit_cache_expires_at = None
+            return None
+        return self.outfit_cache_text
+
+    def _outfit_cache_set(self, text: str) -> None:
+        """写缓存。TTL 由 self.outfit_cache_ttl_seconds 决定；ttl<=0 时写但立即禁用读。"""
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return
+        self.outfit_cache_text = cleaned
+        if self.outfit_cache_ttl_seconds > 0:
+            self.outfit_cache_expires_at = (
+                time.monotonic() + self.outfit_cache_ttl_seconds
+            )
+        else:
+            self.outfit_cache_expires_at = None  # ttl<=0 时强制失活
+
+    def _outfit_cache_clear(self) -> None:
+        self.outfit_cache_text = None
+        self.outfit_cache_expires_at = None
+
+    def _resolve_outfit(self, user_prompt: str) -> tuple[str, str]:
+        """根据源 prompt 决定要追加的"服装上下文"文本，并维护缓存池。
+
+        返回 (outfit_text_for_context, source)：
+          - source ∈ {"prompt", "cache", "default", "none"}
+          - outfit_text_for_context 为空表示不需要追加任何东西。
+
+        副作用：
+          - 命中具体词 / 换装动词时，从源 prompt 抽出片段写进缓存（启动/刷新 TTL）。
+        """
+        is_specific = _has_specific_outfit(user_prompt)
+        is_change = _detect_outfit_change(user_prompt)
+
+        # 1) 命中具体词 / 换装动词 → 抽出片段写缓存，并把片段本身作为本次上下文
+        if is_specific or is_change:
+            excerpt = _extract_outfit_excerpt(user_prompt)
+            if excerpt:
+                if self.outfit_cache_ttl_seconds > 0:
+                    self._outfit_cache_set(excerpt)
+                    logger.info(
+                        f"{LOG_TAG} [outfit] 命中具体/换装 | "
+                        f"trigger={'change' if is_change else 'specific'} | "
+                        f"cached | excerpt='{excerpt[:60]}...' "
+                        f"ttl={self.outfit_cache_ttl_seconds}s"
+                    )
+                else:
+                    logger.info(
+                        f"{LOG_TAG} [outfit] 命中具体/换装但缓存被禁用 (ttl=0)"
+                    )
+                return excerpt, "prompt"
+
+        # 2) 源 prompt 模糊 → 优先用缓存（TTL 内），再回退默认服装
+        if self.outfit_cache_ttl_seconds > 0:
+            cached = self._outfit_cache_get()
+            if cached:
+                logger.debug(
+                    f"{LOG_TAG} [outfit] 使用缓存 | preview='{cached[:60]}...'"
+                )
+                return cached, "cache"
+
+        if self.default_outfit:
+            logger.debug(
+                f"{LOG_TAG} [outfit] 使用默认服装 | preview='{self.default_outfit[:60]}...'"
+            )
+            return self.default_outfit, "default"
+
+        return "", "none"
 
     async def _check_status(self) -> tuple[bool, int]:
         logger.info(f"{LOG_TAG} [status] 开始检查 {self.base_url}")
@@ -266,6 +506,138 @@ class NAIGenerateImagePlugin(Star):
             logger.warning(f"{LOG_TAG} [quota] 请求异常: {e!r}")
             return None
 
+    def _resolve_translate_provider_id(self) -> Optional[str]:
+        """根据配置和上下文，选出转译用的 provider ID。
+
+        - self.translate_provider 留空 → 取 AstrBot 当前默认 provider
+        - 自填 ID → 用 get_provider_by_id 校验；不通过则回退默认；默认也取不到则返回 None
+        """
+        chosen = (self.translate_provider or "").strip()
+        try:
+            if chosen:
+                prov = self.context.get_provider_by_id(chosen)
+                if prov:
+                    return chosen
+                logger.warning(
+                    f"{LOG_TAG} [translate] provider '{chosen}' 不存在，回退默认"
+                )
+            # 默认 provider（v4.5.7+ context.get_using_provider() 可不传 umo）
+            prov = self.context.get_using_provider()
+            if prov is not None:
+                # 用 provider 的 meta().id 作为 llm_generate 的 chat_provider_id
+                try:
+                    return prov.meta().id  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                # 兜底：部分老 provider 没有 meta()，用 provider_config.id
+                cfg = getattr(prov, "provider_config", None)
+                if cfg and isinstance(cfg, dict):
+                    return cfg.get("id")
+            return None
+        except Exception as e:
+            logger.warning(f"{LOG_TAG} [translate] 选择 provider 异常: {e!r}")
+            return None
+
+    async def _translate_prompt(self, prompt: str) -> str:
+        """如果开启转译，把自然语言 prompt 转成 SD/NAI 标签风格。
+
+        失败时原样返回 prompt，不影响主流程。
+        """
+        import re as _re
+
+        if not self.enable_translate:
+            return prompt
+        if not prompt or not prompt.strip():
+            return prompt
+
+        provider_id = self._resolve_translate_provider_id()
+        if not provider_id:
+            logger.warning(f"{LOG_TAG} [translate] 没有可用 provider，跳过转译，原样透传")
+            return prompt
+
+        logger.info(
+            f"{LOG_TAG} [translate] 开始 | provider='{provider_id}' "
+            f"in_len={len(prompt)} preview='{prompt[:60]}...'"
+        )
+
+        response = None
+        # === 优先使用 v4.5.7+ 推荐的 context.llm_generate ===
+        try:
+            llm_generate = getattr(self.context, "llm_generate", None)
+            if llm_generate is not None:
+                response = await llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=TRANSLATE_SYSTEM_PROMPT,
+                    temperature=0.4,
+                )
+        except AttributeError:
+            llm_generate = None  # 老版本 AstrBot 没有这个方法
+        except Exception as e:
+            logger.warning(
+                f"{LOG_TAG} [translate] context.llm_generate 异常: {e!r}，尝试 fallback"
+            )
+
+        # === fallback: 老版本 AstrBot 直接用 provider.text_chat ===
+        if response is None:
+            try:
+                prov = self.context.get_provider_by_id(provider_id)
+                if prov is None:
+                    logger.warning(
+                        f"{LOG_TAG} [translate] provider '{provider_id}' 不可用，原样透传"
+                    )
+                    return prompt
+                try:
+                    response = await prov.text_chat(
+                        prompt=prompt,
+                        system_prompt=TRANSLATE_SYSTEM_PROMPT,
+                        temperature=0.4,
+                    )
+                except TypeError:
+                    # 极老 provider 不接受 system_prompt
+                    response = await prov.text_chat(prompt=prompt)
+            except Exception as e:
+                logger.warning(
+                    f"{LOG_TAG} [translate] 调用 provider 异常: {e!r}，原样透传"
+                )
+                return prompt
+
+        translated = ""
+        if response is not None:
+            translated = getattr(response, "completion_text", "") or ""
+            if not translated and hasattr(response, "result_chain") and response.result_chain:
+                buf = []
+                for comp in response.result_chain:
+                    txt = getattr(comp, "text", None)
+                    if txt:
+                        buf.append(txt)
+                translated = "".join(buf)
+
+        # 清理可能残留的 markdown 围栏 / 引号
+        translated = translated.strip().strip("\"'` ")
+        if translated.startswith("```"):
+            translated = _re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", translated)
+            translated = translated.rstrip("`").strip()
+        # 把多行合并为单行（标签风格不应换行）
+        translated = " ".join(translated.split())
+        # 去掉可能的前缀废话，比如 "Output:" / "翻译结果：" / "Here is the translation:"
+        translated = _re.sub(
+            r"^\s*(Output|输出|翻译结果|Here is the translation)[^:：]*[:：]\s*",
+            "",
+            translated,
+            flags=_re.IGNORECASE,
+        )
+
+        if not translated:
+            logger.warning(f"{LOG_TAG} [translate] provider 返回空内容，原样透传")
+            return prompt
+
+        logger.info(
+            f"{LOG_TAG} [translate] 完成 | out_len={len(translated)} "
+            f"preview='{translated[:60]}...'"
+        )
+        return translated
+
     async def _generate_one(
         self, prompt: str, style: str, size: str
     ) -> tuple[Optional[bytes], str]:
@@ -283,15 +655,36 @@ class NAIGenerateImagePlugin(Star):
         if not self._session:
             logger.warning(f"{LOG_TAG} [generate] 跳过：session 未初始化")
             return None, "no_session"
+
+        # 0) Outfit 缓存池：根据源 prompt 决定要不要补一段"服装上下文"，
+        #    并可能向缓存写入新的服装片段（启动 / 刷新 TTL）。
+        outfit_ctx, outfit_source = self._resolve_outfit(prompt)
+        if outfit_ctx:
+            effective_prompt = (
+                f"{prompt.rstrip()}\n\n"
+                f"[延续上文穿搭或当前默认服装] {outfit_ctx}"
+            )
+        else:
+            effective_prompt = prompt
+
+        # 1) 可选：把自然语言 prompt 转译为 SD/NAI 标签风格
+        translated_prompt = await self._translate_prompt(effective_prompt)
+        # 2) 与预设模板合并
+        full_prompt = self._build_full_prompt(translated_prompt)
+
         artists = self._resolve_artists(style)
         from urllib.parse import quote
 
-        full_prompt = self._build_full_prompt(prompt)
         logger.info(
             f"{LOG_TAG} [generate] 开始 | style={style} size={size} | "
+            f"translate={'ON' if self.enable_translate else 'OFF'} | "
+            f"outfit={outfit_source if outfit_ctx else 'none'} | "
             f"prompt(原始)='{prompt[:60]}...' "
+            f"prompt(转译后)='{translated_prompt[:60]}...' "
             f"prompt(模板后,前60字)='{full_prompt[:60]}...'"
         )
+        logger.debug(f"{LOG_TAG} [generate] effective_prompt = {effective_prompt!r}")
+        logger.debug(f"{LOG_TAG} [generate] translated_prompt(完整) = {translated_prompt!r}")
         logger.debug(f"{LOG_TAG} [generate] full_prompt(完整) = {full_prompt!r}")
         logger.debug(f"{LOG_TAG} [generate] artists = {artists!r}")
 
@@ -650,11 +1043,34 @@ class NAIGenerateImagePlugin(Star):
         sender = event.get_sender_id() if hasattr(event, "get_sender_id") else "?"
         logger.info(f"{LOG_TAG} [cmd:imgstatus] 收到指令 | sender={sender}")
         yield event.plain_result("正在检查生图服务...")
+
+        # 1) 本地 8765 代理是否在线 —— 关系到陪伴插件能不能调通
+        proxy_ok = False
+        proxy_msg = ""
+        try:
+            if not self._session:
+                proxy_msg = "（aiohttp session 未初始化）"
+            else:
+                async with self._session.get(
+                    f"http://{PROXY_HOST}:{self.proxy_port}/v1/proxy_status",
+                    timeout=aiohttp.ClientTimeout(total=3),
+                ) as r:
+                    proxy_ok = r.status == 200
+        except Exception as e:
+            proxy_msg = f"（{type(e).__name__}）"
+
+        # 2) 上游 nai.sta1n.cn 可达性
         ok, latency = await self._check_status()
+
+        lines = []
+        lines.append(
+            f"本地代理 127.0.0.1:{self.proxy_port}: {'✅ 在线' if proxy_ok else '❌ 离线'} {proxy_msg}"
+        )
         if ok:
-            yield event.plain_result(f"生图服务可用，延迟约 {latency}ms")
+            lines.append(f"上游 {self.base_url}: ✅ 延迟约 {latency}ms")
         else:
-            yield event.plain_result("生图服务不可用，请稍后重试。")
+            lines.append(f"上游 {self.base_url}: ❌ 不可用")
+        yield event.plain_result("\n".join(lines))
 
     @filter.on_decorating_result()
     async def auto_generate_for_companion(self, event: AstrMessageEvent):
