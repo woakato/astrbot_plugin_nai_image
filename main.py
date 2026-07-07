@@ -1028,7 +1028,7 @@ class NAIGenerateImagePlugin(Star):
 
     @filter.llm_tool()
     async def NAI_Generate_Image(self, event: AstrMessageEvent, prompt: str, style: str, size_cn: str) -> MessageEventResult:
-        '''用NovelAI生成1张图片。
+        '''用NovelAI生成1张图片，并保存到本地。若要将其发送给用户，请使用send_message_to_user工具。
 
         Args:
             prompt(string): 生成图片的提示词，请使用NovelAI的提示词格式，这是一种标签化而非自然语言的描述方式，标签之间用英文逗号隔开。        
@@ -1071,7 +1071,6 @@ class NAIGenerateImagePlugin(Star):
         first_reason: Optional[str] = None
         #开始原生成循环
         logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生成第 1/1 张")
-        self._sendMessage(event, "[正在调用api生成图片]")
         img_bytes, reason = await self._generate_one(prompt, style, size)
         if img_bytes:
             success += 1
@@ -1117,17 +1116,12 @@ class NAIGenerateImagePlugin(Star):
             )
             save_path = save_dir / name
             save_path.write_bytes(img_bytes)
-            yield "图片保存成功！本地路径："+str(save_path)
+            yield "图片保存成功！本地路径：..\\..\\..\\"+str(save_path)
         except Exception as e:
             logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image:save] 保存图片失败: {e}")
             return 
         return
     
-    async def _sendMessage(self, event: AstrMessageEvent, text: str):
-        umo = event.unified_msg_origin
-        message_chain = MessageChain().message(str)
-        await self.context.send_message(event.unified_msg_origin, message_chain)
-
     @filter.command("quota")
     async def quota(self, event: AstrMessageEvent):
         sender = event.get_sender_id() if hasattr(event, "get_sender_id") else "?"
