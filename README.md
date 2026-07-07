@@ -21,6 +21,40 @@
 插件管理面板填写 `image_gen_key`（必填）及其他高级参数。
 详细配置项见 `_conf_schema.json`。
 
+### 提示词转译中间层
+
+可选开启一个 LLM 中间模型，在把 prompt 拼到预设之前先把自然语言描述翻译成 SD / NAI 标签风格。
+
+- `enable_translate`：`true` 开启，`false` 关闭（默认关闭）
+- `translate_provider`：通过 WebUI 的 provider 下拉选择器选择，留空则使用 AstrBot 默认 provider
+
+强烈建议选用轻量便宜的小模型，转译耗时通常在 1 秒内。转译失败 / provider 不可用时会自动回退原文，不影响出图主流程。
+
+### 服装缓存池（Outfit Cache）
+
+很多角色在"今天穿了什么"在一天内是固定的，但是角色在一天内也会换装，cosplay等等。  
+- `本插件新增缓存池，缓存池机制，能记录bot换过什么服装并在缓存时间内替换默认服装并保持。  
+
+**行为流程：**
+
+```
+源 prompt 进来
+  ↓
+_resolve_outfit(prompt):
+  ├─ 命中具体词（如 连衣裙/汉服/JK）或换装动词（如 换上/今天穿）
+  │   ├─ 抽出片段写到缓存（启动 / 刷新 TTL）
+  │   └─ 把片段作为 "延续上文穿搭或当前默认服装" 上下文，拼到 prompt 尾部
+  ├─ 源 prompt 模糊 → 优先用缓存（TTL 内），回退默认服装
+  └─ 啥都没 → no-op
+  ↓
+effective_prompt（可能含服装上下文后缀）
+  ↓
+转译 LLM 一起翻译成 SD tags
+  ↓
+preset + tag → nai.sta1n.cn
+```
+
+
 ## 联动插件：astrbot_plugin_private_companion（我会永远陪着你）
 
 本插件可以作为 [`astrbot_plugin_private_companion`](https://github.com/menglimi/astrbot_plugin_private_companion) （"我会永远陪着你"）的联动后端使用。插件启动后会在 `127.0.0.1:8765` 起一个 **OpenAI Images API 兼容** 的本地代理，让陪伴插件把生图请求转发到这里，由 nai.sta1n.cn 完成实际生图。
