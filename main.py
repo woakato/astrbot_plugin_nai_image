@@ -296,6 +296,9 @@ class NAIGenerateImagePlugin(Star):
         self.outfit_cache_text: Optional[str] = None
         self.outfit_cache_expires_at: Optional[float] = None
 
+        #读取配置是否启用自主生图工具
+        self.enable_llm_tool: bool = bool(config.get("enable_llm_tool", False))
+
         logger.info(
             f"{LOG_TAG} [init] 配置加载完成 | "
             f"token={'已配置' if self.image_gen_key else '未配置'} | "
@@ -1035,6 +1038,11 @@ class NAIGenerateImagePlugin(Star):
             style(string): 描述生成图片的风格。可选：vertical / comicDoujin / r18 / lolita25d / anime / galgame / custom
             size_cn(string): 描述生成图片的纵横比。可选：竖图 / 横图 / 方图。
         '''
+        if not self.enable_llm_tool:
+            logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生图工具已禁用，请在插件设置中开启 enable_llm_tool")
+            yield "生图工具已被管理员禁用，请在插件设置中开启 enable_llm_tool"
+            return
+
         logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 调用NAI_Generate_Image, 参数： prompt: {prompt}, style: {style}, size_cn:{size_cn}")
         if not prompt:
             logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] prompt 为空")
@@ -1067,13 +1075,13 @@ class NAIGenerateImagePlugin(Star):
             f"提示词: {prompt}\n风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，共 1 张"
         )
 
-        success = 0
+        success = False
         first_reason: Optional[str] = None
         #开始原生成循环
         logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生成第 1/1 张")
         img_bytes, reason = await self._generate_one(prompt, style, size)
         if img_bytes:
-            success += 1
+            success = True
             logger.info(
                 f"{LOG_TAG} [tool:NAI_Generate_Image] 图片发送 | bytes={len(img_bytes)}"
             )
@@ -1092,7 +1100,7 @@ class NAIGenerateImagePlugin(Star):
             yield event.plain_result(f"生成失败：{_format_generate_error(reason)}")
             return
         
-        if success == 0:
+        if not success:
             logger.error(
                 f"{LOG_TAG} [tool:NAI_Generate_Image] 失败 | first_reason={first_reason}"
             )
