@@ -243,7 +243,7 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "1.0.0")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "1.3.0")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context, config)
