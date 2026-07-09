@@ -16,6 +16,10 @@
 风格：`vertical` / `comicDoujin` / `r18` / `lolita25d` / `anime` / `galgame` / `custom`
 尺寸：`竖图` / `横图` / `方图`
 
+## 工具
+
+`NAI_generate_image`：参数与 `/image` 命令相同，调用NAI生成图片并保存到本地，输出文件路径。
+
 ## 配置
 
 插件管理面板填写 `image_gen_key`（必填）及其他高级参数。

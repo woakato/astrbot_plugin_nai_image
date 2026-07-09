@@ -115,5 +115,11 @@
         "description": "选择提示词转译的模型供应商（留空选择默认模型）",
         "hint": "从 AstrBot 已配置的 provider 中选一个。留空时使用 AstrBot 的默认 provider。建议选择便宜/快速的小模型。",
         "_special": "select_provider"
+    },
+    "enable_llm_tool": {
+        "type": "bool",
+        "default": false,
+        "description": "是否启用 NAI_generate_image LLM 工具",
+        "hint": "关闭后 LLM agent 无法调用此工具。开启允许 LLM 自主决定生图时机，"
     }
 }

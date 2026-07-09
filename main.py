@@ -6,7 +6,7 @@ from typing import Optional
 import aiohttp
 from aiohttp import web
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, filter, MessageEventResult, MessageChain
 from astrbot.api.message_components import Image as Img, Plain
 from astrbot.api.star import Context, Star, register
 
@@ -243,7 +243,7 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "1.0.0")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "1.3.0")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context, config)
@@ -295,6 +295,9 @@ class NAIGenerateImagePlugin(Star):
         # 单槽位 outfit 缓存：纯内存，重载插件即清空。
         self.outfit_cache_text: Optional[str] = None
         self.outfit_cache_expires_at: Optional[float] = None
+
+        #读取配置是否启用自主生图工具
+        self.enable_llm_tool: bool = bool(config.get("enable_llm_tool", False))
 
         logger.info(
             f"{LOG_TAG} [init] 配置加载完成 | "
@@ -1021,6 +1024,112 @@ class NAIGenerateImagePlugin(Star):
         else:
             logger.info(f"{LOG_TAG} [cmd:image] 完成 | 成功 {success}/{n}")
 
+
+    '''
+    提供tool让llm可以自主决定生成图片。为了防止暴走，每次只能生成1张。
+    '''
+
+    @filter.llm_tool()
+    async def NAI_Generate_Image(self, event: AstrMessageEvent, prompt: str, style: str, size_cn: str) -> MessageEventResult:
+        '''用NovelAI生成1张图片，并保存到本地。若要将其发送给用户，请使用send_message_to_user工具。
+
+        Args:
+            prompt(string): 生成图片的提示词，请使用NovelAI的提示词格式，这是一种标签化而非自然语言的描述方式，标签之间用英文逗号隔开。        
+            style(string): 描述生成图片的风格。可选：vertical / comicDoujin / r18 / lolita25d / anime / galgame / custom
+            size_cn(string): 描述生成图片的纵横比。可选：竖图 / 横图 / 方图。
+        '''
+        if not self.enable_llm_tool:
+            logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生图工具已禁用，请在插件设置中开启 enable_llm_tool")
+            yield "生图工具已被管理员禁用，请在插件设置中开启 enable_llm_tool"
+            return
+
+        logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 调用NAI_Generate_Image, 参数： prompt: {prompt}, style: {style}, size_cn:{size_cn}")
+        if not prompt:
+            logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] prompt 为空")
+            yield "生成失败，提示词不应为空"
+            return
+
+        if not self.image_gen_key:
+            logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] token 未配置")
+            yield "生成失败，未配置 image_gen_key，请告知用户先在插件配置中填写 token。"
+            return
+        
+        if style not in IMAGE_STYLES and style != "custom":
+            logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 未知风格: {style}")
+            yield f"未知风格: {style}\n可选: {', '.join(IMAGE_STYLES.keys())}"
+            return
+        
+        if size_cn not in IMAGE_SIZES:
+            logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 未知尺寸: {size_cn}")
+            yield f"未知尺寸: {size_cn}\n可选: {', '.join(IMAGE_SIZES.keys())}"
+            return
+        
+        size = self._resolve_size(size_cn)
+
+        logger.info(
+            f"{LOG_TAG} [NAI_Generate_Image:image] 最终参数 | style={style} size_cn={size_cn} "
+            f"size_eng={size} n = 1"
+        )
+
+        yield event.plain_result(
+            f"提示词: {prompt}\n风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，共 1 张"
+        )
+
+        success = False
+        first_reason: Optional[str] = None
+        #开始原生成循环
+        logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生成第 1/1 张")
+        img_bytes, reason = await self._generate_one(prompt, style, size)
+        if img_bytes:
+            success = True
+            logger.info(
+                f"{LOG_TAG} [tool:NAI_Generate_Image] 图片发送 | bytes={len(img_bytes)}"
+            )
+            yield event.chain_result(
+                [
+                    Plain(f"[图片已生成]"),
+                    Img.fromBytes(img_bytes),
+                ]
+            )
+        else:
+            if first_reason is None:
+                first_reason = reason
+            logger.warning(
+                f"{LOG_TAG} [tool:NAI_Generate_Image] 失败 | reason={reason}"
+            )
+            yield event.plain_result(f"生成失败：{_format_generate_error(reason)}")
+            return
+        
+        if not success:
+            logger.error(
+                f"{LOG_TAG} [tool:NAI_Generate_Image] 失败 | first_reason={first_reason}"
+            )
+            yield f"图片生成失败。\n{_format_generate_error(first_reason or 'unknown')}"
+            return
+        else:
+            logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 完成 | 成功")
+        
+        #保存生成的图片到文件
+        try:
+            import hashlib
+            from datetime import datetime
+            from pathlib import Path
+
+            save_dir = Path("./data/NAI_tool_generated_images")
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            name = (
+                f"NAI_generated_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                f"_{hashlib.md5(prompt.encode()).hexdigest()[:8]}.jpg"
+            )
+            save_path = save_dir / name
+            save_path.write_bytes(img_bytes)
+            yield "图片保存成功！本地路径：..\\..\\..\\"+str(save_path)
+        except Exception as e:
+            logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image:save] 保存图片失败: {e}")
+            return 
+        return
+    
     @filter.command("quota")
     async def quota(self, event: AstrMessageEvent):
         sender = event.get_sender_id() if hasattr(event, "get_sender_id") else "?"

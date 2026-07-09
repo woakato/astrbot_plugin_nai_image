@@ -1,6 +1,6 @@
 name: astrbot_plugin_nai_image
 display_name: NAI生图
 desc: 基于 nai.sta1n.cn 的 NovelAI 生图插件。
-version: v1.2.0
+version: v1.3.0
 author: 缪缪的小水泡
 repo: https://github.com/woakato/astrbot_plugin_nai_image
