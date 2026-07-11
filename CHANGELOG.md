@@ -3,6 +3,23 @@
 
 ---
 
+## v1.3.1 (2026-07-12)
+
+### Bug 修复
+
+- **修复热重载后 `on_decorating_result` 钩子报错**：删除了空实现的 `auto_generate_for_companion` 方法，该方法注册了消息发送前钩子但什么都不做，在插件热重载时可能触发 AstrBot 框架的 `functools.partial` 叠加 bug，导致 `takes 2 positional arguments but 3 were given` 报错
+- **修复 `_check_status` 误判上游可用性**：之前只要 HTTP 请求不抛异常就判定"可用"，不检查状态码。现在 404/503 等非 200 状态码会正确判定为"不可用"
+- **修复代理接口 `n` 参数缺少异常防护**：客户端传非法值（如 `"n": "abc"`）时不再抛 500，而是回退到默认值 1
+- **修复 debug 日志泄露明文 token**：`_generate_one` 中打印请求 URL 时，token 会被替换为 `***`，避免用户开 debug 排障时密钥泄露到日志文件
+
+### 代码清理
+
+- 删除从未被调用的死代码 `_save_companion_image` 方法
+- 移除方法内部重复的 `from urllib.parse import quote`，统一提到文件顶部
+- 移除 `initialize` 循环体内多余的 `import asyncio as _asyncio`，直接使用顶部已导入的 `asyncio`
+
+---
+
 ## v1.3.0 (2026-07-09)
 
 新增工具：`NAI_Generate_Image`.  

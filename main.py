@@ -2,6 +2,7 @@ import asyncio
 import base64
 import time
 from typing import Optional
+from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
@@ -243,7 +244,7 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "1.3.0")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "1.3.1")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context, config)
@@ -343,8 +344,7 @@ class NAIGenerateImagePlugin(Star):
                     f"{LOG_TAG} [initialize] 代理启动失败 attempt={attempt}/3: {e!r}"
                 )
                 if attempt < 3:
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(1.0)
+                    await asyncio.sleep(1.0)
         if last_err is not None:
             logger.error(
                 f"{LOG_TAG} [initialize] 代理服务器最终启动失败，端口 {PROXY_HOST}:{self.proxy_port} "
@@ -472,6 +472,11 @@ class NAIGenerateImagePlugin(Star):
                 self.base_url, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 latency = int((time.perf_counter() - start) * 1000)
+                if resp.status != 200:
+                    logger.warning(
+                        f"{LOG_TAG} [status] 不可用 | status={resp.status} latency={latency}ms"
+                    )
+                    return False, latency
                 logger.info(
                     f"{LOG_TAG} [status] 可用 | status={resp.status} latency={latency}ms"
                 )
@@ -676,7 +681,6 @@ class NAIGenerateImagePlugin(Star):
         full_prompt = self._build_full_prompt(translated_prompt)
 
         artists = self._resolve_artists(style)
-        from urllib.parse import quote
 
         logger.info(
             f"{LOG_TAG} [generate] 开始 | style={style} size={size} | "
@@ -706,7 +710,9 @@ class NAIGenerateImagePlugin(Star):
             f"&nocache=0"
             f"&noise_schedule={self.noise_schedule}"
         )
-        logger.debug(f"{LOG_TAG} [generate] request url = {url}")
+        # 脱敏：日志中不输出完整 URL（含明文 token）
+        safe_url = url.replace(f"&token={self.image_gen_key}", "&token=***")
+        logger.debug(f"{LOG_TAG} [generate] request url = {safe_url}")
 
         start = time.perf_counter()
         try:
@@ -814,7 +820,10 @@ class NAIGenerateImagePlugin(Star):
                 status=400,
             )
         size = body.get("size") or "1024x1024"
-        n = max(1, min(4, int(body.get("n") or 1)))
+        try:
+            n = max(1, min(4, int(body.get("n") or 1)))
+        except (TypeError, ValueError):
+            n = 1
         logger.info(
             f"{LOG_TAG} [proxy:gen] 参数 | prompt='{prompt[:80]}' size={size} n={n}"
         )
@@ -1180,28 +1189,3 @@ class NAIGenerateImagePlugin(Star):
         else:
             lines.append(f"上游 {self.base_url}: ❌ 不可用")
         yield event.plain_result("\n".join(lines))
-
-    @filter.on_decorating_result()
-    async def auto_generate_for_companion(self, event: AstrMessageEvent):
-        logger.debug(f"{LOG_TAG} [hook:on_decorating_result] 进入 (空实现)")
-        return
-
-    def _save_companion_image(self, img_bytes: bytes, prompt: str) -> Optional[str]:
-        try:
-            import hashlib
-            from datetime import datetime
-            from pathlib import Path
-
-            save_dir = Path("./data/companion_images")
-            save_dir.mkdir(parents=True, exist_ok=True)
-
-            name = (
-                f"companion_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                f"_{hashlib.md5(prompt.encode()).hexdigest()[:8]}.jpg"
-            )
-            save_path = save_dir / name
-            save_path.write_bytes(img_bytes)
-            return str(save_path)
-        except Exception as e:
-            logger.warning(f"{LOG_TAG} [companion:save] 保存图片失败: {e}")
-            return None
