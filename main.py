@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import time
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote
 
 import aiohttp
@@ -10,12 +10,23 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter, MessageEventResult, MessageChain
 from astrbot.api.message_components import Image as Img, Plain
 from astrbot.api.star import Context, Star, register
+from astrbot.api.web import error_response, json_response, request as web_request
 
 LOG_TAG = "[NAI-Image]"
 
 IMAGE_GEN_BASE_URL_DEFAULT = "https://nai.sta1n.cn"
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8765
+PLUGIN_NAME = "astrbot_plugin_nai_image"
+PAGE_API_PREFIX = f"/{PLUGIN_NAME}/test_panel"
+
+# ==== 试用生成（代码内 XOR 混淆方案）====
+# XOR 解密密钥（不是试用密钥本身）
+_TRIAL_OBF_KEY = b"nai_plugin_trial_2024_obf_key"
+# XOR 加密后的试用密钥（base64 编码）——用 scripts/generate_trial_key.py 生成
+# 非明文存储；需轮换时重新生成并发布新版插件
+_TRIAL_KEY_ENC = "PTUobj5BRjBcWz0aX1kSDhxofAp6AApbUjIuPCw2"
+TRIAL_MAX_USES = 3
 
 # 自然语言 → SD/NAI 标签风格提示词 的转译系统提示
 TRANSLATE_SYSTEM_PROMPT = (
@@ -244,7 +255,7 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "1.3.1")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.0.0")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context, config)
@@ -262,17 +273,17 @@ class NAIGenerateImagePlugin(Star):
         self.custom_artists: str = config.get("custom_artists") or ""
         self.model: str = config.get("model") or "nai-diffusion-4-5-full"
         try:
-            self.steps: int = int(config.get("steps") or 40)
+            self.steps: int = int(config.get("steps") or 24)
         except (TypeError, ValueError):
-            self.steps = 40
+            self.steps = 24
         try:
             self.scale: int = int(config.get("scale") or 6)
         except (TypeError, ValueError):
             self.scale = 6
         try:
-            self.cfg_value: int = int(config.get("cfg") or 0)
+            self.cfg_value: int = int(config.get("cfg") or 7)
         except (TypeError, ValueError):
-            self.cfg_value = 0
+            self.cfg_value = 7
         self.sampler: str = config.get("sampler") or "k_dpmpp_2m_sde"
         self.noise_schedule: str = config.get("noise_schedule") or "karras"
         neg = config.get("negative")
@@ -299,6 +310,11 @@ class NAIGenerateImagePlugin(Star):
 
         #读取配置是否启用自主生图工具
         self.enable_llm_tool: bool = bool(config.get("enable_llm_tool", False))
+
+        # ==== 试用生成状态 ====
+        self._trial_key: Optional[str] = None       # 代码内解密，仅存内存
+        self._trial_usage_count: int = 0             # 本地文件追踪
+        self._trial_usage_file: Optional[str] = None
 
         logger.info(
             f"{LOG_TAG} [init] 配置加载完成 | "
@@ -351,9 +367,36 @@ class NAIGenerateImagePlugin(Star):
                 f"不可用 —— 上游 healthcheck 会走 nai.sta1n.cn, 不会被本地 8765 错误掩盖。last_err={last_err!r}"
             )
 
+        # 3) 注册测试面板 Web API（路由需带插件名前缀才能被 Bridge SDK 匹配）
+        try:
+            self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/config", self._test_panel_get_config, ["GET"],
+                "NAI 测试面板：获取当前配置",
+            )
+            self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/generate", self._test_panel_generate, ["POST"],
+                "NAI 测试面板：生图测试",
+            )
+            self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/trial_status", self._test_panel_trial_status, ["GET"],
+                "NAI 测试面板：试用状态",
+            )
+            self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/trial_generate", self._test_panel_trial_generate, ["POST"],
+                "NAI 测试面板：试用生图",
+            )
+            logger.info(f"{LOG_TAG} [initialize] 测试面板 Web API 已注册 | prefix={PAGE_API_PREFIX}")
+        except Exception as e:
+            logger.warning(f"{LOG_TAG} [initialize] 注册测试面板 Web API 失败: {e!r}")
+
+        # 4) 试用生成：解密代码内混淆密钥 + 加载本地试用次数
+        await self._init_trial_feature()
+
         logger.info(
             f"{LOG_TAG} [initialize] 阶段完成 | token={'OK' if self.image_gen_key else 'MISSING'} | "
-            f"proxy={'UP' if self.proxy_runner else 'DOWN'}"
+            f"proxy={'UP' if self.proxy_runner else 'DOWN'} | "
+            f"trial_key={'OK' if self._trial_key else 'N/A'} "
+            f"trial_used={self._trial_usage_count}/{TRIAL_MAX_USES}"
         )
 
     async def terminate(self):
@@ -460,6 +503,382 @@ class NAIGenerateImagePlugin(Star):
             return self.default_outfit, "default"
 
         return "", "none"
+
+    async def _generate_one_custom(
+        self,
+        prompt: str,
+        style: str,
+        size: str,
+        *,
+        steps: Optional[int] = None,
+        scale: Optional[int] = None,
+        cfg: Optional[int] = None,
+        sampler: Optional[str] = None,
+        noise_schedule: Optional[str] = None,
+        negative: Optional[str] = None,
+        model: Optional[str] = None,
+        custom_artists: Optional[str] = None,
+        character_preset: Optional[str] = None,
+        enable_template: Optional[bool] = None,
+        enable_translate: Optional[bool] = None,
+        token_override: Optional[str] = None,
+    ) -> tuple[Optional[bytes], str]:
+        """生成单张图片（全参数可覆盖版本，供测试面板使用）。
+
+        所有可选参数留 None 时使用插件默认配置。
+        token_override 非空时用其代替 self.image_gen_key（试用生成）。
+        """
+        _token = token_override or self.image_gen_key
+        if not _token:
+            return None, "no_token"
+        if not self._session:
+            return None, "no_session"
+
+        # 解析参数覆盖
+        _steps = steps if steps is not None else self.steps
+        _scale = scale if scale is not None else self.scale
+        _cfg = cfg if cfg is not None else self.cfg_value
+        _sampler = sampler if sampler is not None else self.sampler
+        _noise = noise_schedule if noise_schedule is not None else self.noise_schedule
+        _negative = negative if negative is not None else self.negative
+        _model = model if model is not None else self.model
+        _enable_template = enable_template if enable_template is not None else self.enable_template
+        _enable_translate = enable_translate if enable_translate is not None else self.enable_translate
+
+        # artists 解析
+        if style == "custom":
+            _artists = custom_artists if custom_artists is not None else self.custom_artists
+            if not _artists:
+                _artists = DEFAULT_ARTISTS.get("vertical", "")
+        else:
+            _artists = DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
+
+        # character_preset
+        _char_preset = character_preset if character_preset is not None else self.character_preset
+
+        # 1) 可选转译：先翻译原始 prompt
+        if _enable_translate:
+            translated = await self._translate_prompt(prompt.strip())
+            base_prompt = translated
+        else:
+            base_prompt = prompt.strip()
+
+        # 2) 与角色预设模板合并
+        if _enable_template and _char_preset:
+            full_prompt = f"{_char_preset}, {base_prompt}"
+        else:
+            full_prompt = base_prompt
+
+        logger.info(
+            f"{LOG_TAG} [generate:custom] style={style} size={size} "
+            f"steps={_steps} scale={_scale} cfg={_cfg} sampler={_sampler} "
+            f"model={_model} prompt='{full_prompt[:60]}...'"
+        )
+
+        url = (
+            f"{self.base_url.rstrip('/')}/generate"
+            f"?tag={quote(full_prompt)}"
+            f"&token={_token}"
+            f"&model={_model}"
+            f"&artist={quote(_artists)}"
+            f"&size={size}"
+            f"&steps={_steps}"
+            f"&scale={_scale}"
+            f"&cfg={_cfg}"
+            f"&sampler={_sampler}"
+            f"&negative={quote(_negative)}"
+            f"&nocache=0"
+            f"&noise_schedule={_noise}"
+        )
+
+        try:
+            async with self._session.get(
+                url, timeout=aiohttp.ClientTimeout(total=180)
+            ) as resp:
+                if resp.status != 200:
+                    if 400 <= resp.status < 500:
+                        reason = "http_4xx"
+                    elif 500 <= resp.status < 600:
+                        reason = "http_5xx"
+                    else:
+                        reason = "http_other"
+                    return None, reason
+                img_bytes = await resp.read()
+                if not img_bytes:
+                    return None, "empty_response"
+                return img_bytes, "ok"
+        except asyncio.TimeoutError:
+            return None, "timeout"
+        except Exception:
+            return None, "exception"
+
+    # ==== 试用生成：代码内 XOR 混淆方案 ====
+
+    @staticmethod
+    def _decrypt_trial_key(encrypted_b64: str) -> str:
+        """XOR 解密代码内混淆的试用密钥。"""
+        encrypted = base64.b64decode(encrypted_b64.strip())
+        key_len = len(_TRIAL_OBF_KEY)
+        decrypted = bytes(
+            encrypted[i] ^ _TRIAL_OBF_KEY[i % key_len]
+            for i in range(len(encrypted))
+        )
+        return decrypted.decode("utf-8").rstrip("\x00").strip()
+
+    async def _init_trial_feature(self) -> None:
+        """初始化试用功能：解密代码内混淆密钥 + 加载本地试用次数。"""
+        import json
+        from pathlib import Path
+
+        # 1) 解密代码内混淆密钥（无网络依赖）
+        if _TRIAL_KEY_ENC:
+            try:
+                self._trial_key = self._decrypt_trial_key(_TRIAL_KEY_ENC)
+                logger.info(f"{LOG_TAG} [trial] 试用密钥解密成功")
+            except Exception as e:
+                logger.warning(f"{LOG_TAG} [trial] 试用密钥解密失败: {e!r}")
+        else:
+            logger.info(f"{LOG_TAG} [trial] 未配置试用密钥（_TRIAL_KEY_ENC 为空）")
+
+        # 2) 加载本地试用次数
+        try:
+            trial_dir = Path("data") / PLUGIN_NAME
+            trial_dir.mkdir(parents=True, exist_ok=True)
+            trial_file = trial_dir / "trial_usage.json"
+            self._trial_usage_file = str(trial_file)
+            if trial_file.exists():
+                data = json.loads(trial_file.read_text(encoding="utf-8"))
+                self._trial_usage_count = int(data.get("count", 0))
+                logger.info(f"{LOG_TAG} [trial] 本地试用次数: {self._trial_usage_count}/{TRIAL_MAX_USES}")
+            else:
+                logger.info(f"{LOG_TAG} [trial] 无本地试用记录，从 0 开始")
+        except Exception as e:
+            logger.warning(f"{LOG_TAG} [trial] 加载试用次数异常: {e!r}")
+
+    def _save_trial_usage(self) -> None:
+        """持久化试用次数到本地文件。"""
+        import json
+        from pathlib import Path
+
+        if not self._trial_usage_file:
+            return
+        try:
+            Path(self._trial_usage_file).write_text(
+                json.dumps({"count": self._trial_usage_count}),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(f"{LOG_TAG} [trial] 保存试用次数异常: {e!r}")
+
+    async def _test_panel_trial_status(self) -> Any:
+        """Web API: 返回试用生成状态。"""
+        return json_response({
+            "available": bool(self._trial_key) and self._trial_usage_count < TRIAL_MAX_USES,
+            "key_loaded": bool(self._trial_key),
+            "used": self._trial_usage_count,
+            "max_uses": TRIAL_MAX_USES,
+            "remaining": max(0, TRIAL_MAX_USES - self._trial_usage_count),
+        })
+
+    async def _test_panel_trial_generate(self) -> Any:
+        """Web API: 使用试用密钥生图（每次调用 +1 次数，达上限拒绝）。"""
+        # 检查密钥
+        if not self._trial_key:
+            return json_response({
+                "status": "error",
+                "message": "试用密钥未加载，请稍后重试或联系插件作者。",
+            }, status_code=503)
+
+        # 检查次数
+        if self._trial_usage_count >= TRIAL_MAX_USES:
+            return json_response({
+                "status": "error",
+                "message": f"试用次数已达上限（{TRIAL_MAX_USES} 次）。请配置自己的密钥后使用正式生图。",
+                "reason": "trial_exhausted",
+            }, status_code=403)
+
+        # 解析请求
+        try:
+            body = await web_request.json(default={})
+        except Exception:
+            return error_response("请求体解析失败", status_code=400)
+
+        nai_prompt = (body.get("nai_prompt") or "").strip()
+        nl_prompt = (body.get("nl_prompt") or "").strip()
+        if not nai_prompt and not nl_prompt:
+            return error_response("请至少填写一个提示词框", status_code=400)
+
+        style = body.get("style") or self.image_style
+        size = body.get("size") or "portrait"
+
+        # ==== 转译 + 合并 ====
+        translated_nl = ""
+        if nl_prompt:
+            translated = await self._translate_prompt(nl_prompt)
+            translated_nl = translated if translated else nl_prompt
+
+        parts = [p for p in [nai_prompt, translated_nl] if p]
+        full_prompt = ", ".join(parts)
+
+        merge_info = {
+            "nai_prompt": nai_prompt,
+            "nl_prompt": nl_prompt,
+            "translated_nl": translated_nl,
+            "full_prompt": full_prompt,
+        }
+
+        # 试用生成固定 1 张
+        img_bytes, reason = await self._generate_one_custom(
+            full_prompt,
+            style,
+            size,
+            token_override=self._trial_key,
+            character_preset="",       # 面板独立，不合并 settings 的角色预设
+            enable_template=False,     # 面板独立，不套用 settings 的模板
+            enable_translate=False,    # 转译已在上方完成
+        )
+
+        if not img_bytes:
+            return json_response({
+                "status": "error",
+                "message": _format_generate_error(reason),
+                "reason": reason,
+            }, status_code=502)
+
+        # 成功：次数 +1 并持久化
+        self._trial_usage_count += 1
+        self._save_trial_usage()
+        logger.info(
+            f"{LOG_TAG} [trial] 试用生成成功 | "
+            f"used={self._trial_usage_count}/{TRIAL_MAX_USES}"
+        )
+
+        b64 = base64.b64encode(img_bytes).decode()
+        return json_response({
+            "status": "ok",
+            "data": [{"b64_json": b64}],
+            "merge_info": merge_info,
+            "trial_used": self._trial_usage_count,
+            "trial_remaining": max(0, TRIAL_MAX_USES - self._trial_usage_count),
+        })
+
+    async def _test_panel_get_config(self) -> Any:
+        """Web API: 返回当前插件配置（脱敏 token）。"""
+        return json_response({
+            "image_gen_key": "已配置" if self.image_gen_key else "未配置",
+            "base_url": self.base_url,
+            "image_style": self.image_style,
+            "image_size": self.image_size,
+            "image_count": self.image_count,
+            "custom_artists": self.custom_artists,
+            "model": self.model,
+            "steps": self.steps,
+            "scale": self.scale,
+            "cfg": self.cfg_value,
+            "sampler": self.sampler,
+            "noise_schedule": self.noise_schedule,
+            "negative": self.negative,
+            "enable_template": self.enable_template,
+            "character_preset": self.character_preset,
+            "default_outfit": self.default_outfit,
+            "enable_translate": self.enable_translate,
+            "translate_provider": self.translate_provider,
+            "proxy_port": self.proxy_port,
+            "image_styles_options": IMAGE_STYLES,
+            "image_size_options": IMAGE_SIZES,
+            "default_negative": DEFAULT_NEGATIVE,
+        })
+
+    async def _test_panel_generate(self) -> Any:
+        """Web API: 接收双提示词生图请求，后端转译+合并后生成，返回 base64 图片 + 合并步骤。"""
+        try:
+            body = await web_request.json(default={})
+        except Exception:
+            return error_response("请求体解析失败", status_code=400)
+
+        nai_prompt = (body.get("nai_prompt") or "").strip()
+        nl_prompt = (body.get("nl_prompt") or "").strip()
+        if not nai_prompt and not nl_prompt:
+            return error_response("请至少填写一个提示词框", status_code=400)
+
+        style = body.get("style") or self.image_style
+        size = body.get("size") or "portrait"
+
+        # 解析可选覆盖参数
+        def _opt_int(key: str) -> Optional[int]:
+            val = body.get(key)
+            if val is None or val == "":
+                return None
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
+        def _opt_str(key: str) -> Optional[str]:
+            val = body.get(key)
+            if val is None or val == "":
+                return None
+            return str(val)
+
+        try:
+            n = max(1, min(4, int(body.get("n") or 1)))
+        except (TypeError, ValueError):
+            n = 1
+
+        # ==== 转译 + 合并 ====
+        translated_nl = ""
+        if nl_prompt:
+            translated = await self._translate_prompt(nl_prompt)
+            translated_nl = translated if translated else nl_prompt
+
+        # 合并：两者都有用逗号连接，只有一方则直接用
+        parts = [p for p in [nai_prompt, translated_nl] if p]
+        full_prompt = ", ".join(parts)
+
+        merge_info = {
+            "nai_prompt": nai_prompt,
+            "nl_prompt": nl_prompt,
+            "translated_nl": translated_nl,
+            "full_prompt": full_prompt,
+        }
+
+        logger.info(
+            f"{LOG_TAG} [test_panel:generate] merge: "
+            f"nai='{nai_prompt[:40]}' nl='{nl_prompt[:40]}' "
+            f"translated='{translated_nl[:40]}' full='{full_prompt[:60]}'"
+        )
+
+        img_bytes, reason = await self._generate_one_custom(
+            full_prompt,
+            style,
+            size,
+            steps=_opt_int("steps"),
+            scale=_opt_int("scale"),
+            cfg=_opt_int("cfg"),
+            sampler=_opt_str("sampler"),
+            noise_schedule=_opt_str("noise_schedule"),
+            negative=_opt_str("negative"),
+            model=_opt_str("model"),
+            custom_artists=_opt_str("custom_artists"),
+            character_preset="",       # 面板独立，不合并 settings 的角色预设
+            enable_template=False,       # 面板独立，不套用 settings 的模板
+            enable_translate=False,      # 转译已在上方完成
+        )
+
+        if not img_bytes:
+            return json_response({
+                "status": "error",
+                "message": _format_generate_error(reason),
+                "reason": reason,
+            }, status_code=502)
+
+        b64 = base64.b64encode(img_bytes).decode()
+        return json_response({
+            "status": "ok",
+            "data": [{"b64_json": b64} for _ in range(n)],
+            "merge_info": merge_info,
+            "elapsed_info": f"{len(img_bytes)} bytes",
+        })
 
     async def _check_status(self) -> tuple[bool, int]:
         logger.info(f"{LOG_TAG} [status] 开始检查 {self.base_url}")

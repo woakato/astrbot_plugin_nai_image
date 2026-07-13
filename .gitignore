@@ -23,3 +23,6 @@ desktop.ini
 # AstrBot plugin data (运行时生成)
 data/
 *.log
+
+# Trial key encryption temp
+.trial_key_enc
