@@ -511,8 +511,8 @@ class NAIGenerateImagePlugin(Star):
         size: str,
         *,
         steps: Optional[int] = None,
-        scale: Optional[int] = None,
-        cfg: Optional[int] = None,
+        scale: Optional[float] = None,
+        cfg: Optional[float] = None,
         sampler: Optional[str] = None,
         noise_schedule: Optional[str] = None,
         negative: Optional[str] = None,
@@ -590,6 +590,9 @@ class NAIGenerateImagePlugin(Star):
             f"&nocache=0"
             f"&noise_schedule={_noise}"
         )
+        # 脱敏日志：不输出明文 token
+        safe_url = url.replace(f"&token={_token}", "&token=***")
+        logger.debug(f"{LOG_TAG} [generate:custom] request url = {safe_url}")
 
         try:
             async with self._session.get(
@@ -711,6 +714,31 @@ class NAIGenerateImagePlugin(Star):
         style = body.get("style") or self.image_style
         size = body.get("size") or "portrait"
 
+        # 解析可选覆盖参数（与正式生成一致）
+        def _opt_int(key: str) -> Optional[int]:
+            val = body.get(key)
+            if val is None or val == "":
+                return None
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
+        def _opt_float(key: str) -> Optional[float]:
+            val = body.get(key)
+            if val is None or val == "":
+                return None
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return None
+
+        def _opt_str(key: str) -> Optional[str]:
+            val = body.get(key)
+            if val is None or val == "":
+                return None
+            return str(val)
+
         # ==== 转译 + 合并 ====
         translated_nl = ""
         if nl_prompt:
@@ -727,11 +755,19 @@ class NAIGenerateImagePlugin(Star):
             "full_prompt": full_prompt,
         }
 
-        # 试用生成固定 1 张
+        # 试用生成固定 1 张，但传递面板上的所有参数
         img_bytes, reason = await self._generate_one_custom(
             full_prompt,
             style,
             size,
+            steps=_opt_int("steps"),
+            scale=_opt_float("scale"),
+            cfg=_opt_float("cfg"),
+            sampler=_opt_str("sampler"),
+            noise_schedule=_opt_str("noise_schedule"),
+            negative=_opt_str("negative"),
+            model=_opt_str("model"),
+            custom_artists=_opt_str("custom_artists"),
             token_override=self._trial_key,
             character_preset="",       # 面板独立，不合并 settings 的角色预设
             enable_template=False,     # 面板独立，不套用 settings 的模板
@@ -814,6 +850,15 @@ class NAIGenerateImagePlugin(Star):
             except (TypeError, ValueError):
                 return None
 
+        def _opt_float(key: str) -> Optional[float]:
+            val = body.get(key)
+            if val is None or val == "":
+                return None
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return None
+
         def _opt_str(key: str) -> Optional[str]:
             val = body.get(key)
             if val is None or val == "":
@@ -848,36 +893,47 @@ class NAIGenerateImagePlugin(Star):
             f"translated='{translated_nl[:40]}' full='{full_prompt[:60]}'"
         )
 
-        img_bytes, reason = await self._generate_one_custom(
-            full_prompt,
-            style,
-            size,
-            steps=_opt_int("steps"),
-            scale=_opt_int("scale"),
-            cfg=_opt_int("cfg"),
-            sampler=_opt_str("sampler"),
-            noise_schedule=_opt_str("noise_schedule"),
-            negative=_opt_str("negative"),
-            model=_opt_str("model"),
-            custom_artists=_opt_str("custom_artists"),
-            character_preset="",       # 面板独立，不合并 settings 的角色预设
-            enable_template=False,       # 面板独立，不套用 settings 的模板
-            enable_translate=False,      # 转译已在上方完成
-        )
+        # ==== 逐张生成（每张独立调用，避免复制同一张图） ====
+        images_b64: list[str] = []
+        first_reason: Optional[str] = None
+        for i in range(n):
+            logger.info(f"{LOG_TAG} [test_panel:generate] 生成第 {i + 1}/{n} 张")
+            img_bytes, reason = await self._generate_one_custom(
+                full_prompt,
+                style,
+                size,
+                steps=_opt_int("steps"),
+                scale=_opt_float("scale"),
+                cfg=_opt_float("cfg"),
+                sampler=_opt_str("sampler"),
+                noise_schedule=_opt_str("noise_schedule"),
+                negative=_opt_str("negative"),
+                model=_opt_str("model"),
+                custom_artists=_opt_str("custom_artists"),
+                character_preset="",       # 面板独立，不合并 settings 的角色预设
+                enable_template=False,       # 面板独立，不套用 settings 的模板
+                enable_translate=False,      # 转译已在上方完成
+            )
+            if img_bytes:
+                images_b64.append(base64.b64encode(img_bytes).decode())
+            else:
+                first_reason = first_reason or reason
+                logger.warning(
+                    f"{LOG_TAG} [test_panel:generate] 第 {i + 1}/{n} 张失败 | reason={reason}"
+                )
 
-        if not img_bytes:
+        if not images_b64:
             return json_response({
                 "status": "error",
-                "message": _format_generate_error(reason),
-                "reason": reason,
+                "message": _format_generate_error(first_reason or "unknown"),
+                "reason": first_reason,
             }, status_code=502)
 
-        b64 = base64.b64encode(img_bytes).decode()
         return json_response({
             "status": "ok",
-            "data": [{"b64_json": b64} for _ in range(n)],
+            "data": [{"b64_json": b64} for b64 in images_b64],
             "merge_info": merge_info,
-            "elapsed_info": f"{len(img_bytes)} bytes",
+            "elapsed_info": f"{len(images_b64)} 张",
         })
 
     async def _check_status(self) -> tuple[bool, int]:

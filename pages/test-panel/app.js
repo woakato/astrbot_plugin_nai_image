@@ -156,18 +156,21 @@
    * 构建生图请求体（双提示词版本）
    */
   function buildRequestBody() {
+    const safeInt = (v, d) => { const n = parseInt(v, 10); return Number.isNaN(n) ? d : n; };
+    const safeFloat = (v, d) => { const n = parseFloat(v); return Number.isNaN(n) ? d : n; };
+
     const body = {
       nai_prompt: els.naiPrompt.value.trim(),
       nl_prompt: els.nlPrompt.value.trim(),
       style: els.style.value,
       size: els.size.value,
       sampler: els.sampler.value,
-      steps: parseInt(els.steps.value, 10) || 24,
-      scale: parseFloat(els.scale.value) || 6,
-      cfg: parseFloat(els.cfg.value) || 7,
+      steps: safeInt(els.steps.value, 24),
+      scale: safeFloat(els.scale.value, 6),
+      cfg: safeFloat(els.cfg.value, 7),
       noise_schedule: els.noiseSchedule.value,
       model: els.model.value,
-      n: parseInt(els.count.value, 10) || 1,
+      n: safeInt(els.count.value, 1),
     };
 
     const neg = els.negative.value.trim();
