@@ -18,6 +18,17 @@
   - 试用次数通过本地文件持久化追踪，达上限后自动禁用
   - 特别感谢 [@啊·羽绒服](https://github.com/) 的免费试用额度的密钥分享
 
+### Bug 修复
+
+- **修复横图生成为竖图的问题**：API 站点 `nai.sta1n.cn` 期望接收中文尺寸值（`横图`/`竖图`/`方图`），但前端 `<option>` 传递的是英文值（`landscape`/`portrait`/`square`），且后端 `_resolve_size` 会将中文映射为英文，导致尺寸参数始终被误解。修复方案：前端 `option value` 直接使用中文值，后端移除 `_resolve_size` 映射，直接透传中文 `size` 参数并 URL 编码
+- **修复连续生图返回相同图片**：API 调用中 `nocache=0` 导致站点命中缓存，同一提示词多次生成返回同一张图。已将 `_generate_one` 和 `_generate_one_custom` 中的 `nocache` 改为 `1`，并在多图生成时循环独立调用，确保每张图独立生成
+- **修复 `scale`/`cfg` 浮点数被截断为整数**：面板参数解析使用 `int()` 导致用户输入的小数（如 `7.5`）被截断。新增 `_opt_float` 辅助函数，`scale` 和 `cfg` 正确按浮点数解析
+- **修复面板生图被 Settings 角色预设污染**：`_generate_one_custom` 在面板调用时未显式覆盖 `character_preset` 和 `enable_template`，导致 Settings 中的角色预设和模板被合并进面板生图请求。已在 `_test_panel_generate` 和 `_test_panel_trial_generate` 中显式传 `character_preset=""`、`enable_template=False`，确保面板参数纯净
+- **修复页面缓存失效（iframe sandbox 限制）**：面板嵌入在 `allow-scripts` 但无 `allow-same-origin` 的 iframe 中，`localStorage` 不可用导致缓存静默失败。改为后端 API 缓存方案，新增 `/save_cache` 和 `/load_cache` 两个端点，通过 Bridge SDK 读写持久化文件
+- **修复上游 API 错误信息不可读**：此前 API 非 200 响应只返回泛化 `http_4xx`，用户无法定位问题。现在 `_generate_one_custom` 会读取上游响应体并截取前 300 字符记录日志，`_format_generate_error` 解析并展示具体错误原因
+- **修复 `IndentationError: unexpected indent`（main.py:1536）**：`n = max(1, min(6, n))` 被误置于 `except` 块下方且多了一层缩进，导致插件导入失败。已将其移回 `try` 块内正确缩进位置
+- **修复 Bridge SDK 加载时序问题**：前端脚本执行时 `window.AstrBotPluginPage` 可能尚未就绪，新增 5 秒超时重试机制确保 SDK 初始化完成
+
 ### 变更
 
 - **默认参数调整**：`steps` 默认值从 40 改为 24，`cfg` 默认值从 0 改为 7

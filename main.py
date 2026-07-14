@@ -1531,9 +1531,9 @@ class NAIGenerateImagePlugin(Star):
 
         try:
             n = int(args["n"]) if args["n"] else self.image_count
+            n = max(1, min(6, n))
         except (TypeError, ValueError):
             n = self.image_count
-                n = max(1, min(6, n))
         style = args["style"] or self.image_style
         size_cn = args["size"] or self.image_size
         # 移除 _resolve_size 调用，直接使用中文 size_cn 值（横图/竖图/方图）发送给 API
