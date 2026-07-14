@@ -183,11 +183,12 @@ def _format_generate_error(reason: str) -> str:
         return _map[reason]
     # 前缀匹配（reason 可能带详细错误信息，如 "http_4xx (HTTP 400): ..."）
     if reason.startswith("http_4xx"):
-        return f"🚫 上游返回 4xx。常见原因：token 无效、提示词含敏感词、或参数不合法。\n{reason}"
+        return "🚫 上游返回 4xx。常见原因：token 无效、提示词含敏感词、或参数不合法。\n" + reason
     if reason.startswith("http_5xx"):
-        return f"🔥 上游返回 5xx。nai.sta1n.cn 服务器内部错误，请稍后重试。\n{reason}"
+        return "🔥 上游返回 5xx。nai.sta1n.cn 服务器内部错误，请稍后重试。\n" + reason
     if reason.startswith("http_other"):
-        return f"⚠️ 上游返回非预期状态码。\n{reason}"
+        return "⚠️ 上游返回非预期状态码。\n" + reason
+    return "❓ 生图失败（原因: " + reason + "）"
     return f"❓ 生图失败（原因: {reason}）"
 
 
