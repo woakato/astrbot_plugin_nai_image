@@ -603,7 +603,7 @@ class NAIGenerateImagePlugin(Star):
             f"&cfg={_cfg}"
             f"&sampler={_sampler}"
             f"&negative={quote(_negative)}"
-            f"&nocache=0"
+            f"&nocache=1"
             f"&noise_schedule={_noise}"
         )
         # 脱敏日志：不输出明文 token
@@ -639,6 +639,16 @@ class NAIGenerateImagePlugin(Star):
                 img_bytes = await resp.read()
                 if not img_bytes:
                     return None, "empty_response"
+                # 解析 PNG 尺寸用于日志排查
+                _w, _h = 0, 0
+                if len(img_bytes) >= 24 and img_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+                    import struct
+                    _w = struct.unpack('>I', img_bytes[16:20])[0]
+                    _h = struct.unpack('>I', img_bytes[20:24])[0]
+                logger.info(
+                    f"{LOG_TAG} [generate:custom] 成功 | size={size} "
+                    f"png={_w}x{_h} bytes={len(img_bytes)}"
+                )
                 return img_bytes, "ok"
         except asyncio.TimeoutError:
             return None, "timeout"
@@ -1251,7 +1261,7 @@ class NAIGenerateImagePlugin(Star):
             f"&cfg={self.cfg_value}"
             f"&sampler={self.sampler}"
             f"&negative={quote(self.negative)}"
-            f"&nocache=0"
+            f"&nocache=1"
             f"&noise_schedule={self.noise_schedule}"
         )
         # 脱敏：日志中不输出完整 URL（含明文 token）
