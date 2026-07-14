@@ -51,7 +51,6 @@
   // ===== 状态 =====
   let isGenerating = false;
   let lastRequestBody = null;
-  const CACHE_KEY = "nai_test_panel_v2";
 
   // ===== 工具函数 =====
   function show(el) { el.classList.remove("hidden"); }
@@ -77,7 +76,7 @@
     return window.AstrBotPluginPage;
   }
 
-  // ===== localStorage 缓存 =====
+  // ===== 面板状态缓存（通过后端 API，因为 iframe sandbox 禁用 localStorage） =====
   function getCachedFields() {
     return [
       "naiPrompt", "nlPrompt", "sampler", "size", "steps", "scale",
@@ -85,24 +84,31 @@
     ];
   }
 
+  let _saveCacheTimer = null;
   function saveCache() {
-    const data = {};
-    getCachedFields().forEach((key) => {
-      const el = els[key];
-      if (el) data[key] = el.value;
-    });
-    try {
-      localStorage.setItem(CACHE_KEY, JSON.stringify(data));
-    } catch (e) {
-      // localStorage 不可用时静默忽略
-    }
+    // 防抖：避免频繁请求
+    if (_saveCacheTimer) clearTimeout(_saveCacheTimer);
+    _saveCacheTimer = setTimeout(async () => {
+      try {
+        const data = {};
+        getCachedFields().forEach((key) => {
+          const el = els[key];
+          if (el) data[key] = el.value;
+        });
+        const bridge = await getBridge();
+        await bridge.apiPost("test_panel/save_cache", data);
+      } catch (e) {
+        console.warn("[NAI Panel] 缓存保存失败:", e);
+      }
+    }, 500);
   }
 
-  function loadCache() {
+  async function loadCache() {
     try {
-      const raw = localStorage.getItem(CACHE_KEY);
-      if (!raw) return false;
-      const data = JSON.parse(raw);
+      const bridge = await getBridge();
+      const resp = await bridge.apiGet("test_panel/load_cache");
+      const data = (resp && resp.data) ? resp.data : resp;
+      if (!data || typeof data !== "object") return false;
       let restored = false;
       getCachedFields().forEach((key) => {
         const el = els[key];
@@ -113,16 +119,13 @@
       });
       return restored;
     } catch (e) {
+      console.warn("[NAI Panel] 缓存加载失败:", e);
       return false;
     }
   }
 
   function clearCache() {
-    try {
-      localStorage.removeItem(CACHE_KEY);
-    } catch (e) {
-      // ignore
-    }
+    saveCache(); // 保存当前数据即重置
   }
 
   // ===== 加载 Token 状态（仅 badge，不填表单） =====
@@ -593,10 +596,10 @@
   // ===== 初始化 =====
   async function init() {
     bindEvents();
-    // 从 localStorage 恢复表单状态
-    loadCache();
+    // 从后端恢复面板状态
+    await loadCache();
     toggleCustomArtists();
-    // 仅加载 token 状态 badge（不填充表单）
+    // 仅加载 token 状态 badge（不填表单）
     await loadTokenStatus();
     // 加载试用状态
     await loadTrialStatus();

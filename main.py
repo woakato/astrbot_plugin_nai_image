@@ -171,16 +171,24 @@ DEFAULT_NEGATIVE = (
 
 def _format_generate_error(reason: str) -> str:
     """把 _generate_one 返回的 reason 翻译成给用户的中文报错。"""
-    return {
+    _map = {
         "no_token": "❌ 插件未配置 image_gen_key，请先在插件管理面板填入 token。",
         "no_session": "❌ 插件 session 未初始化，请重载插件。",
         "timeout": "⏱ 生图超时（超过 180 秒）。可能原因：nai.sta1n.cn 服务繁忙、提示词过长、或网络不稳。",
-        "http_4xx": "🚫 上游返回 4xx。常见原因：token 无效、提示词含敏感词、或参数不合法。",
-        "http_5xx": "🔥 上游返回 5xx。nai.sta1n.cn 服务器内部错误，请稍后重试。",
-        "http_other": "⚠️ 上游返回非预期状态码。",
         "empty_response": "📭 上游返回 200 但内容为空，可能是接口限流或临时异常。",
         "exception": "💥 生图过程发生未捕获异常，请查看 AstrBot 日志获取详情。",
-    }.get(reason, f"❓ 生图失败（原因: {reason}）")
+    }
+    # 精确匹配
+    if reason in _map:
+        return _map[reason]
+    # 前缀匹配（reason 可能带详细错误信息，如 "http_4xx (HTTP 400): ..."）
+    if reason.startswith("http_4xx"):
+        return f"🚫 上游返回 4xx。常见原因：token 无效、提示词含敏感词、或参数不合法。\n{reason}"
+    if reason.startswith("http_5xx"):
+        return f"🔥 上游返回 5xx。nai.sta1n.cn 服务器内部错误，请稍后重试。\n{reason}"
+    if reason.startswith("http_other"):
+        return f"⚠️ 上游返回非预期状态码。\n{reason}"
+    return f"❓ 生图失败（原因: {reason}）"
 
 
 def _parse_args(text: str) -> dict:
@@ -384,6 +392,14 @@ class NAIGenerateImagePlugin(Star):
             self.context.register_web_api(
                 f"{PAGE_API_PREFIX}/trial_generate", self._test_panel_trial_generate, ["POST"],
                 "NAI 测试面板：试用生图",
+            )
+            self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/save_cache", self._test_panel_save_cache, ["POST"],
+                "NAI 测试面板：保存面板缓存",
+            )
+            self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/load_cache", self._test_panel_load_cache, ["GET"],
+                "NAI 测试面板：加载面板缓存",
             )
             logger.info(f"{LOG_TAG} [initialize] 测试面板 Web API 已注册 | prefix={PAGE_API_PREFIX}")
         except Exception as e:
@@ -599,12 +615,26 @@ class NAIGenerateImagePlugin(Star):
                 url, timeout=aiohttp.ClientTimeout(total=180)
             ) as resp:
                 if resp.status != 200:
+                    # 读取上游错误正文，方便排查
+                    err_body = ""
+                    try:
+                        err_body = await resp.text()
+                    except Exception:
+                        pass
+                    logger.warning(
+                        f"{LOG_TAG} [generate:custom] 上游返回 {resp.status} | "
+                        f"size={size} body='{err_body[:300]}'"
+                    )
+                    # 将状态码和错误摘要编入 reason，让前端可见
+                    err_summary = err_body[:200].replace("\n", " ").strip() if err_body else ""
                     if 400 <= resp.status < 500:
-                        reason = "http_4xx"
+                        reason = f"http_4xx (HTTP {resp.status})"
                     elif 500 <= resp.status < 600:
-                        reason = "http_5xx"
+                        reason = f"http_5xx (HTTP {resp.status})"
                     else:
-                        reason = "http_other"
+                        reason = f"http_other (HTTP {resp.status})"
+                    if err_summary:
+                        reason = f"{reason}: {err_summary}"
                     return None, reason
                 img_bytes = await resp.read()
                 if not img_bytes:
@@ -612,7 +642,8 @@ class NAIGenerateImagePlugin(Star):
                 return img_bytes, "ok"
         except asyncio.TimeoutError:
             return None, "timeout"
-        except Exception:
+        except Exception as e:
+            logger.warning(f"{LOG_TAG} [generate:custom] 异常: {e!r}")
             return None, "exception"
 
     # ==== 试用生成：代码内 XOR 混淆方案 ====
@@ -797,6 +828,44 @@ class NAIGenerateImagePlugin(Star):
             "trial_used": self._trial_usage_count,
             "trial_remaining": max(0, TRIAL_MAX_USES - self._trial_usage_count),
         })
+
+    async def _test_panel_save_cache(self) -> Any:
+        """Web API: 保存面板状态缓存到本地文件（替代 localStorage，因为 iframe sandbox 限制）。"""
+        import json
+        from pathlib import Path
+
+        try:
+            body = await web_request.json(default={})
+        except Exception:
+            return error_response("请求体解析失败", status_code=400)
+
+        try:
+            cache_dir = Path("data") / PLUGIN_NAME
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = cache_dir / "panel_cache.json"
+            cache_file.write_text(
+                json.dumps(body, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            return json_response({"status": "ok"})
+        except Exception as e:
+            logger.warning(f"{LOG_TAG} [panel_cache] 保存失败: {e!r}")
+            return error_response(f"缓存保存失败: {e!r}", status_code=500)
+
+    async def _test_panel_load_cache(self) -> Any:
+        """Web API: 从本地文件加载面板状态缓存。"""
+        import json
+        from pathlib import Path
+
+        try:
+            cache_file = Path("data") / PLUGIN_NAME / "panel_cache.json"
+            if not cache_file.exists():
+                return json_response({"status": "ok", "data": None})
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            return json_response({"status": "ok", "data": data})
+        except Exception as e:
+            logger.warning(f"{LOG_TAG} [panel_cache] 加载失败: {e!r}")
+            return json_response({"status": "ok", "data": None})
 
     async def _test_panel_get_config(self) -> Any:
         """Web API: 返回当前插件配置（脱敏 token）。"""
