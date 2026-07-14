@@ -348,7 +348,7 @@
       lolita25d: "2.5D唯美(萝)", anime: "本子里番", galgame: "GalGame", custom: "自定义",
     };
     const sizeNames = {
-      portrait: "竖图", landscape: "横图", square: "方图",
+      "竖图": "竖图", "横图": "横图", "方图": "方图",
     };
     const metaText = `${styleNames[requestBody.style] || requestBody.style} · ${sizeNames[requestBody.size] || requestBody.size} · ${images.length}张`;
     setBadge(els.resultMeta, metaText, "badge-success");
@@ -429,7 +429,7 @@
     els.noiseSchedule.value = "karras";
     els.model.value = "nai-diffusion-4-5-full";
     els.style.value = "vertical";
-    els.size.value = "portrait";
+    els.size.value = "竖图";
     els.count.value = "1";
     els.negative.value = "";
     els.customArtists.value = "";

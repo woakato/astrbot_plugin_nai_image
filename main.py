@@ -597,7 +597,7 @@ class NAIGenerateImagePlugin(Star):
             f"&token={_token}"
             f"&model={_model}"
             f"&artist={quote(_artists)}"
-            f"&size={size}"
+            f"&size={quote(size)}"
             f"&steps={_steps}"
             f"&scale={_scale}"
             f"&cfg={_cfg}"
@@ -1255,7 +1255,7 @@ class NAIGenerateImagePlugin(Star):
             f"&token={self.image_gen_key}"
             f"&model={self.model}"
             f"&artist={quote(artists)}"
-            f"&size={size}"
+            f"&size={quote(size)}"
             f"&steps={self.steps}"
             f"&scale={self.scale}"
             f"&cfg={self.cfg_value}"
@@ -1532,12 +1532,11 @@ class NAIGenerateImagePlugin(Star):
             n = int(args["n"]) if args["n"] else self.image_count
         except (TypeError, ValueError):
             n = self.image_count
-        n = max(1, min(6, n))
-
+                n = max(1, min(6, n))
         style = args["style"] or self.image_style
         size_cn = args["size"] or self.image_size
-        size = self._resolve_size(size_cn)
-
+        # 移除 _resolve_size 调用，直接使用中文 size_cn 值（横图/竖图/方图）发送给 API
+        size = size_cn
         if style not in IMAGE_STYLES and style != "custom":
             logger.warning(f"{LOG_TAG} [cmd:image] 未知风格: {style}")
             yield event.plain_result(
