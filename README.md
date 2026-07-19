@@ -21,8 +21,8 @@
 并公益三次免费的生图机会以供尝试(致谢@啊·羽绒服的分享)，请理性下单购买额度。
 
 **关于nai实用站点分享**
-> 画风寻找：[`NAI4.5进阶魔法书`](https://docs.qq.com/doc/DR25Xd1hSa1BXVnpx)
-
+> 画风寻找：[`NAI4.5进阶魔法书`](https://docs.qq.com/doc/DR25Xd1hSa1BXVnpx)  
+> nai进阶法典目录：[`法典目录`](https://nai-bot.pages.dev/%E6%B3%95%E5%85%B8/%E6%B3%95%E5%85%B8%E7%9B%AE%E5%BD%95/)
 
 ## 工具
 
