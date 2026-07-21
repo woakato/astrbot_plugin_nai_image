@@ -23,6 +23,7 @@
 **关于nai实用站点分享**
 > 画风寻找：[`NAI4.5进阶魔法书`](https://docs.qq.com/doc/DR25Xd1hSa1BXVnpx)  
 > nai进阶法典目录：[`法典目录`](https://nai-bot.pages.dev/%E6%B3%95%E5%85%B8/%E6%B3%95%E5%85%B8%E7%9B%AE%E5%BD%95/)
+> nai角色tag查询 (https://www.downloadmost.com/NoobAI-XL/danbooru-character/)(https://docs.qq.com/sheet/DRFBYSHNoUkRqZlVv?tab=BB08J2)(https://docs.qq.com/sheet/DWGxXbEZxdmtXSERT?tab=BB08J2)
 
 ## 工具
 
