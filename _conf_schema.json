@@ -20,8 +20,9 @@
     "image_size": {
         "type": "string",
         "default": "竖图",
-        "description": "默认尺寸",
-        "options": ["竖图", "横图", "方图"]
+        "description": "默认尺寸（数字表示相对成本）",
+        "hint": "选择生成图片的尺寸和分辨率。2K和4K选项会产生更高成本。",
+        "options": ["竖图", "横图", "方图", "2K竖图", "2K横图", "2K方图", "4K竖图", "4K横图", "4K方图"]
     },
     "image_count": {
         "type": "int",

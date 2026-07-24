@@ -14,7 +14,7 @@
 | `/imgstatus` | 检查生图服务连通性 |
 
 风格：`vertical` / `comicDoujin` / `r18` / `lolita25d` / `anime` / `galgame` / `custom`
-尺寸：`竖图` / `横图` / `方图`
+尺寸：`竖图` / `横图` / `方图` / `2K竖图` / `2K横图` / `2K方图` / `4K竖图` / `4K横图` / `4K方图`
 
 ## 工具
 

@@ -349,6 +349,8 @@
     };
     const sizeNames = {
       "竖图": "竖图", "横图": "横图", "方图": "方图",
+      "2K竖图": "2K竖图", "2K横图": "2K横图", "2K方图": "2K方图",
+      "4K竖图": "4K竖图", "4K横图": "4K横图", "4K方图": "4K方图"
     };
     const metaText = `${styleNames[requestBody.style] || requestBody.style} · ${sizeNames[requestBody.size] || requestBody.size} · ${images.length}张`;
     setBadge(els.resultMeta, metaText, "badge-success");

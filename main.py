@@ -103,6 +103,12 @@ IMAGE_SIZES = {
     "竖图": "portrait",
     "横图": "landscape",
     "方图": "square",
+    "2K竖图": "2k_portrait",
+    "2K横图": "2k_landscape",
+    "2K方图": "2k_square",
+    "4K竖图": "4k_portrait",
+    "4K横图": "4k_landscape",
+    "4K方图": "4k_square"
 }
 
 DEFAULT_ARTISTS = {
@@ -1512,7 +1518,7 @@ class NAIGenerateImagePlugin(Star):
         if not text.strip():
             logger.info(f"{LOG_TAG} [cmd:image] 提示用法 (空指令)")
             yield event.plain_result(
-                "用法: /image <提示词> [--n=1-6] [--style=vertical|comicDoujin|r18|lolita25d|anime|galgame|custom] [--size=竖图|横图|方图]"
+                "用法: /image <提示词> [--n=1-6] [--style=vertical|comicDoujin|r18|lolita25d|anime|galgame|custom] [--size=竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图]"
             )
             return
 
