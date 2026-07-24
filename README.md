@@ -16,6 +16,15 @@
 风格：`vertical` / `comicDoujin` / `r18` / `lolita25d` / `anime` / `galgame` / `custom`
 尺寸：`竖图` / `横图` / `方图` / `2K竖图` / `2K横图` / `2K方图` / `4K竖图` / `4K横图` / `4K方图`
 
+## 试用点数+测试面板
+插件自带一个 **NAI 生图测试面板**，可在 AstrBot 管理后台的插件扩展页面直接在线调试生图参数  
+并公益三次免费的生图机会以供尝试(致谢@啊·羽绒服的分享)，请理性下单购买额度。
+
+**关于nai实用站点分享**
+> 画风寻找：[`NAI4.5进阶魔法书`](https://docs.qq.com/doc/DR25Xd1hSa1BXVnpx)  
+> nai进阶法典目录：[`法典目录`](https://nai-bot.pages.dev/%E6%B3%95%E5%85%B8/%E6%B3%95%E5%85%B8%E7%9B%AE%E5%BD%95/)
+> nai角色tag查询 (https://www.downloadmost.com/NoobAI-XL/danbooru-character/) , (https://docs.qq.com/sheet/DRFBYSHNoUkRqZlVv?tab=BB08J2) , (https://docs.qq.com/sheet/DWGxXbEZxdmtXSERT?tab=BB08J2)
+
 ## 工具
 
 `NAI_generate_image`：参数与 `/image` 命令相同，调用NAI生成图片并保存到本地，输出文件路径。
