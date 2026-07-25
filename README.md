@@ -69,7 +69,7 @@
 **行为流程：**
 
 ```
-源 prompt 进来
+源 prompt 进来（自然语言等）
   ↓
 _resolve_outfit(prompt):
   ├─ 命中具体词（如 连衣裙/汉服/JK）或换装动词（如 换上/今天穿）
@@ -80,7 +80,7 @@ _resolve_outfit(prompt):
   ↓
 effective_prompt（可能含服装上下文后缀）
   ↓
-转译 LLM 一起翻译成 SD tags
+转译 LLM 一起翻译成 nai tags
   ↓
 preset + tag → nai.sta1n.cn
 ```
