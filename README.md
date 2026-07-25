@@ -21,7 +21,7 @@
 并公益三次免费的生图机会以供尝试(致谢@啊·羽绒服的分享)，请理性下单购买额度。
 
 **关于nai实用站点分享**
-> 画风寻找：[`NAI4.5进阶魔法书`](https://docs.qq.com/doc/DR25Xd1hSa1BXVnpx)  
+> 画风寻找：[`NAI4.5进阶魔法书`](https://docs.qq.com/doc/DR25Xd1hSa1BXVnpx)，[图书馆](https://lib.luoheyan.xyz/)  
 > nai进阶法典目录：[`法典目录`](https://nai-bot.pages.dev/%E6%B3%95%E5%85%B8/%E6%B3%95%E5%85%B8%E7%9B%AE%E5%BD%95/)
 > nai角色tag查询 (https://www.downloadmost.com/NoobAI-XL/danbooru-character/) , (https://docs.qq.com/sheet/DRFBYSHNoUkRqZlVv?tab=BB08J2) , (https://docs.qq.com/sheet/DWGxXbEZxdmtXSERT?tab=BB08J2)  
 > 如果实在找不到角色tag，可以根据同游戏其他角色tag猜测。比如：明日方舟艾雅法拉tag：eyjafjalla \(arknights\)，缪尔赛思角色名：muelsyse，同理可得：缪尔赛思tag：muelsyse \(arknights\)。
