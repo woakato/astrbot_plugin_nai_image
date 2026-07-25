@@ -69,6 +69,7 @@
 
 **行为流程：**
 
+~~~mermaid
 graph TD
     A[用户提示] --> B{是否有具体服装词/换装}
     B -->|是| C[存入缓存，自然语言层追加]
@@ -81,6 +82,7 @@ graph TD
     G --> I
     H --> I[模板合并]
     I --> J[生成图片]
+~~~
 
 ## 联动插件：astrbot_plugin_private_companion（我会永远陪着你）
 
