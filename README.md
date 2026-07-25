@@ -1,6 +1,7 @@
 # astrbot-plugin-nai-image
 
 基于 [nai.sta1n.cn](https://nai.sta1n.cn) (NovelAI) 的 AstrBot 生图插件。
+### 注意本插件暂时不支持参考图
 
 ## 指令
 
@@ -69,20 +70,18 @@
 **行为流程：**
 
 ```
-源 prompt 进来（自然语言等）
-  ↓
-_resolve_outfit(prompt):
-  ├─ 命中具体词（如 连衣裙/汉服/JK）或换装动词（如 换上/今天穿）
-  │   ├─ 抽出片段写到缓存（启动 / 刷新 TTL）
-  │   └─ 把片段作为 "延续上文穿搭或当前默认服装" 上下文，拼到 prompt 尾部
-  ├─ 源 prompt 模糊 → 优先用缓存（TTL 内），回退默认服装
-  └─ 啥都没 → no-op
-  ↓
-effective_prompt（可能含服装上下文后缀）
-  ↓
-转译 LLM 一起翻译成 nai tags
-  ↓
-preset + tag → nai.sta1n.cn
+graph TD
+    A[用户提示] --> B{是否有具体服装词/换装}
+    B -->|是| C[存入缓存，自然语言层追加]
+    B -->|否| D[检查缓存]
+    D --> E{缓存是否有数据}
+    E -->|是| F[自然语言层追加缓存服装]
+    E -->|否| G[使用默认服装]
+    C --> H[自然语言转SD tags]
+    F --> H
+    G --> I
+    H --> I[模板合并]
+    I --> J[生成图片]
 ```
 
 
