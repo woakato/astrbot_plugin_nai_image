@@ -510,7 +510,7 @@ class NAIGenerateImagePlugin(Star):
                     )
                 return excerpt, "prompt"
 
-        # 2) 源 prompt 模糊 → 只使用缓存（TTL 内），不再返回默认服装（留到模板合并阶段）
+        # 2) 源 prompt 模糊 → 只使用缓存（TTL 内），如果无缓存则回退默认服装
         if self.outfit_cache_ttl_seconds > 0:
             cached = self._outfit_cache_get()
             if cached:
@@ -518,6 +518,13 @@ class NAIGenerateImagePlugin(Star):
                     f"{LOG_TAG} [outfit] 使用缓存 | preview='{cached[:60]}...'"
                 )
                 return cached, "cache"
+
+        # 3) 缓存也無，使用默认服装（如果设置）
+        if self.default_outfit:
+            logger.debug(
+                f"{LOG_TAG} [outfit] 使用默认服装 | preview='{self.default_outfit[:60]}...'"
+            )
+            return self.default_outfit, "default"
 
         return "", "none"
 
@@ -1237,16 +1244,6 @@ class NAIGenerateImagePlugin(Star):
         
         # 2) 与预设模板合并
         full_prompt = self._build_full_prompt(translated_prompt)
-        
-        # 3) 如果没有具体服装或缓存，在模板合并后直接添加默认服装的SD tags
-        if not outfit_ctx and self.default_outfit:
-            # 将默认服装从自然语言转为SD tags格式
-            default_outfit_tags = await self._translate_prompt(self.default_outfit)
-            # 直接追加到已合并的prompt末尾
-            full_prompt = f"{full_prompt}, {default_outfit_tags}"
-            logger.debug(
-                f"{LOG_TAG} [outfit] 模板合并后添加默认服装SD tags | preview='{default_outfit_tags[:60]}...'"
-            )
 
         artists = self._resolve_artists(style)
 
