@@ -479,12 +479,13 @@ class NAIGenerateImagePlugin(Star):
         self.outfit_cache_text = None
         self.outfit_cache_expires_at = None
 
-    def _resolve_outfit(self, user_prompt: str) -> tuple[str, str]:
+    def _resolve_outfit(self, user_prompt: str) -> tuple[str, str, bool]:
         """根据源 prompt 决定要追加的"服装上下文"文本，并维护缓存池。
 
-        返回 (outfit_text_for_context, source)：
-          - source ∈ {"prompt", "cache", "default", "none"}
+        返回 (outfit_text_for_context, source, use_default_outfit)：
+          - source ∈ {"prompt", "cache", "none"}
           - outfit_text_for_context 为空表示不需要追加任何东西。
+          - use_default_outfit: True表示应该在模板合并时添加默认服装
 
         副作用：
           - 命中具体词 / 换装动词时，从源 prompt 抽出片段写进缓存（启动/刷新 TTL）。
@@ -508,25 +509,22 @@ class NAIGenerateImagePlugin(Star):
                     logger.info(
                         f"{LOG_TAG} [outfit] 命中具体/换装但缓存被禁用 (ttl=0)"
                     )
-                return excerpt, "prompt"
+                return excerpt, "prompt", False
 
-        # 2) 源 prompt 模糊 → 只使用缓存（TTL 内），如果无缓存则回退默认服装
+        # 2) 源 prompt 模糊 → 只使用缓存（TTL 内），不再返回默认服装（留到模板合并阶段）
         if self.outfit_cache_ttl_seconds > 0:
             cached = self._outfit_cache_get()
             if cached:
                 logger.debug(
                     f"{LOG_TAG} [outfit] 使用缓存 | preview='{cached[:60]}...'"
                 )
-                return cached, "cache"
+                return cached, "cache", False
 
-        # 3) 缓存也無，使用默认服装（如果设置）
+        # 3) 既无具体也没缓存，标记使用默认服装
         if self.default_outfit:
-            logger.debug(
-                f"{LOG_TAG} [outfit] 使用默认服装 | preview='{self.default_outfit[:60]}...'"
-            )
-            return self.default_outfit, "default"
+            return "", "none", True
 
-        return "", "none"
+        return "", "none", False
 
     async def _generate_one_custom(
         self,
@@ -1228,7 +1226,7 @@ class NAIGenerateImagePlugin(Star):
 
         # 0) Outfit 缓存池：根据源 prompt 决定要不要补一段"服装上下文"，
         #    并可能向缓存写入新的服装片段（启动 / 刷新 TTL）。
-        outfit_ctx, outfit_source = self._resolve_outfit(prompt)
+        outfit_ctx, outfit_source, use_default_outfit = self._resolve_outfit(prompt)
         
         if outfit_ctx:
             # 如果有具体服装、缓存或默认服装，追加到自然语言提示词中一起翻译
@@ -1244,6 +1242,13 @@ class NAIGenerateImagePlugin(Star):
         
         # 2) 与预设模板合并
         full_prompt = self._build_full_prompt(translated_prompt)
+        
+        # 3) 如果需要，直接追加默认服装（假设default_outfit已经是SD tags格式）
+        if use_default_outfit and self.default_outfit:
+            full_prompt = f"{full_prompt}, {self.default_outfit}"
+            logger.debug(
+                f"{LOG_TAG} [outfit] 模板合并后直接添加默认服装SD tags | preview='{self.default_outfit[:60]}...'"
+            )
 
         artists = self._resolve_artists(style)
 
