@@ -34,7 +34,7 @@
     "custom_artists": {
         "type": "string",
         "default": "",
-        "description": "自定义 artist 标签（仅在 image_style=custom 时生效）"
+        "description": "自定义画师串（仅在 image_style=自定义 时生效）"
     },
     "enable_template": {
         "type": "bool",
@@ -84,7 +84,15 @@
     "sampler": {
         "type": "string",
         "default": "k_dpmpp_2m_sde",
-        "description": "采样器"
+        "description": "采样器",
+        "options": [
+            "k_dpmpp_2m_sde",
+            "k_dpmpp_2m",
+            "k_dpmpp_sde", 
+            "k_dpmpp_2s_ancestral",
+            "k_euler_ancestral",
+            "k_euler"
+        ]
     },
     "noise_schedule": {
         "type": "string",

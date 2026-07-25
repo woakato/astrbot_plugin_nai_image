@@ -510,7 +510,7 @@ class NAIGenerateImagePlugin(Star):
                     )
                 return excerpt, "prompt"
 
-        # 2) 源 prompt 模糊 → 优先用缓存（TTL 内），再回退默认服装
+        # 2) 源 prompt 模糊 → 只使用缓存（TTL 内），如果无缓存则回退默认服装
         if self.outfit_cache_ttl_seconds > 0:
             cached = self._outfit_cache_get()
             if cached:
@@ -519,6 +519,7 @@ class NAIGenerateImagePlugin(Star):
                 )
                 return cached, "cache"
 
+        # 3) 缓存也無，使用默认服装（如果设置）
         if self.default_outfit:
             logger.debug(
                 f"{LOG_TAG} [outfit] 使用默认服装 | preview='{self.default_outfit[:60]}...'"
@@ -1228,7 +1229,9 @@ class NAIGenerateImagePlugin(Star):
         # 0) Outfit 缓存池：根据源 prompt 决定要不要补一段"服装上下文"，
         #    并可能向缓存写入新的服装片段（启动 / 刷新 TTL）。
         outfit_ctx, outfit_source = self._resolve_outfit(prompt)
+        
         if outfit_ctx:
+            # 如果有具体服装、缓存或默认服装，追加到自然语言提示词中一起翻译
             effective_prompt = (
                 f"{prompt.rstrip()}\n\n"
                 f"[延续上文穿搭或当前默认服装] {outfit_ctx}"
@@ -1238,6 +1241,7 @@ class NAIGenerateImagePlugin(Star):
 
         # 1) 可选：把自然语言 prompt 转译为 SD/NAI 标签风格
         translated_prompt = await self._translate_prompt(effective_prompt)
+        
         # 2) 与预设模板合并
         full_prompt = self._build_full_prompt(translated_prompt)
 
@@ -1518,7 +1522,7 @@ class NAIGenerateImagePlugin(Star):
         if not text.strip():
             logger.info(f"{LOG_TAG} [cmd:image] 提示用法 (空指令)")
             yield event.plain_result(
-                "用法: /image <提示词> [--n=1-6] [--style=vertical|comicDoujin|r18|lolita25d|anime|galgame|custom] [--size=竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图]"
+                "用法: /image <提示词> [--n=1-6] [--style=vertical|comicDoujin|r18|lolita25d|anime|galgame|自定义] [--size=竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图]"
             )
             return
 
@@ -1604,7 +1608,7 @@ class NAIGenerateImagePlugin(Star):
 
         Args:
             prompt(string): 生成图片的提示词，请使用NovelAI的提示词格式，这是一种标签化而非自然语言的描述方式，标签之间用英文逗号隔开。        
-            style(string): 描述生成图片的风格。可选：vertical / comicDoujin / r18 / lolita25d / anime / galgame / custom
+            style(string): 描述生成图片的风格。可选：vertical / comicDoujin / r18 / lolita25d / anime / galgame / 自定义
             size_cn(string): 描述生成图片的纵横比。可选：竖图 / 横图 / 方图。
         '''
         if not self.enable_llm_tool:
