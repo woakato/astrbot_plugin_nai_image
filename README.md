@@ -78,10 +78,9 @@ graph TD
     E -->|否| G[使用默认服装]
     C --> H[自然语言转SD tags]
     F --> H
-    G --> I[模板合并]
+    G --> I
     H --> I[模板合并]
     I --> J[生成图片]
-
 
 ## 联动插件：astrbot_plugin_private_companion（我会永远陪着你）
 
