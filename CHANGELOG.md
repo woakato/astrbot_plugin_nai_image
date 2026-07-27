@@ -3,14 +3,24 @@
 
 ---
 
+## v2.1.2 (2026-07-27)
+
+### Bug 修复
+
+- **修复 `NAI_Generate_Image` LLM 工具在 Agent 调用时崩溃**：当 Agent 调用该工具时，`event` 实际为 `ContextWrapper` 类型，没有 `plain_result()` 和 `chain_result()` 方法，导致 `AttributeError: 'ContextWrapper' object has no attribute 'plain_result'`。将三处调用改为直接 yield 字符串或 `MessageChain` 对象：
+  - `yield event.plain_result(...)` → `yield f"..."`
+  - `yield event.chain_result([...])` → `yield MessageChain([...])`
+
+---
+
 ## v2.1.1 (2026-07-25)
 
 ### 功能优化
 
 - **服装缓存池逻辑改进**：
-  - 优化处理流程：具体服装/换装 → 缓存存储，缓存 → 缓存取出，默认服装 → 最后回退
-  - 所有服装信息统一在自然语言层面处理，然后一起翻译成SD tags，确保语义准确性
-  - 保持服装记忆的智能连续性管理
+  - 默认服装改为SD tags格式，在模板合并步骤添加，确保格式一致性
+  - 保持具体服装和缓存的自然语言处理，提高准确性
+  - 优化处理流程，具体服装/缓存 → 自然语言层面处理，仅默认服装 → SD tags层面处理
 
 ### 用户界面改进
 

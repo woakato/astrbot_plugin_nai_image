@@ -1649,9 +1649,7 @@ class NAIGenerateImagePlugin(Star):
             f"size_eng={size} n = 1"
         )
 
-        yield event.plain_result(
-            f"提示词: {prompt}\n风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，共 1 张"
-        )
+        yield f"提示词: {prompt}\n风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，共 1 张"
 
         success = False
         first_reason: Optional[str] = None
@@ -1663,19 +1661,14 @@ class NAIGenerateImagePlugin(Star):
             logger.info(
                 f"{LOG_TAG} [tool:NAI_Generate_Image] 图片发送 | bytes={len(img_bytes)}"
             )
-            yield event.chain_result(
-                [
-                    Plain(f"[图片已生成]"),
-                    Img.fromBytes(img_bytes),
-                ]
-            )
+            yield MessageChain([Plain("[图片已生成]"), Img.fromBytes(img_bytes)])
         else:
             if first_reason is None:
                 first_reason = reason
             logger.warning(
                 f"{LOG_TAG} [tool:NAI_Generate_Image] 失败 | reason={reason}"
             )
-            yield event.plain_result(f"生成失败：{_format_generate_error(reason)}")
+            yield f"生成失败：{_format_generate_error(reason)}"
             return
         
         if not success:
