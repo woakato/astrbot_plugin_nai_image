@@ -270,7 +270,7 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.0.0")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.0")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context, config)
@@ -280,6 +280,9 @@ class NAIGenerateImagePlugin(Star):
         self.base_url: str = (config.get("base_url") or IMAGE_GEN_BASE_URL_DEFAULT).strip() or IMAGE_GEN_BASE_URL_DEFAULT
         self.image_gen_key: str = (config.get("image_gen_key") or "").strip()
         self.image_style: str = config.get("image_style") or "vertical"
+        # 设置面板“默认风格”里的“自定义”与内部值 custom 等价，统一归一化
+        if self.image_style == "自定义":
+            self.image_style = "custom"
         self.image_size: str = config.get("image_size") or "竖图"
         try:
             self.image_count: int = max(1, min(6, int(config.get("image_count") or 2)))
@@ -550,6 +553,9 @@ class NAIGenerateImagePlugin(Star):
         所有可选参数留 None 时使用插件默认配置。
         token_override 非空时用其代替 self.image_gen_key（试用生成）。
         """
+        # “自定义”与 custom 等价（面板 / 配置可能传中文值）
+        if style == "自定义":
+            style = "custom"
         _token = token_override or self.image_gen_key
         if not _token:
             return None, "no_token"
@@ -1181,6 +1187,29 @@ class NAIGenerateImagePlugin(Star):
                         buf.append(txt)
                 translated = "".join(buf)
 
+        # ==== 思考块剥离正则：依据线上日志，转译模型（如 MiniMax-M3）会在正文前
+        # 输出 <think>...</think> 推理内容，若不剥离会被原样拼进生图 tag。
+        # 1) 成对闭合的 <think>/<thinking> 块整体移除（跨行、大小写不敏感、可多个）
+        translated = _re.sub(
+            r"<\s*think(?:ing)?\s*>.*?<\s*/\s*think(?:ing)?\s*>",
+            "",
+            translated,
+            flags=_re.IGNORECASE | _re.DOTALL,
+        )
+        # 2) 只剩孤立闭合标签（开标签缺失或被上游截断）→ 取最后一个闭合标签之后的正文
+        _parts = _re.split(
+            r"<\s*/\s*think(?:ing)?\s*>", translated, flags=_re.IGNORECASE
+        )
+        if len(_parts) > 1:
+            translated = _parts[-1]
+        # 3) 孤立开标签未闭合 → 其后全部是推理内容，直接丢弃
+        translated = _re.sub(
+            r"<\s*think(?:ing)?\s*>.*$",
+            "",
+            translated,
+            flags=_re.IGNORECASE | _re.DOTALL,
+        )
+
         # 清理可能残留的 markdown 围栏 / 引号
         translated = translated.strip().strip("\"'` ")
         if translated.startswith("```"):
@@ -1224,9 +1253,13 @@ class NAIGenerateImagePlugin(Star):
             logger.warning(f"{LOG_TAG} [generate] 跳过：session 未初始化")
             return None, "no_session"
 
-        # 0) Outfit 缓存池：根据源 prompt 决定要不要补一段"服装上下文"，
-        #    并可能向缓存写入新的服装片段（启动 / 刷新 TTL）。
-        outfit_ctx, outfit_source, use_default_outfit = self._resolve_outfit(prompt)
+        # 0) Outfit 缓存池：仅在开启 LLM 转译时参与预处理。
+        #    关闭转译时跳过服装池缓存 / 默认服装补全等功能，只保留
+        #    character_preset（默认角色核心关键词与身体描述补全）的模板合并。
+        if self.enable_translate:
+            outfit_ctx, outfit_source, use_default_outfit = self._resolve_outfit(prompt)
+        else:
+            outfit_ctx, outfit_source, use_default_outfit = "", "none", False
         
         if outfit_ctx:
             # 如果有具体服装、缓存或默认服装，追加到自然语言提示词中一起翻译
@@ -1550,6 +1583,8 @@ class NAIGenerateImagePlugin(Star):
         except (TypeError, ValueError):
             n = self.image_count
         style = args["style"] or self.image_style
+        if style == "自定义":
+            style = "custom"
         size_cn = args["size"] or self.image_size
         # 移除 _resolve_size 调用，直接使用中文 size_cn 值（横图/竖图/方图）发送给 API
         size = size_cn
@@ -1622,6 +1657,8 @@ class NAIGenerateImagePlugin(Star):
             return
 
         logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 调用NAI_Generate_Image, 参数： prompt: {prompt}, style: {style}, size_cn:{size_cn}")
+        if style == "自定义":
+            style = "custom"
         if not prompt:
             logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] prompt 为空")
             yield "生成失败，提示词不应为空"

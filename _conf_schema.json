@@ -15,14 +15,33 @@
         "type": "string",
         "default": "vertical",
         "description": "默认风格",
-        "options": ["vertical", "comicDoujin", "r18", "lolita25d", "anime", "galgame", "custom"]
+        "options": [
+            "vertical",
+            "comicDoujin",
+            "r18",
+            "lolita25d",
+            "anime",
+            "galgame",
+            "自定义"
+        ],
+        "hint": "选「自定义」时使用下方「自定义画师串」，其余风格使用内置画师串。旧配置里的 custom 与「自定义」等价。"
     },
     "image_size": {
         "type": "string",
         "default": "竖图",
         "description": "默认尺寸（数字表示相对成本）",
         "hint": "选择生成图片的尺寸和分辨率。2K和4K选项会产生更高成本。",
-        "options": ["竖图", "横图", "方图", "2K竖图", "2K横图", "2K方图", "4K竖图", "4K横图", "4K方图"]
+        "options": [
+            "竖图",
+            "横图",
+            "方图",
+            "2K竖图",
+            "2K横图",
+            "2K方图",
+            "4K竖图",
+            "4K横图",
+            "4K方图"
+        ]
     },
     "image_count": {
         "type": "int",
@@ -34,30 +53,30 @@
     "custom_artists": {
         "type": "string",
         "default": "",
-        "description": "自定义画师串（仅在 image_style=自定义 时生效）"
+        "description": "自定义画师串（仅在 默认风格=自定义 时生效）"
     },
     "enable_template": {
         "type": "bool",
         "default": true,
-        "description": "是否启用提示词模板（关闭后只使用原始提示词）"
+        "description": "是否启用提示词模板（开启后把下方「角色核心关键词与身体描述补全」拼接到提示词最前面；关闭后只发送原始提示词）"
     },
     "character_preset": {
         "type": "string",
         "default": "",
         "description": "角色核心关键词与身体描述补全",
-        "hint": "填入角色名在nai里的核心关键词和补全身体描述，如muelsyse(Arknights)，mechanical headwear等。若源请求插件已经存在则不用配置。"
+        "hint": "填入角色在 NAI 里的核心关键词和身体描述补全，如 muelsyse(Arknights), mechanical headwear 等。无论是否开启 LLM 转译，本项都会拼接（这是关闭转译后唯一保留的提示词预处理）。若源请求插件已带角色词则无需配置。"
     },
     "default_outfit": {
         "type": "string",
         "default": "",
-        "description": "默认服装配置（SD/NAI tag 风格）。当源自然语言没有具体服装描述时使用。",
+        "description": "默认服装（SD/NAI tag 风格）。仅在开启 LLM 转译时生效：自然语言里没有具体服装、服装缓存池也为空时自动补上这套。",
         "hint": "用英文逗号分隔 SD/NAI tag。例如：modern fashion, dark green knit dress, fitted sweater, slim pants, leather boots"
     },
     "outfit_cache_ttl_seconds": {
         "type": "int",
         "default": 3600,
-        "description": "服装缓存池持续时间（秒），默认 3600 = 1 小时。设为 0 关闭缓存池（始终回退到默认服装）。",
-        "hint": "源 prompt 提到换装时缓存新服装并覆盖上一条；超时会自动回退到默认服装。",
+        "description": "服装缓存池持续时间（秒）。仅在开启 LLM 转译时生效；默认 3600 = 1 小时，设为 0 关闭缓存池（始终回退到默认服装）。",
+        "hint": "提示词里出现具体服装/换装描述时会缓存这套服装，之后的模糊描述（如「今天的穿搭」）自动沿用；超时失效后回退默认服装。关闭 LLM 转译后本功能整体停用。",
         "min": 0,
         "max": 86400
     },
@@ -88,7 +107,7 @@
         "options": [
             "k_dpmpp_2m_sde",
             "k_dpmpp_2m",
-            "k_dpmpp_sde", 
+            "k_dpmpp_sde",
             "k_dpmpp_2s_ancestral",
             "k_euler_ancestral",
             "k_euler"
@@ -116,7 +135,7 @@
         "type": "bool",
         "default": false,
         "description": "是否开启中间模型转译（建议小模型）",
-        "hint": "开启后，会先用下面选择的模型把自然语言提示词翻译成 SD/NAI 标签风格，再和预设合并并发送。转译失败会自动回退原文。"
+        "hint": "开启后：先用所选模型把自然语言提示词翻译成 SD/NAI 标签（自动剥离思考型模型输出的 <think> 思考块），并启用服装缓存池 / 默认服装补全等预处理；转译失败自动回退原文。关闭后：上述预处理一并停用，仅保留「角色核心关键词与身体描述补全」的拼接，提示词按 NAI 标签原样发送。"
     },
     "translate_provider": {
         "type": "string",
@@ -129,6 +148,6 @@
         "type": "bool",
         "default": false,
         "description": "是否启用 NAI_generate_image LLM 工具",
-        "hint": "关闭后 LLM agent 无法调用此工具。开启允许 LLM 自主决定生图时机，"
+        "hint": "关闭后 LLM agent 无法调用此工具；开启后允许 LLM 自主决定生图时机（每次限 1 张）。"
     }
 }
