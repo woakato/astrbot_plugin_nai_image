@@ -7,7 +7,7 @@ from urllib.parse import quote
 import aiohttp
 from aiohttp import web
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter, MessageEventResult, MessageChain
+from astrbot.api.event import AstrMessageEvent, filter, MessageEventResult
 from astrbot.api.message_components import Image as Img, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.api.web import error_response, json_response, request as web_request
@@ -270,7 +270,7 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.0")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.1")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context, config)
@@ -1643,8 +1643,14 @@ class NAIGenerateImagePlugin(Star):
     '''
 
     @filter.llm_tool()
-    async def NAI_Generate_Image(self, event: AstrMessageEvent, prompt: str, style: str, size_cn: str) -> MessageEventResult:
-        '''用NovelAI生成1张图片，并保存到本地。若要将其发送给用户，请使用send_message_to_user工具。
+    async def NAI_Generate_Image(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+        style: str,
+        size_cn: str,
+    ) -> MessageEventResult:
+        '''用NovelAI生成1张图片并直接发送给当前用户。
 
         Args:
             prompt(string): 生成图片的提示词，请使用NovelAI的提示词格式，这是一种标签化而非自然语言的描述方式，标签之间用英文逗号隔开。        
@@ -1681,61 +1687,44 @@ class NAIGenerateImagePlugin(Star):
         
         size = self._resolve_size(size_cn)
 
+        request_key = (prompt.strip(), style, size_cn)
+        completed_requests = set()
+        if hasattr(event, "get_extra"):
+            completed_requests = set(
+                event.get_extra("_nai_image_completed_requests", set())
+            )
+        if request_key in completed_requests:
+            logger.warning(
+                f"{LOG_TAG} [tool:NAI_Generate_Image] 跳过同一事件内的重复请求 | "
+                f"style={style} size_cn={size_cn}"
+            )
+            yield "相同的图片生成请求已完成，请勿重复调用。"
+            return
+
         logger.info(
             f"{LOG_TAG} [NAI_Generate_Image:image] 最终参数 | style={style} size_cn={size_cn} "
-            f"size_eng={size} n = 1"
+            f"size_eng={size} n=1"
         )
 
-        yield f"提示词: {prompt}\n风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，共 1 张"
-
-        success = False
-        first_reason: Optional[str] = None
-        #开始原生成循环
         logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生成第 1/1 张")
         img_bytes, reason = await self._generate_one(prompt, style, size)
         if img_bytes:
-            success = True
             logger.info(
                 f"{LOG_TAG} [tool:NAI_Generate_Image] 图片发送 | bytes={len(img_bytes)}"
             )
-            yield MessageChain([Plain("[图片已生成]"), Img.fromBytes(img_bytes)])
-        else:
-            if first_reason is None:
-                first_reason = reason
-            logger.warning(
-                f"{LOG_TAG} [tool:NAI_Generate_Image] 失败 | reason={reason}"
-            )
-            yield f"生成失败：{_format_generate_error(reason)}"
-            return
-        
-        if not success:
-            logger.error(
-                f"{LOG_TAG} [tool:NAI_Generate_Image] 失败 | first_reason={first_reason}"
-            )
-            yield f"图片生成失败。\n{_format_generate_error(first_reason or 'unknown')}"
-            return
-        else:
+            completed_requests.add(request_key)
+            if hasattr(event, "set_extra"):
+                event.set_extra("_nai_image_completed_requests", completed_requests)
             logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 完成 | 成功")
-        
-        #保存生成的图片到文件
-        try:
-            import hashlib
-            from datetime import datetime
-            from pathlib import Path
-
-            save_dir = Path("./data/NAI_tool_generated_images")
-            save_dir.mkdir(parents=True, exist_ok=True)
-
-            name = (
-                f"NAI_generated_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                f"_{hashlib.md5(prompt.encode()).hexdigest()[:8]}.jpg"
+            yield MessageEventResult(
+                chain=[Plain("[图片已生成]"), Img.fromBytes(img_bytes)]
             )
-            save_path = save_dir / name
-            save_path.write_bytes(img_bytes)
-            yield "图片保存成功！本地路径：..\\..\\..\\"+str(save_path)
-        except Exception as e:
-            logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image:save] 保存图片失败: {e}")
-            return 
+            return
+
+        logger.warning(
+            f"{LOG_TAG} [tool:NAI_Generate_Image] 失败 | reason={reason}"
+        )
+        yield f"生成失败：{_format_generate_error(reason)}"
         return
     
     @filter.command("quota")
