@@ -35,9 +35,7 @@ def test_llm_tool_returns_one_direct_image_result():
     event = FakeEvent()
 
     results = asyncio.run(
-        collect_results(
-            plugin.NAI_Generate_Image(event, "1girl", "anime", "方图")
-        )
+        collect_results(plugin.NAI_Generate_Image(event, "1girl", "anime", "方图"))
     )
 
     assert len(results) == 1
@@ -53,14 +51,10 @@ def test_llm_tool_skips_duplicate_completed_request_in_same_event():
     event = FakeEvent()
 
     first_results = asyncio.run(
-        collect_results(
-            plugin.NAI_Generate_Image(event, "1girl", "anime", "方图")
-        )
+        collect_results(plugin.NAI_Generate_Image(event, "1girl", "anime", "方图"))
     )
     second_results = asyncio.run(
-        collect_results(
-            plugin.NAI_Generate_Image(event, "1girl", "anime", "方图")
-        )
+        collect_results(plugin.NAI_Generate_Image(event, "1girl", "anime", "方图"))
     )
 
     assert len(first_results) == 1
@@ -74,9 +68,7 @@ def test_llm_tool_returns_one_error_result():
     event = FakeEvent()
 
     results = asyncio.run(
-        collect_results(
-            plugin.NAI_Generate_Image(event, "1girl", "anime", "方图")
-        )
+        collect_results(plugin.NAI_Generate_Image(event, "1girl", "anime", "方图"))
     )
 
     assert len(results) == 1
