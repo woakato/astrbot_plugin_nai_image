@@ -1,13 +1,14 @@
 import asyncio
 import base64
 import time
+from collections.abc import AsyncGenerator
 from typing import Any, Optional
 from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter, MessageEventResult
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image as Img, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.api.web import error_response, json_response, request as web_request
@@ -270,7 +271,7 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.1")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.2")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context, config)
@@ -1649,7 +1650,7 @@ class NAIGenerateImagePlugin(Star):
         prompt: str,
         style: str,
         size_cn: str,
-    ) -> MessageEventResult:
+    ) -> AsyncGenerator[str, None]:
         '''用NovelAI生成1张图片并直接发送给当前用户。
 
         Args:
@@ -1715,10 +1716,11 @@ class NAIGenerateImagePlugin(Star):
             completed_requests.add(request_key)
             if hasattr(event, "set_extra"):
                 event.set_extra("_nai_image_completed_requests", completed_requests)
-            logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 完成 | 成功")
-            yield MessageEventResult(
-                chain=[Plain("[图片已生成]"), Img.fromBytes(img_bytes)]
+            await event.send(
+                MessageChain(chain=[Plain("[图片已生成]"), Img.fromBytes(img_bytes)])
             )
+            logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 完成 | 成功")
+            yield "图片已生成并发送给用户，请根据本次请求继续回复。"
             return
 
         logger.warning(
