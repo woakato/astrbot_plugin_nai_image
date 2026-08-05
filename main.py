@@ -271,7 +271,7 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.2")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.3")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context, config)
@@ -448,9 +448,6 @@ class NAIGenerateImagePlugin(Star):
         if style == "custom":
             return self.custom_artists or DEFAULT_ARTISTS.get("vertical", "")
         return DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
-
-    def _resolve_size(self, size: str) -> str:
-        return IMAGE_SIZES.get(size, "portrait")
 
     # ==== Outfit 缓存池读写 ====
     def _outfit_cache_get(self) -> Optional[str]:
@@ -1587,7 +1584,7 @@ class NAIGenerateImagePlugin(Star):
         if style == "自定义":
             style = "custom"
         size_cn = args["size"] or self.image_size
-        # 移除 _resolve_size 调用，直接使用中文 size_cn 值（横图/竖图/方图）发送给 API
+        # 上游 API 以中文名称区分普通、2K 和 4K 尺寸，必须原样传递。
         size = size_cn
         if style not in IMAGE_STYLES and style != "custom":
             logger.warning(f"{LOG_TAG} [cmd:image] 未知风格: {style}")
@@ -1598,7 +1595,7 @@ class NAIGenerateImagePlugin(Star):
 
         logger.info(
             f"{LOG_TAG} [cmd:image] 最终参数 | style={style} size_cn={size_cn} "
-            f"size_eng={size} n={n}"
+            f"size={size} n={n}"
         )
         yield event.plain_result(
             f"提示词: {prompt}\n风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，共 {n} 张"
@@ -1640,7 +1637,7 @@ class NAIGenerateImagePlugin(Star):
 
 
     '''
-    提供tool让llm可以自主决定生成图片。为了防止暴走，每次只能生成1张。
+    提供tool让llm可以自主决定生成图片。为了防止暴走，每个消息事件最多请求1张。
     '''
 
     @filter.llm_tool()
@@ -1653,10 +1650,13 @@ class NAIGenerateImagePlugin(Star):
     ) -> AsyncGenerator[str, None]:
         '''用NovelAI生成1张图片并直接发送给当前用户。
 
+        每个用户消息最多调用一次本工具。不要在同一响应中重复调用，也不要同时
+        调用send_message_to_user；生成成功后本工具会直接发送图片。
+
         Args:
             prompt(string): 生成图片的提示词，请使用NovelAI的提示词格式，这是一种标签化而非自然语言的描述方式，标签之间用英文逗号隔开。        
             style(string): 描述生成图片的风格。可选：vertical / comicDoujin / r18 / lolita25d / anime / galgame / 自定义
-            size_cn(string): 描述生成图片的纵横比。可选：竖图 / 横图 / 方图。
+            size_cn(string): 描述生成图片的尺寸。可选：竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图。
         '''
         if not self.enable_llm_tool:
             logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生图工具已禁用，请在插件设置中开启 enable_llm_tool")
@@ -1686,36 +1686,41 @@ class NAIGenerateImagePlugin(Star):
             yield f"未知尺寸: {size_cn}\n可选: {', '.join(IMAGE_SIZES.keys())}"
             return
         
-        size = self._resolve_size(size_cn)
+        size = size_cn
 
-        request_key = (prompt.strip(), style, size_cn)
-        completed_requests = set()
+        generation_state = None
         if hasattr(event, "get_extra"):
-            completed_requests = set(
-                event.get_extra("_nai_image_completed_requests", set())
-            )
-        if request_key in completed_requests:
+            generation_state = event.get_extra("_nai_image_generation_state")
+        if generation_state in {"running", "finished"}:
             logger.warning(
-                f"{LOG_TAG} [tool:NAI_Generate_Image] 跳过同一事件内的重复请求 | "
+                f"{LOG_TAG} [tool:NAI_Generate_Image] 跳过同一事件内的额外请求 | "
                 f"style={style} size_cn={size_cn}"
             )
-            yield "相同的图片生成请求已完成，请勿重复调用。"
+            yield (
+                "本轮消息已经执行过一次图片生成请求，请勿重复调用"
+                "NAI_Generate_Image；图片成功时已由本工具直接发送，无需调用"
+                "send_message_to_user。"
+            )
             return
+
+        if hasattr(event, "set_extra"):
+            event.set_extra("_nai_image_generation_state", "running")
 
         logger.info(
             f"{LOG_TAG} [NAI_Generate_Image:image] 最终参数 | style={style} size_cn={size_cn} "
-            f"size_eng={size} n=1"
+            f"size={size} n=1"
         )
 
         logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生成第 1/1 张")
-        img_bytes, reason = await self._generate_one(prompt, style, size)
+        try:
+            img_bytes, reason = await self._generate_one(prompt, style, size)
+        finally:
+            if hasattr(event, "set_extra"):
+                event.set_extra("_nai_image_generation_state", "finished")
         if img_bytes:
             logger.info(
                 f"{LOG_TAG} [tool:NAI_Generate_Image] 图片发送 | bytes={len(img_bytes)}"
             )
-            completed_requests.add(request_key)
-            if hasattr(event, "set_extra"):
-                event.set_extra("_nai_image_completed_requests", completed_requests)
             await event.send(
                 MessageChain(chain=[Plain("[图片已生成]"), Img.fromBytes(img_bytes)])
             )
