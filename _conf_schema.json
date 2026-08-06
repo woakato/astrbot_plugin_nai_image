@@ -68,11 +68,17 @@
         "description": "保存生图历史",
         "hint": "开启后将所有成功生成的图片保存到 plugin_data/astrbot_plugin_nai_image/image_history。"
     },
+    "save_generation_parameters": {
+        "type": "bool",
+        "default": false,
+        "description": "保存生图参数",
+        "hint": "配合「保存生图历史」使用。开启后为每张图片保存同名 JSON 文档，记录实际生图参数；不会保存 Token。"
+    },
     "image_history_limit": {
         "type": "int",
         "default": 0,
         "description": "历史保留数量",
-        "hint": "仅在保存生图历史时生效。每次保存后自动删除最旧图片，仅保留指定数量；设为 0 不清理。",
+        "hint": "仅在保存生图历史时生效。每次保存后自动删除最旧图片及其同名参数文档，仅保留指定数量；设为 0 不清理。",
         "min": 0
     },
     "custom_artists": {

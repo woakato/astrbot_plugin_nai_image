@@ -1,4 +1,5 @@
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 from astrbot.api.message_components import Image, Plain
@@ -82,6 +83,7 @@ def test_image_only_mode_keeps_generation_errors():
 def test_image_history_keeps_newest_managed_files(tmp_path):
     plugin = object.__new__(NAIGenerateImagePlugin)
     plugin.save_image_history = True
+    plugin.save_generation_parameters = True
     plugin.image_history_limit = 2
     plugin._image_history_dir = tmp_path / "image_history"
     plugin._image_history_lock = asyncio.Lock()
@@ -90,30 +92,53 @@ def test_image_history_keeps_newest_managed_files(tmp_path):
     unmanaged_file.write_text("keep", encoding="utf-8")
 
     async def save_images():
-        await plugin._archive_generated_image(b"first")
-        await plugin._archive_generated_image(b"second")
-        await plugin._archive_generated_image(b"third")
+        await plugin._archive_generated_image(b"first", {"tag": "first prompt"})
+        await plugin._archive_generated_image(b"second", {"tag": "second prompt"})
+        await plugin._archive_generated_image(b"third", {"tag": "third prompt"})
 
     asyncio.run(save_images())
 
     saved_files = sorted(plugin._image_history_dir.glob("nai_*.img"))
+    parameter_files = sorted(plugin._image_history_dir.glob("nai_*.json"))
     assert len(saved_files) == 2
+    assert len(parameter_files) == 2
     assert {path.read_bytes() for path in saved_files} == {b"second", b"third"}
+    assert {json.loads(path.read_text(encoding="utf-8"))["tag"] for path in parameter_files} == {
+        "second prompt",
+        "third prompt",
+    }
+    assert {path.stem for path in saved_files} == {path.stem for path in parameter_files}
     assert unmanaged_file.read_text(encoding="utf-8") == "keep"
 
 
 def test_zero_history_limit_disables_cleanup(tmp_path):
     plugin = object.__new__(NAIGenerateImagePlugin)
     plugin.save_image_history = True
+    plugin.save_generation_parameters = True
     plugin.image_history_limit = 0
     plugin._image_history_dir = tmp_path / "image_history"
     plugin._image_history_lock = asyncio.Lock()
 
     async def save_images():
-        await plugin._archive_generated_image(b"first")
-        await plugin._archive_generated_image(b"second")
-        await plugin._archive_generated_image(b"third")
+        await plugin._archive_generated_image(b"first", {"tag": "first prompt"})
+        await plugin._archive_generated_image(b"second", {"tag": "second prompt"})
+        await plugin._archive_generated_image(b"third", {"tag": "third prompt"})
 
     asyncio.run(save_images())
 
     assert len(list(plugin._image_history_dir.glob("nai_*.img"))) == 3
+    assert len(list(plugin._image_history_dir.glob("nai_*.json"))) == 3
+
+
+def test_parameter_history_can_be_disabled(tmp_path):
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.save_image_history = True
+    plugin.save_generation_parameters = False
+    plugin.image_history_limit = 0
+    plugin._image_history_dir = tmp_path / "image_history"
+    plugin._image_history_lock = asyncio.Lock()
+
+    asyncio.run(plugin._archive_generated_image(b"image", {"tag": "prompt"}))
+
+    assert len(list(plugin._image_history_dir.glob("nai_*.img"))) == 1
+    assert not list(plugin._image_history_dir.glob("nai_*.json"))

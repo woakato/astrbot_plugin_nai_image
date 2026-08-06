@@ -69,7 +69,9 @@
 data/plugin_data/astrbot_plugin_nai_image/image_history/
 ```
 
-`image_history_limit` 设置本地最多保留的图片数量。每次保存新图片后，插件会删除超出数量的最旧历史；设为 `0` 时只保存、不自动清理。归档或清理失败不会影响图片正常返回。
+开启 `save_generation_parameters` 后，每张图片旁会生成一个同名 `.json` 文档，记录实际发送给生图接口的参数，但不会保存 Token。此选项需配合 `save_image_history` 使用。
+
+`image_history_limit` 设置本地最多保留的图片数量。每次保存新图片后，插件会删除超出数量的最旧图片及其同名参数文档；设为 `0` 时只保存、不自动清理。归档或清理失败不会影响图片正常返回。
 
 ### 提示词转译中间层
 

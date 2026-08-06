@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -295,6 +296,9 @@ class NAIGenerateImagePlugin(Star):
         if self.bot_reply_mode not in BOT_REPLY_MODES:
             self.bot_reply_mode = "完整"
         self.save_image_history: bool = bool(config.get("save_image_history", False))
+        self.save_generation_parameters: bool = bool(
+            config.get("save_generation_parameters", False)
+        )
         try:
             history_limit = config.get("image_history_limit")
             self.image_history_limit: int = max(
@@ -362,6 +366,7 @@ class NAIGenerateImagePlugin(Star):
             f"count={self.image_count} reply={self.bot_reply_mode} | model={self.model} | "
             f"steps={self.steps} scale={self.scale} cfg={self.cfg_value} | "
             f"history={'ON' if self.save_image_history else 'OFF'} "
+            f"parameters={'ON' if self.save_generation_parameters else 'OFF'} "
             f"limit={self.image_history_limit} | "
             f"template={'启用' if self.enable_template and self.character_preset else '未启用'} | "
             f"translate={'启用' if self.enable_translate else '未启用'} "
@@ -395,17 +400,35 @@ class NAIGenerateImagePlugin(Star):
     def _write_and_cleanup_image_history(
         history_dir: Path,
         img_bytes: bytes,
+        generation_parameters: Optional[dict[str, Any]],
         history_limit: int,
-    ) -> tuple[Path, int]:
+    ) -> tuple[Path, Optional[Path], int]:
         history_dir.mkdir(parents=True, exist_ok=True)
         extension = NAIGenerateImagePlugin._image_history_extension(img_bytes)
         image_path = history_dir / f"nai_{time.time_ns()}{extension}"
-        temp_path = history_dir / f".{image_path.name}.tmp"
+        image_temp_path = history_dir / f".{image_path.name}.tmp"
         try:
-            temp_path.write_bytes(img_bytes)
-            temp_path.replace(image_path)
+            image_temp_path.write_bytes(img_bytes)
+            image_temp_path.replace(image_path)
         finally:
-            temp_path.unlink(missing_ok=True)
+            image_temp_path.unlink(missing_ok=True)
+
+        parameters_path: Optional[Path] = None
+        if generation_parameters is not None:
+            parameters_path = image_path.with_suffix(".json")
+            parameters_temp_path = history_dir / f".{parameters_path.name}.tmp"
+            try:
+                parameters_temp_path.write_text(
+                    json.dumps(
+                        generation_parameters,
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                parameters_temp_path.replace(parameters_path)
+            finally:
+                parameters_temp_path.unlink(missing_ok=True)
 
         removed = 0
         if history_limit > 0:
@@ -426,22 +449,32 @@ class NAIGenerateImagePlugin(Star):
                     removed += 1
                 except FileNotFoundError:
                     continue
+                old_path.with_suffix(".json").unlink(missing_ok=True)
 
-        return image_path, removed
+        return image_path, parameters_path, removed
 
-    async def _archive_generated_image(self, img_bytes: bytes) -> None:
+    async def _archive_generated_image(
+        self,
+        img_bytes: bytes,
+        generation_parameters: dict[str, Any],
+    ) -> None:
         if not self.save_image_history:
             return
         try:
+            parameters_to_save = (
+                generation_parameters if self.save_generation_parameters else None
+            )
             async with self._image_history_lock:
-                image_path, removed = await asyncio.to_thread(
+                image_path, parameters_path, removed = await asyncio.to_thread(
                     self._write_and_cleanup_image_history,
                     self._get_image_history_dir(),
                     img_bytes,
+                    parameters_to_save,
                     self.image_history_limit,
                 )
             logger.info(
                 f"{LOG_TAG} [history] 已保存 {image_path} | "
+                f"parameters={parameters_path or 'OFF'} "
                 f"cleanup={removed} limit={self.image_history_limit}"
             )
         except Exception as e:
@@ -708,6 +741,19 @@ class NAIGenerateImagePlugin(Star):
             f"&nocache=1"
             f"&noise_schedule={_noise}"
         )
+        generation_parameters = {
+            "tag": full_prompt,
+            "model": _model,
+            "artist": _artists,
+            "size": size,
+            "steps": _steps,
+            "scale": _scale,
+            "cfg": _cfg,
+            "sampler": _sampler,
+            "negative": _negative,
+            "nocache": 1,
+            "noise_schedule": _noise,
+        }
         # 脱敏日志：不输出明文 token
         safe_url = url.replace(f"&token={_token}", "&token=***")
         logger.debug(f"{LOG_TAG} [generate:custom] request url = {safe_url}")
@@ -751,7 +797,10 @@ class NAIGenerateImagePlugin(Star):
                     f"{LOG_TAG} [generate:custom] 成功 | size={size} "
                     f"png={_w}x{_h} bytes={len(img_bytes)}"
                 )
-                await self._archive_generated_image(img_bytes)
+                await self._archive_generated_image(
+                    img_bytes,
+                    generation_parameters,
+                )
                 return img_bytes, "ok"
         except asyncio.TimeoutError:
             return None, "timeout"
@@ -990,6 +1039,7 @@ class NAIGenerateImagePlugin(Star):
             "image_count": self.image_count,
             "bot_reply_mode": self.bot_reply_mode,
             "save_image_history": self.save_image_history,
+            "save_generation_parameters": self.save_generation_parameters,
             "image_history_limit": self.image_history_limit,
             "custom_artists": self.custom_artists,
             "model": self.model,
@@ -1407,6 +1457,19 @@ class NAIGenerateImagePlugin(Star):
             f"&nocache=1"
             f"&noise_schedule={self.noise_schedule}"
         )
+        generation_parameters = {
+            "tag": full_prompt,
+            "model": self.model,
+            "artist": artists,
+            "size": size,
+            "steps": self.steps,
+            "scale": self.scale,
+            "cfg": self.cfg_value,
+            "sampler": self.sampler,
+            "negative": self.negative,
+            "nocache": 1,
+            "noise_schedule": self.noise_schedule,
+        }
         # 脱敏：日志中不输出完整 URL（含明文 token）
         safe_url = url.replace(f"&token={self.image_gen_key}", "&token=***")
         logger.debug(f"{LOG_TAG} [generate] request url = {safe_url}")
@@ -1440,7 +1503,10 @@ class NAIGenerateImagePlugin(Star):
                     f"{LOG_TAG} [generate] 成功 | bytes={len(img_bytes)} "
                     f"elapsed={elapsed:.2f}s style={style} size={size}"
                 )
-                await self._archive_generated_image(img_bytes)
+                await self._archive_generated_image(
+                    img_bytes,
+                    generation_parameters,
+                )
                 return img_bytes, "ok"
         except asyncio.TimeoutError:
             logger.warning(
