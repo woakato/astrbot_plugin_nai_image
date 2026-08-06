@@ -2114,14 +2114,19 @@ class NAIGenerateImagePlugin(Star):
         调用send_message_to_user；生成成功后本工具会直接发送图片。
 
         Args:
-            prompt(string): NovelAI 提示词，使用标签化格式，标签间用英文逗号隔开。格式规范：
+            prompt(string): NovelAI 4.5 提示词，标签化格式，标签间用英文逗号隔开。规范：
                 - 质量词放前面：masterpiece, best quality, highly detailed
-                - 角色描述：1girl/1boy, solo, 具体外貌特征
-                - 画师风格引用：artist:画师名（如 artist:wlop）
-                - 权重调整：{tag} 表示加强，(tag:1.5) 表示权重1.5倍，tag::0.8:: 表示权重0.8
-                - 场景/背景：outdoor, cityscape, sunset
-                - 避免自然语言句子，用标签组合
-                示例：masterpiece, best quality, 1girl, solo, long hair, blue eyes, artist:wlop, outdoor, sunset
+                - 角色描述：1girl/1boy, solo, 外貌特征；人物用 人物名(作品名) 形式（如 texas the omertosa (arknights)），特征不全就补充描述词
+                - 画师风格引用：artist:画师名
+                - 权重语法：{tag} 加强，[tag] 减弱；(tag:1.5) 为旧版权重；推荐新版 权重::标签:: 格式，可组合多标签如 1.5::red dress, long dress::，支持高权重（2、5、10 以上）
+                - 负向权重（NAI4 精髓）：可移除物体或翻转概念，如 -2::标签::
+                - 多角色：用 {人物 [tags], {位置}, ntags = [ntags] 人物} 包裹每个角色，最多 6 名，位置可选 左/中/右/上/下 组合；{人物 与 人物} 是占位符不可删除
+                - 角色互动：source#动作 发起者 / target#动作 承受者 / mutual#动作 互相（如 source#hug, target#hug, mutual#hug）
+                - 渲染文字：Text: HAVE FUN! 指定角色说出文字；no text 减少文本生成
+                - 情绪词：可加入情绪描述增强表现力
+                - 多风格混合：-2::artist collaboration:: 可融合 3 个以上画师风格
+                - 精简：避免堆叠重复/无意义 tags，描述清楚构图即可
+                示例：masterpiece, best quality, {人物 [1girl, solo, long hair, blue eyes, source#hug], {位置左}, ntags = [lowres, bad anatomy] 人物}, {人物 [1boy, short hair, target#hug], {位置右} 人物}, outdoor, sunset, artist:wlop
             style(string): 画风。可选：vertical(韩漫清新) / comicDoujin(日漫同人) / r18(写实唯美) / lolita25d(萝莉唯美) / anime(日系动画) / galgame(GalGame) / custom(自定义)
             size_cn(string): 尺寸。可选：竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图
         '''
