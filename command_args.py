@@ -119,11 +119,15 @@ _MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 class ImageCommandArgumentError(ValueError):
+    """表示 `/image` 指令中的参数格式或取值不合法。"""
+
     pass
 
 
 @dataclass(frozen=True)
 class ImageCommandArguments:
+    """一次 `/image` 调用解析后的提示词与可选覆盖参数。"""
+
     prompt: str
     n: int | None = None
     style: str | None = None
@@ -140,6 +144,11 @@ class ImageCommandArguments:
     enable_template: bool | None = None
 
     def generation_overrides(self) -> dict[str, object]:
+        """转换为 `_generate_one` 可直接接收的单次覆盖参数。
+
+        未指定的参数必须被排除，才能继续使用插件全局配置；显式传入的
+        ``False``、空反向提示词和数值 ``0`` 则需要完整保留。
+        """
         values = {
             "steps": self.steps,
             "scale": self.scale,
@@ -156,16 +165,24 @@ class ImageCommandArguments:
 
 
 def normalize_image_style(value: object) -> str | None:
+    """将中英文风格名称统一为插件内部使用的风格键。"""
+
     normalized = str(value or "").strip().casefold()
     return _STYLE_ALIASES.get(normalized)
 
 
 def normalize_image_size(value: object) -> str | None:
+    """将中英文尺寸名称统一为 ``IMAGE_SIZES`` 使用的中文键。"""
+
     normalized = str(value or "").strip().casefold()
     return _SIZE_ALIASES.get(normalized)
 
 
 def _read_quoted_value(text: str, start: int, name: str) -> tuple[str, int]:
+    """读取带引号的参数值，并返回解码后的值和引号后的下标。
+
+    只对当前引号和反斜杠执行转义，避免无意改写提示词中的其他反斜杠。
+    """
     quote_char = text[start]
     value: list[str] = []
     index = start + 1
@@ -190,6 +207,12 @@ def _read_quoted_value(text: str, start: int, name: str) -> tuple[str, int]:
 
 
 def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
+    """从指令文本中抽取 ``--名称=值``，其余内容作为提示词返回。
+
+    扫描器只识别位于空白边界、且不在提示词引号内的参数。参数先在这里
+    完成词法解析，具体类型、范围和枚举值由 :func:`parse_image_command`
+    统一校验。
+    """
     values: dict[str, str] = {}
     prompt_parts: list[str] = []
     copy_from = 0
@@ -198,6 +221,7 @@ def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
 
     while index < len(text):
         char = text[index]
+        # 提示词本身可以包含引号；引号内形似 --cfg=1 的内容仍属于提示词。
         if prompt_quote:
             if char == "\\" and index + 1 < len(text):
                 index += 2
@@ -206,6 +230,7 @@ def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
                 prompt_quote = ""
             index += 1
             continue
+        # 英文所有格中的单引号不是字符串边界，例如 girl's --steps=28。
         if (
             char == "'"
             and index > 0
@@ -226,6 +251,7 @@ def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
             index += 1
             continue
 
+        # 到达候选参数后，严格检查名称、等号、重复项和引号闭合状态。
         name_start = index + 2
         name_end = name_start
         while name_end < len(text) and (
@@ -258,6 +284,7 @@ def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
                 argument_end += 1
             value = text[value_start:argument_end]
 
+        # 用空格替换参数所在片段，防止参数前后的提示词意外粘连。
         prompt_parts.append(text[copy_from:index])
         prompt_parts.append(" ")
         copy_from = argument_end
@@ -271,6 +298,8 @@ def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
 def _parse_int(
     values: dict[str, str], name: str, minimum: int, maximum: int
 ) -> int | None:
+    """解析一个可选整数参数，并执行闭区间校验。"""
+
     if name not in values:
         return None
     raw = values[name]
@@ -288,6 +317,8 @@ def _parse_int(
 def _parse_float(
     values: dict[str, str], name: str, minimum: float, maximum: float
 ) -> float | None:
+    """解析一个可选浮点参数，并拒绝 NaN、无穷大及越界值。"""
+
     if name not in values:
         return None
     raw = values[name]
@@ -307,6 +338,12 @@ def parse_image_command(
     *,
     default_style: str,
 ) -> ImageCommandArguments:
+    """解析 `/image` 文本并生成规范化的单次生图参数。
+
+    先从任意位置抽取命名参数，再按各字段的类型、取值范围和中英文别名
+    做语义校验。``default_style`` 仅用于判断未显式指定风格时，画师串是否
+    允许覆盖自定义风格。
+    """
     prompt, values = _extract_raw_arguments(text)
 
     style = None

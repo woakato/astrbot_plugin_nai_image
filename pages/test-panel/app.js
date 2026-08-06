@@ -170,6 +170,7 @@
       sampler: els.sampler.value,
       steps: safeInt(els.steps.value, 24),
       scale: safeFloat(els.scale.value, 6),
+      // CFG Rescale 允许 0 和小数；仅在输入无法解析时回退为 0。
       cfg: safeFloat(els.cfg.value, 0),
       noise_schedule: els.noiseSchedule.value,
       model: els.model.value,
