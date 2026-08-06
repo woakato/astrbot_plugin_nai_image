@@ -300,9 +300,10 @@ class NAIGenerateImagePlugin(Star):
         except (TypeError, ValueError):
             self.scale = 6
         try:
-            self.cfg_value: int = int(config.get("cfg") or 7)
+            cfg = config.get("cfg")
+            self.cfg_value: float = float(cfg) if cfg is not None and cfg != "" else 0.0
         except (TypeError, ValueError):
-            self.cfg_value = 7
+            self.cfg_value = 0.0
         self.sampler: str = config.get("sampler") or "k_dpmpp_2m_sde"
         self.noise_schedule: str = config.get("noise_schedule") or "karras"
         neg = config.get("negative")

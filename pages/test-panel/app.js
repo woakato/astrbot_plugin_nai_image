@@ -170,7 +170,7 @@
       sampler: els.sampler.value,
       steps: safeInt(els.steps.value, 24),
       scale: safeFloat(els.scale.value, 6),
-      cfg: safeFloat(els.cfg.value, 7),
+      cfg: safeFloat(els.cfg.value, 0),
       noise_schedule: els.noiseSchedule.value,
       model: els.model.value,
       n: safeInt(els.count.value, 1),
@@ -427,7 +427,7 @@
     els.sampler.value = "k_dpmpp_2m_sde";
     els.steps.value = "24";
     els.scale.value = "6";
-    els.cfg.value = "7";
+    els.cfg.value = "0";
     els.noiseSchedule.value = "karras";
     els.model.value = "nai-diffusion-4-5-full";
     els.style.value = "vertical";

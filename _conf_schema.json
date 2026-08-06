@@ -96,9 +96,12 @@
         "description": "scale"
     },
     "cfg": {
-        "type": "int",
-        "default": 7,
-        "description": "cfg"
+        "type": "float",
+        "default": 0.0,
+        "description": "Prompt Guidance Rescale（接口参数 cfg）",
+        "hint": "范围 0-30，支持小数和 0 值。",
+        "min": 0,
+        "max": 30
     },
     "sampler": {
         "type": "string",
