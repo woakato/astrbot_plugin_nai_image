@@ -395,9 +395,9 @@ class NAIGenerateImagePlugin(Star):
         try:
             cfg = config.get("cfg")
             # CFG 的 0 是有效值，不能用 `config.get("cfg") or 默认值` 读取。
-            self.cfg_value: float = float(cfg) if cfg is not None and cfg != "" else 0.0
+            self.cfg_value: float = float(cfg) if cfg is not None and cfg != "" else 7.0
         except (TypeError, ValueError):
-            self.cfg_value = 0.0
+            self.cfg_value = 7.0
         self.sampler: str = config.get("sampler") or "k_dpmpp_2m_sde"
         self.noise_schedule: str = config.get("noise_schedule") or "karras"
         neg = config.get("negative")
@@ -2000,7 +2000,7 @@ class NAIGenerateImagePlugin(Star):
         # 回复中展示的参数与 _generate_one 最终采用的覆盖/回退规则保持一致。
         effective_steps = args.steps if args.steps is not None else getattr(self, "steps", 24)
         effective_scale = args.scale if args.scale is not None else getattr(self, "scale", 6)
-        effective_cfg = args.cfg if args.cfg is not None else getattr(self, "cfg_value", 0.0)
+        effective_cfg = args.cfg if args.cfg is not None else getattr(self, "cfg_value", 7.0)
         effective_sampler = args.sampler or getattr(
             self, "sampler", "k_dpmpp_2m_sde"
         )

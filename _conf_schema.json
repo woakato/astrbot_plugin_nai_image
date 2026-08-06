@@ -130,9 +130,9 @@
     },
     "cfg": {
         "type": "float",
-        "default": 0.0,
+        "default": 7.0,
         "description": "CFG Rescale",
-        "hint": "对应接口参数 cfg，范围 0-30，支持小数和 0 值。",
+        "hint": "对应接口参数 cfg，默认 7，范围 0-30，支持小数和 0 值。",
         "min": 0,
         "max": 30
     },
