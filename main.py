@@ -21,6 +21,7 @@ if __package__:
         normalize_image_size,
         normalize_image_style,
         parse_image_command,
+        strip_image_command_prefix,
     )
     from .prompt_processing import (
         TRANSLATE_MODE_AUTO,
@@ -37,6 +38,7 @@ else:
         normalize_image_size,
         normalize_image_style,
         parse_image_command,
+        strip_image_command_prefix,
     )
     from prompt_processing import (
         TRANSLATE_MODE_AUTO,
@@ -1949,9 +1951,13 @@ class NAIGenerateImagePlugin(Star):
         参数解析在检查提示词前完成，确保提示词任意位置的 ``--名称=值`` 都能
         被移除和校验；未指定的字段继续沿用插件配置。
         """
-        text = event.message_str or ""
+        raw_text = event.message_str or ""
+        text = strip_image_command_prefix(raw_text)
         sender = event.get_sender_id() if hasattr(event, "get_sender_id") else "?"
-        logger.info(f"{LOG_TAG} [cmd:image] 收到指令 | sender={sender} | text='{text[:100]}'")
+        logger.info(
+            f"{LOG_TAG} [cmd:image] 收到指令 | sender={sender} | "
+            f"text='{text[:100]}'"
+        )
 
         if not text.strip():
             logger.info(f"{LOG_TAG} [cmd:image] 提示用法 (空指令)")

@@ -1,6 +1,25 @@
 import pytest
 
-from command_args import ImageCommandArgumentError, parse_image_command
+from command_args import (
+    ImageCommandArgumentError,
+    parse_image_command,
+    strip_image_command_prefix,
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("image 1girl, solo --cfg=0.3", "1girl, solo --cfg=0.3"),
+        ("/image 1girl, solo", "1girl, solo"),
+        ("image", ""),
+        ("/image", ""),
+        ("imageboard, 1girl", "imageboard, 1girl"),
+        ("an image of a girl", "an image of a girl"),
+    ],
+)
+def test_strip_image_command_prefix_only_removes_leading_command(text, expected):
+    assert strip_image_command_prefix(text) == expected
 
 
 def test_parse_all_generation_overrides_with_quoted_values():

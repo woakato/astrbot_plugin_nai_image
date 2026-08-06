@@ -84,7 +84,7 @@ def test_image_only_mode_keeps_generation_errors():
 def test_image_command_passes_all_generation_overrides():
     plugin = make_command_plugin("仅图片", (b"test-image-bytes", "ok"))
     event = FakeCommandEvent(
-        '1girl, solo --style=自定义 --size=landscape --steps=28 '
+        'image 1girl, solo --style=自定义 --size=landscape --steps=28 '
         '--scale=6.5 --cfg=0.3 --sampler=k_euler_ancestral '
         '--noise=exponential --translate=auto --template=off '
         '--model=nai-diffusion-4-5-full '

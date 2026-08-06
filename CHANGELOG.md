@@ -7,6 +7,10 @@
 - **Bot 指令支持单次覆盖生成参数**：`/image` 新增 `cfg`、`scale`、`steps`、`sampler`、`noise`、`translate`、`negative`、`model`、`artist`、`template` 参数，最终生效值会同步用于接口请求和生图历史参数。
 - **严格参数解析与中英文别名**：支持带空格的引号参数，`style`、`size`、`translate`、`template` 支持中英文值；未知、重复、越界或格式错误会在生图前直接报错。
 
+### Bug 修复
+
+- **避免 Bot 指令名进入生图提示词**：从 AstrBot 事件原文中提取 `/image` 参数时，只移除开头的 `image` 指令词，不再将其拼接到最终提示词中。
+
 
 ---
 

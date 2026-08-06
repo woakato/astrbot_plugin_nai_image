@@ -118,6 +118,22 @@ _TEMPLATE_ALIASES = {
 _MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
+def strip_image_command_prefix(text: object) -> str:
+    """移除事件文本开头的 ``image`` 指令名，保留后续完整参数文本。
+
+    AstrBot 的命令过滤器会使用去掉指令名后的局部文本匹配处理函数参数，
+    但不会同步修改 ``event.message_str``。这里只匹配完整的首个词，避免误删
+    提示词正文中的 ``image`` 或以它开头的其他单词。
+    """
+    stripped = str(text or "").strip()
+    for prefix in ("image", "/image"):
+        if stripped == prefix:
+            return ""
+        if stripped.startswith(prefix) and stripped[len(prefix)].isspace():
+            return stripped[len(prefix) :].lstrip()
+    return stripped
+
+
 class ImageCommandArgumentError(ValueError):
     """表示 `/image` 指令中的参数格式或取值不合法。"""
 
