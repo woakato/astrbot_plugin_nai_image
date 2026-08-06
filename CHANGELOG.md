@@ -1,5 +1,12 @@
 # 更新日志
 
+## 未发布
+
+### 功能优化
+
+- **Bot 指令支持单次覆盖生成参数**：`/image` 新增 `cfg`、`scale`、`steps`、`sampler`、`noise`、`translate`、`negative`、`model`、`artist`、`template` 参数，最终生效值会同步用于接口请求和生图历史参数。
+- **严格参数解析与中英文别名**：支持带空格的引号参数，`style`、`size`、`translate`、`template` 支持中英文值；未知、重复、越界或格式错误会在生图前直接报错。
+
 
 ---
 

@@ -13,17 +13,39 @@
 | `/image <提示词> --n=4` | 生成 4 张图片 (1-6) |
 | `/image <提示词> --style=anime` | 指定风格 |
 | `/image <提示词> --size=横图` | 指定比例 |
+| `/image <提示词> --cfg=0.3 --scale=6 --steps=28` | 单次覆盖生成参数 |
 | `/quota` | 查询 token 剩余配额 |
 | `/imgstatus` | 检查生图服务连通性 |
 
-风格：`vertical` / `comicDoujin` / `r18` / `lolita25d` / `anime` / `galgame` / `自定义`（等价于 `custom`）
-尺寸：`竖图` / `横图` / `方图` / `2K竖图` / `2K横图` / `2K方图` / `4K竖图` / `4K横图` / `4K方图`
+所有参数都只影响当前指令，不会修改插件配置。含空格的参数值需要使用单引号或双引号：
+
+```text
+/image 1girl, solo --style=custom --artist="best quality, artist:foo" --negative="bad anatomy, blurry, text"
+```
+
+| 参数 | 取值 | 说明 |
+| --- | --- | --- |
+| `--n` | `1-6` | 生成数量 |
+| `--style` | `vertical` / `comicDoujin` / `r18` / `lolita25d` / `anime` / `galgame` / `custom` | 也接受「自定义」及各风格的中文显示名 |
+| `--size` | `portrait` / `landscape` / `square` 及 2K/4K 形式 | 也接受「竖图 / 横图 / 方图」等中文值 |
+| `--steps` | `1-100` 整数 | 采样步数 |
+| `--scale` | `0-20` 数字 | 提示词引导强度 |
+| `--cfg` | `0-30` 数字 | CFG Rescale，支持小数和 `0` |
+| `--sampler` | 固定采样器名 | 与配置面板可选值一致 |
+| `--noise` | `karras` / `native` / `exponential` | `--noise_schedule` 是等价别名 |
+| `--translate` | `关闭/off` / `开启/on` / `自动/auto` | 单次覆盖转译模式 |
+| `--template` | `关闭/off` / `开启/on` | 单次决定是否拼接角色预设 |
+| `--model` | 模型名 | 仅允许字母、数字、点、下划线和连字符 |
+| `--artist` | 画师串 | 仅在有效风格为 `custom` / `自定义` 时可用 |
+| `--negative` | 反向提示词 | 可使用 `--negative=""` 清空当次反向提示词 |
+
+采样器可选：`k_dpmpp_2m_sde` / `k_dpmpp_2m` / `k_dpmpp_sde` / `k_dpmpp_2s_ancestral` / `k_euler_ancestral` / `k_euler`。未知参数、重复参数、超出范围或未闭合引号会直接报错，不会发起生图请求。
 
 `bot_reply_mode` 控制 `/image` 指令的回复内容：
 
 - `仅图片`：成功时只发送图片，失败报错保持不变
-- `简洁`：生成前只发送状态和风格、比例、数量
-- `完整`：发送完整提示词和参数，行为与旧版本一致
+- `简洁`：生成前只发送状态和最终生效的核心参数，不发送提示词
+- `完整`：发送完整提示词、最终核心参数及本次指定的画师串/反向提示词
 
 ## 试用点数+测试面板
 插件自带一个 **NAI 生图测试面板**，可在 AstrBot 管理后台的插件扩展页面直接在线调试生图参数  
@@ -37,7 +59,7 @@
 
 ## 工具
 
-`NAI_Generate_Image`：参数与 `/image` 命令相同，调用 NAI 生成一张图片并直接发送给当前用户，同时向 Agent 返回单一工具结果以保留完整对话历史。每个消息事件最多请求一次 NAI；模型重复调用时仍会收到对应工具结果，但不会再次生图或扣费，也不需要搭配 `send_message_to_user`。
+`NAI_Generate_Image`：接受提示词、风格和尺寸，调用 NAI 生成一张图片并直接发送给当前用户，同时向 Agent 返回单一工具结果以保留完整对话历史。每个消息事件最多请求一次 NAI；模型重复调用时仍会收到对应工具结果，但不会再次生图或扣费，也不需要搭配 `send_message_to_user`。
 
 ## 测试面板
 

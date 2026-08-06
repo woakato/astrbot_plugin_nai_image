@@ -16,6 +16,12 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, json_response, request as web_request
 
 if __package__:
+    from .command_args import (
+        ImageCommandArgumentError,
+        normalize_image_size,
+        normalize_image_style,
+        parse_image_command,
+    )
     from .prompt_processing import (
         TRANSLATE_MODE_AUTO,
         TRANSLATE_MODE_OFF,
@@ -26,6 +32,12 @@ if __package__:
         normalize_translate_mode,
     )
 else:
+    from command_args import (
+        ImageCommandArgumentError,
+        normalize_image_size,
+        normalize_image_style,
+        parse_image_command,
+    )
     from prompt_processing import (
         TRANSLATE_MODE_AUTO,
         TRANSLATE_MODE_OFF,
@@ -260,19 +272,6 @@ def _format_generate_error(reason: str) -> str:
     return f"❓ 生图失败（原因: {reason}）"
 
 
-def _parse_args(text: str) -> dict:
-    import re
-
-    args = {"prompt": "", "n": None, "style": None, "size": None}
-    flags = re.findall(r"--(\w+)=([^\s]+)", text)
-    for k, v in flags:
-        if k in args:
-            args[k] = v
-    prompt = normalize_prompt(re.sub(r"--\w+=[^\s]+", "", text))
-    args["prompt"] = prompt
-    return args
-
-
 # ==== Outfit 缓存池：具体服装词 / 换装动词 / 抽出片段 ====
 
 # 命中即视为"具体服装"的关键词（中文为主，覆盖常见服饰品类）
@@ -341,11 +340,12 @@ class NAIGenerateImagePlugin(Star):
 
         self.base_url: str = (config.get("base_url") or IMAGE_GEN_BASE_URL_DEFAULT).strip() or IMAGE_GEN_BASE_URL_DEFAULT
         self.image_gen_key: str = (config.get("image_gen_key") or "").strip()
-        self.image_style: str = config.get("image_style") or "vertical"
-        # 设置面板“默认风格”里的“自定义”与内部值 custom 等价，统一归一化
-        if self.image_style == "自定义":
-            self.image_style = "custom"
-        self.image_size: str = config.get("image_size") or "竖图"
+        self.image_style: str = (
+            normalize_image_style(config.get("image_style")) or "vertical"
+        )
+        self.image_size: str = (
+            normalize_image_size(config.get("image_size")) or "竖图"
+        )
         try:
             self.image_count: int = max(1, min(6, int(config.get("image_count") or 2)))
         except (TypeError, ValueError):
@@ -438,8 +438,16 @@ class NAIGenerateImagePlugin(Star):
             f"proxy_port={self.proxy_port}"
         )
 
-    def _build_full_prompt(self, user_prompt: str) -> str:
-        if not self.enable_template or not self.character_preset:
+    def _build_full_prompt(
+        self,
+        user_prompt: str,
+        *,
+        enable_template: Optional[bool] = None,
+    ) -> str:
+        template_enabled = (
+            self.enable_template if enable_template is None else enable_template
+        )
+        if not template_enabled or not self.character_preset:
             return user_prompt.strip()
         return f"{self.character_preset}, {user_prompt.strip()}"
 
@@ -1523,7 +1531,21 @@ class NAIGenerateImagePlugin(Star):
         return prepared_prompt, outfit_source, use_default_outfit, prompt_kind
 
     async def _generate_one(
-        self, prompt: str, style: str, size: str
+        self,
+        prompt: str,
+        style: str,
+        size: str,
+        *,
+        steps: Optional[int] = None,
+        scale: Optional[float] = None,
+        cfg: Optional[float] = None,
+        sampler: Optional[str] = None,
+        noise_schedule: Optional[str] = None,
+        negative: Optional[str] = None,
+        model: Optional[str] = None,
+        custom_artists: Optional[str] = None,
+        enable_template: Optional[bool] = None,
+        enable_translate: Optional[bool | str] = None,
     ) -> tuple[Optional[bytes], str]:
         """生成单张图片。
 
@@ -1540,17 +1562,34 @@ class NAIGenerateImagePlugin(Star):
             logger.warning(f"{LOG_TAG} [generate] 跳过：session 未初始化")
             return None, "no_session"
 
+        _steps = steps if steps is not None else self.steps
+        _scale = scale if scale is not None else self.scale
+        _cfg = cfg if cfg is not None else self.cfg_value
+        _sampler = sampler if sampler is not None else self.sampler
+        _noise = noise_schedule if noise_schedule is not None else self.noise_schedule
+        _negative = negative if negative is not None else self.negative
+        _model = model if model is not None else self.model
+        _enable_template = (
+            enable_template if enable_template is not None else self.enable_template
+        )
+        _translate_mode = normalize_translate_mode(
+            enable_translate if enable_translate is not None else self.translate_mode
+        )
+
         # 0) 关闭时原样发送；开启时整体转译；自动时只转译自然语言片段。
         translated_prompt, outfit_source, use_default_outfit, prompt_kind = (
             await self._prepare_translated_prompt(
                 prompt,
-                translate_mode=self.translate_mode,
+                translate_mode=_translate_mode,
                 apply_outfit=True,
             )
         )
 
         # 2) 与预设模板合并
-        full_prompt = self._build_full_prompt(translated_prompt)
+        full_prompt = self._build_full_prompt(
+            translated_prompt,
+            enable_template=_enable_template,
+        )
 
         # 3) 如果需要，直接追加默认服装（假设default_outfit已经是SD tags格式）
         if use_default_outfit and self.default_outfit:
@@ -1560,11 +1599,23 @@ class NAIGenerateImagePlugin(Star):
             )
         full_prompt = normalize_prompt(full_prompt)
 
-        artists = self._resolve_artists(style)
+        if style == "custom":
+            artists = (
+                custom_artists
+                if custom_artists is not None
+                else self.custom_artists
+            )
+            if not artists:
+                artists = DEFAULT_ARTISTS.get("vertical", "")
+        else:
+            artists = self._resolve_artists(style)
 
         logger.info(
             f"{LOG_TAG} [generate] 开始 | style={style} size={size} | "
-            f"translate={self.translate_mode}/{prompt_kind} | "
+            f"steps={_steps} scale={_scale} cfg={_cfg} sampler={_sampler} "
+            f"noise={_noise} model={_model} | "
+            f"translate={_translate_mode}/{prompt_kind} "
+            f"template={'on' if _enable_template else 'off'} | "
             f"outfit={outfit_source} | "
             f"prompt(原始)='{prompt[:60]}...' "
             f"prompt(转译后)='{translated_prompt[:60]}...' "
@@ -1578,29 +1629,29 @@ class NAIGenerateImagePlugin(Star):
             f"{self.base_url.rstrip('/')}/generate"
             f"?tag={quote(full_prompt)}"
             f"&token={self.image_gen_key}"
-            f"&model={self.model}"
+            f"&model={quote(_model)}"
             f"&artist={quote(artists)}"
             f"&size={quote(size)}"
-            f"&steps={self.steps}"
-            f"&scale={self.scale}"
-            f"&cfg={self.cfg_value}"
-            f"&sampler={self.sampler}"
-            f"&negative={quote(self.negative)}"
+            f"&steps={_steps}"
+            f"&scale={_scale}"
+            f"&cfg={_cfg}"
+            f"&sampler={quote(_sampler)}"
+            f"&negative={quote(_negative)}"
             f"&nocache=1"
-            f"&noise_schedule={self.noise_schedule}"
+            f"&noise_schedule={quote(_noise)}"
         )
         generation_parameters = {
             "tag": full_prompt,
-            "model": self.model,
+            "model": _model,
             "artist": artists,
             "size": size,
-            "steps": self.steps,
-            "scale": self.scale,
-            "cfg": self.cfg_value,
-            "sampler": self.sampler,
-            "negative": self.negative,
+            "steps": _steps,
+            "scale": _scale,
+            "cfg": _cfg,
+            "sampler": _sampler,
+            "negative": _negative,
             "nocache": 1,
-            "noise_schedule": self.noise_schedule,
+            "noise_schedule": _noise,
         }
         # 脱敏：日志中不输出完整 URL（含明文 token）
         safe_url = url.replace(f"&token={self.image_gen_key}", "&token=***")
@@ -1853,13 +1904,25 @@ class NAIGenerateImagePlugin(Star):
         if not text.strip():
             logger.info(f"{LOG_TAG} [cmd:image] 提示用法 (空指令)")
             yield event.plain_result(
-                "用法: /image <提示词> [--n=1-6] [--style=vertical|comicDoujin|r18|lolita25d|anime|galgame|自定义] [--size=竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图]"
+                "用法: /image <提示词> [--参数=值]\n"
+                "基础: --n=1-6 --style=... --size=...\n"
+                "生成: --steps=1-100 --scale=0-20 --cfg=0-30 "
+                "--sampler=... --noise=karras|native|exponential\n"
+                "覆盖: --translate=关闭|开启|自动 --template=关闭|开启 "
+                "--model=... --artist=\"...\" --negative=\"...\"\n"
+                "style/size/translate/template 的值均支持中英文。"
             )
             return
 
-        args = _parse_args(text)
+        try:
+            args = parse_image_command(text, default_style=self.image_style)
+        except ImageCommandArgumentError as e:
+            logger.info(f"{LOG_TAG} [cmd:image] 参数错误: {e}")
+            yield event.plain_result(f"参数错误：{e}")
+            return
+
         logger.info(f"{LOG_TAG} [cmd:image] 解析参数: {args}")
-        prompt = args["prompt"]
+        prompt = args.prompt
         if not prompt:
             logger.info(f"{LOG_TAG} [cmd:image] prompt 为空")
             yield event.plain_result("请提供提示词。")
@@ -1870,43 +1933,74 @@ class NAIGenerateImagePlugin(Star):
             yield event.plain_result("未配置 image_gen_key，请先在插件配置中填写 token。")
             return
 
-        try:
-            n = int(args["n"]) if args["n"] else self.image_count
-            n = max(1, min(6, n))
-        except (TypeError, ValueError):
-            n = self.image_count
-        style = args["style"] or self.image_style
-        if style == "自定义":
-            style = "custom"
-        size_cn = args["size"] or self.image_size
+        n = args.n if args.n is not None else self.image_count
+        style = args.style or self.image_style
+        size_cn = args.size or self.image_size
         # 上游 API 以中文名称区分普通、2K 和 4K 尺寸，必须原样传递。
         size = size_cn
-        if style not in IMAGE_STYLES and style != "custom":
-            logger.warning(f"{LOG_TAG} [cmd:image] 未知风格: {style}")
-            yield event.plain_result(
-                f"未知风格: {style}\n可选: {', '.join(IMAGE_STYLES.keys())}"
-            )
-            return
+
+        effective_steps = args.steps if args.steps is not None else getattr(self, "steps", 24)
+        effective_scale = args.scale if args.scale is not None else getattr(self, "scale", 6)
+        effective_cfg = args.cfg if args.cfg is not None else getattr(self, "cfg_value", 0.0)
+        effective_sampler = args.sampler or getattr(
+            self, "sampler", "k_dpmpp_2m_sde"
+        )
+        effective_noise = args.noise_schedule or getattr(
+            self, "noise_schedule", "karras"
+        )
+        effective_translate = args.translate_mode or getattr(
+            self, "translate_mode", TRANSLATE_MODE_OFF
+        )
+        effective_template = (
+            args.enable_template
+            if args.enable_template is not None
+            else getattr(self, "enable_template", True)
+        )
+        effective_model = args.model or getattr(
+            self, "model", "nai-diffusion-4-5-full"
+        )
+        generation_overrides = args.generation_overrides()
 
         logger.info(
             f"{LOG_TAG} [cmd:image] 最终参数 | style={style} size_cn={size_cn} "
-            f"size={size} n={n}"
+            f"n={n} steps={effective_steps} scale={effective_scale} "
+            f"cfg={effective_cfg} sampler={effective_sampler} "
+            f"noise={effective_noise} translate={effective_translate} "
+            f"template={effective_template} model={effective_model}"
+        )
+        brief_parameters = (
+            f"风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，数量: {n} 张\n"
+            f"Steps: {effective_steps}，Scale: {effective_scale:g}，"
+            f"CFG: {effective_cfg:g}\n"
+            f"模型: {effective_model}\n"
+            f"采样器: {effective_sampler}，噪声: {effective_noise}，"
+            f"转译: {effective_translate}，模板: "
+            f"{'开启' if effective_template else '关闭'}"
         )
         if self.bot_reply_mode == "完整":
+            override_details = ""
+            if args.artist is not None:
+                override_details += f"\n画师串: {args.artist}"
+            if args.negative is not None:
+                override_details += f"\n反向提示词: {args.negative or '(空)'}"
             yield event.plain_result(
-                f"提示词: {prompt}\n风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，共 {n} 张"
+                f"提示词: {prompt}\n{brief_parameters}{override_details}"
             )
         elif self.bot_reply_mode == "简洁":
             yield event.plain_result(
-                "正在画图...\n"
-                f"风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，数量: {n} 张"
+                f"正在画图...\n{brief_parameters}"
             )
 
         success = 0
         first_reason: Optional[str] = None
         for i in range(n):
             logger.info(f"{LOG_TAG} [cmd:image] 生成第 {i + 1}/{n} 张")
-            img_bytes, reason = await self._generate_one(prompt, style, size)
+            img_bytes, reason = await self._generate_one(
+                prompt,
+                style,
+                size,
+                **generation_overrides,
+            )
             if img_bytes:
                 success += 1
                 logger.info(

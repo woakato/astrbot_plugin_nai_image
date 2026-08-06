@@ -72,7 +72,7 @@
         "type": "bool",
         "default": false,
         "description": "保存生图参数",
-        "hint": "配合「保存生图历史」使用。开启后为每张图片保存同名 YAML 文档，记录实际生图参数；不会保存 Token，多行提示词会保留换行。"
+        "hint": "配合「保存生图历史」使用。开启后为每张图片保存同名 YAML 文档，记录实际生图参数；不会保存 Token，提示词换行会在生图前转为逗号。"
     },
     "image_history_limit": {
         "type": "int",

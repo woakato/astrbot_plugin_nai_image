@@ -1,5 +1,6 @@
 import asyncio
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlparse
 
 import yaml
 from astrbot.api.message_components import Image, Plain
@@ -78,6 +79,145 @@ def test_image_only_mode_keeps_generation_errors():
     assert all(result[0] == "plain" for result in results)
     assert "超时" in results[0][1]
     assert "全部 1 张图片生成失败" in results[1][1]
+
+
+def test_image_command_passes_all_generation_overrides():
+    plugin = make_command_plugin("仅图片", (b"test-image-bytes", "ok"))
+    event = FakeCommandEvent(
+        '1girl, solo --style=自定义 --size=landscape --steps=28 '
+        '--scale=6.5 --cfg=0.3 --sampler=k_euler_ancestral '
+        '--noise=exponential --translate=auto --template=off '
+        '--model=nai-diffusion-4-5-full '
+        '--artist="best quality, artist:foo" '
+        '--negative="bad anatomy, blurry"'
+    )
+
+    results = asyncio.run(collect_results(plugin.image(event)))
+
+    assert len(results) == 1
+    plugin._generate_one.assert_awaited_once_with(
+        "1girl, solo",
+        "custom",
+        "横图",
+        steps=28,
+        scale=6.5,
+        cfg=0.3,
+        sampler="k_euler_ancestral",
+        noise_schedule="exponential",
+        negative="bad anatomy, blurry",
+        model="nai-diffusion-4-5-full",
+        custom_artists="best quality, artist:foo",
+        enable_template=False,
+        enable_translate="自动",
+    )
+
+
+def test_image_command_rejects_unknown_argument_without_generating():
+    plugin = make_command_plugin("完整", (b"test-image-bytes", "ok"))
+    event = FakeCommandEvent("1girl --unknown=value")
+
+    results = asyncio.run(collect_results(plugin.image(event)))
+
+    assert results == [("plain", "参数错误：未知参数: --unknown。")]
+    plugin._generate_one.assert_not_awaited()
+
+
+def test_generate_one_uses_overrides_in_request_and_history():
+    class FakeResponse:
+        status = 200
+
+        async def read(self):
+            return b"generated-image"
+
+    class FakeRequestContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakeSession:
+        def __init__(self):
+            self.url = ""
+
+        def get(self, url, **kwargs):
+            self.url = url
+            return FakeRequestContext()
+
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.image_gen_key = "test-token"
+    plugin._session = FakeSession()
+    plugin.steps = 24
+    plugin.scale = 6
+    plugin.cfg_value = 0.0
+    plugin.sampler = "k_dpmpp_2m_sde"
+    plugin.noise_schedule = "karras"
+    plugin.negative = "default negative"
+    plugin.model = "default-model"
+    plugin.enable_template = True
+    plugin.translate_mode = "关闭"
+    plugin.character_preset = "character preset"
+    plugin.custom_artists = "default artist"
+    plugin.default_outfit = ""
+    plugin.base_url = "https://example.invalid"
+    plugin._prepare_translated_prompt = AsyncMock(
+        return_value=("1girl, solo", "none", False, "nai")
+    )
+    plugin._archive_generated_image = AsyncMock()
+
+    result = asyncio.run(
+        plugin._generate_one(
+            "raw prompt",
+            "custom",
+            "横图",
+            steps=28,
+            scale=6.5,
+            cfg=0.3,
+            sampler="k_euler_ancestral",
+            noise_schedule="exponential",
+            negative="bad anatomy, blurry",
+            model="nai-diffusion-4-5-full",
+            custom_artists="best quality, artist:foo",
+            enable_template=False,
+            enable_translate="自动",
+        )
+    )
+
+    assert result == (b"generated-image", "ok")
+    query = parse_qs(urlparse(plugin._session.url).query, keep_blank_values=True)
+    assert query == {
+        "tag": ["1girl, solo"],
+        "token": ["test-token"],
+        "model": ["nai-diffusion-4-5-full"],
+        "artist": ["best quality, artist:foo"],
+        "size": ["横图"],
+        "steps": ["28"],
+        "scale": ["6.5"],
+        "cfg": ["0.3"],
+        "sampler": ["k_euler_ancestral"],
+        "negative": ["bad anatomy, blurry"],
+        "nocache": ["1"],
+        "noise_schedule": ["exponential"],
+    }
+    plugin._prepare_translated_prompt.assert_awaited_once_with(
+        "raw prompt",
+        translate_mode="自动",
+        apply_outfit=True,
+    )
+    saved_parameters = plugin._archive_generated_image.await_args.args[1]
+    assert saved_parameters == {
+        "tag": "1girl, solo",
+        "model": "nai-diffusion-4-5-full",
+        "artist": "best quality, artist:foo",
+        "size": "横图",
+        "steps": 28,
+        "scale": 6.5,
+        "cfg": 0.3,
+        "sampler": "k_euler_ancestral",
+        "negative": "bad anatomy, blurry",
+        "nocache": 1,
+        "noise_schedule": "exponential",
+    }
 
 
 def test_image_history_keeps_newest_managed_files(tmp_path):
