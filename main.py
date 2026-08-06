@@ -2,6 +2,7 @@ import asyncio
 import base64
 import time
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -10,7 +11,7 @@ from aiohttp import web
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image as Img, Plain
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, json_response, request as web_request
 
 LOG_TAG = "[NAI-Image]"
@@ -20,6 +21,7 @@ PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8765
 PLUGIN_NAME = "astrbot_plugin_nai_image"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/test_panel"
+BOT_REPLY_MODES = {"仅图片", "简洁", "完整"}
 
 # ==== 试用生成（代码内 XOR 混淆方案）====
 # XOR 解密密钥（不是试用密钥本身）
@@ -289,6 +291,22 @@ class NAIGenerateImagePlugin(Star):
             self.image_count: int = max(1, min(6, int(config.get("image_count") or 2)))
         except (TypeError, ValueError):
             self.image_count = 2
+        self.bot_reply_mode: str = config.get("bot_reply_mode") or "完整"
+        if self.bot_reply_mode not in BOT_REPLY_MODES:
+            self.bot_reply_mode = "完整"
+        self.save_image_history: bool = bool(config.get("save_image_history", False))
+        try:
+            history_limit = config.get("image_history_limit")
+            self.image_history_limit: int = max(
+                0,
+                int(history_limit)
+                if history_limit is not None and history_limit != ""
+                else 0,
+            )
+        except (TypeError, ValueError):
+            self.image_history_limit = 0
+        self._image_history_dir: Optional[Path] = None
+        self._image_history_lock = asyncio.Lock()
         self.custom_artists: str = config.get("custom_artists") or ""
         self.model: str = config.get("model") or "nai-diffusion-4-5-full"
         try:
@@ -341,8 +359,10 @@ class NAIGenerateImagePlugin(Star):
             f"token={'已配置' if self.image_gen_key else '未配置'} | "
             f"base_url={self.base_url} | "
             f"style={self.image_style} | size={self.image_size} | "
-            f"count={self.image_count} | model={self.model} | "
+            f"count={self.image_count} reply={self.bot_reply_mode} | model={self.model} | "
             f"steps={self.steps} scale={self.scale} cfg={self.cfg_value} | "
+            f"history={'ON' if self.save_image_history else 'OFF'} "
+            f"limit={self.image_history_limit} | "
             f"template={'启用' if self.enable_template and self.character_preset else '未启用'} | "
             f"translate={'启用' if self.enable_translate else '未启用'} "
             f"provider='{self.translate_provider or '默认'}' | "
@@ -355,6 +375,77 @@ class NAIGenerateImagePlugin(Star):
         if not self.enable_template or not self.character_preset:
             return user_prompt.strip()
         return f"{self.character_preset}, {user_prompt.strip()}"
+
+    @staticmethod
+    def _image_history_extension(img_bytes: bytes) -> str:
+        if img_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        if img_bytes.startswith(b"\xff\xd8\xff"):
+            return ".jpg"
+        if len(img_bytes) >= 12 and img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
+            return ".webp"
+        return ".img"
+
+    def _get_image_history_dir(self) -> Path:
+        if self._image_history_dir is None:
+            self._image_history_dir = StarTools.get_data_dir(PLUGIN_NAME) / "image_history"
+        return self._image_history_dir
+
+    @staticmethod
+    def _write_and_cleanup_image_history(
+        history_dir: Path,
+        img_bytes: bytes,
+        history_limit: int,
+    ) -> tuple[Path, int]:
+        history_dir.mkdir(parents=True, exist_ok=True)
+        extension = NAIGenerateImagePlugin._image_history_extension(img_bytes)
+        image_path = history_dir / f"nai_{time.time_ns()}{extension}"
+        temp_path = history_dir / f".{image_path.name}.tmp"
+        try:
+            temp_path.write_bytes(img_bytes)
+            temp_path.replace(image_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+        removed = 0
+        if history_limit > 0:
+            managed_files: list[tuple[int, str, Path]] = []
+            for path in history_dir.iterdir():
+                if not path.is_file() or not path.name.startswith("nai_"):
+                    continue
+                if path.suffix.lower() not in {".png", ".jpg", ".webp", ".img"}:
+                    continue
+                try:
+                    managed_files.append((path.stat().st_mtime_ns, path.name, path))
+                except FileNotFoundError:
+                    continue
+            managed_files.sort()
+            for _, _, old_path in managed_files[: max(0, len(managed_files) - history_limit)]:
+                try:
+                    old_path.unlink()
+                    removed += 1
+                except FileNotFoundError:
+                    continue
+
+        return image_path, removed
+
+    async def _archive_generated_image(self, img_bytes: bytes) -> None:
+        if not self.save_image_history:
+            return
+        try:
+            async with self._image_history_lock:
+                image_path, removed = await asyncio.to_thread(
+                    self._write_and_cleanup_image_history,
+                    self._get_image_history_dir(),
+                    img_bytes,
+                    self.image_history_limit,
+                )
+            logger.info(
+                f"{LOG_TAG} [history] 已保存 {image_path} | "
+                f"cleanup={removed} limit={self.image_history_limit}"
+            )
+        except Exception as e:
+            logger.warning(f"{LOG_TAG} [history] 保存或清理失败，不影响本次出图: {e!r}")
 
     async def initialize(self):
         logger.info(f"{LOG_TAG} [initialize] 阶段开始")
@@ -660,6 +751,7 @@ class NAIGenerateImagePlugin(Star):
                     f"{LOG_TAG} [generate:custom] 成功 | size={size} "
                     f"png={_w}x{_h} bytes={len(img_bytes)}"
                 )
+                await self._archive_generated_image(img_bytes)
                 return img_bytes, "ok"
         except asyncio.TimeoutError:
             return None, "timeout"
@@ -896,6 +988,9 @@ class NAIGenerateImagePlugin(Star):
             "image_style": self.image_style,
             "image_size": self.image_size,
             "image_count": self.image_count,
+            "bot_reply_mode": self.bot_reply_mode,
+            "save_image_history": self.save_image_history,
+            "image_history_limit": self.image_history_limit,
             "custom_artists": self.custom_artists,
             "model": self.model,
             "steps": self.steps,
@@ -1345,6 +1440,7 @@ class NAIGenerateImagePlugin(Star):
                     f"{LOG_TAG} [generate] 成功 | bytes={len(img_bytes)} "
                     f"elapsed={elapsed:.2f}s style={style} size={size}"
                 )
+                await self._archive_generated_image(img_bytes)
                 return img_bytes, "ok"
         except asyncio.TimeoutError:
             logger.warning(
@@ -1598,9 +1694,15 @@ class NAIGenerateImagePlugin(Star):
             f"{LOG_TAG} [cmd:image] 最终参数 | style={style} size_cn={size_cn} "
             f"size={size} n={n}"
         )
-        yield event.plain_result(
-            f"提示词: {prompt}\n风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，共 {n} 张"
-        )
+        if self.bot_reply_mode == "完整":
+            yield event.plain_result(
+                f"提示词: {prompt}\n风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，共 {n} 张"
+            )
+        elif self.bot_reply_mode == "简洁":
+            yield event.plain_result(
+                "正在画图...\n"
+                f"风格: {IMAGE_STYLES.get(style, style)}，比例: {size_cn}，数量: {n} 张"
+            )
 
         success = 0
         first_reason: Optional[str] = None
@@ -1612,12 +1714,15 @@ class NAIGenerateImagePlugin(Star):
                 logger.info(
                     f"{LOG_TAG} [cmd:image] 第 {i + 1}/{n} 张发送 | bytes={len(img_bytes)}"
                 )
-                yield event.chain_result(
-                    [
-                        Plain(f"[{i + 1}/{n}]"),
-                        Img.fromBytes(img_bytes),
-                    ]
-                )
+                if self.bot_reply_mode == "仅图片":
+                    yield event.chain_result([Img.fromBytes(img_bytes)])
+                else:
+                    yield event.chain_result(
+                        [
+                            Plain(f"[{i + 1}/{n}]"),
+                            Img.fromBytes(img_bytes),
+                        ]
+                    )
             else:
                 if first_reason is None:
                     first_reason = reason
