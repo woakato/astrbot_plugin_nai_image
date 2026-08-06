@@ -11,6 +11,13 @@ TRANSLATE_MODES = {
     TRANSLATE_MODE_AUTO,
 }
 
+_PROMPT_LINE_BREAK_RE = re.compile(
+    r"[^\S\r\n]*(?:[,，;；][^\S\r\n]*)?"
+    r"(?:(?:\r\n?|\n)[^\S\r\n]*)+"
+    r"(?:[,，;；][^\S\r\n]*)?"
+)
+_PROMPT_HORIZONTAL_WHITESPACE_RE = re.compile(r"[^\S\r\n]+")
+
 PromptSegmentKind = Literal["nai", "natural"]
 
 
@@ -66,6 +73,13 @@ def normalize_translate_mode(value: object) -> str:
         "auto": TRANSLATE_MODE_AUTO,
     }
     return aliases.get(normalized, TRANSLATE_MODE_OFF)
+
+
+def normalize_prompt(prompt: str) -> str:
+    """Normalize prompt whitespace before classification, translation and generation."""
+    normalized = _PROMPT_LINE_BREAK_RE.sub(", ", str(prompt or "").strip())
+    normalized = _PROMPT_HORIZONTAL_WHITESPACE_RE.sub(" ", normalized)
+    return normalized.strip()
 
 
 def split_prompt_segments(prompt: str) -> list[str]:
@@ -258,7 +272,7 @@ def extract_mixed_prompt(prompt: str) -> MixedPrompt:
     marker = re.search(r"\|nl\|", original, flags=re.IGNORECASE)
     if marker is not None:
         nai_part = original[: marker.start()].strip(" ,，;；\r\n")
-        natural_part = original[marker.end() :].strip()
+        natural_part = original[marker.end() :].strip(" ,，;；\r\n")
         segments = [
             PromptSegment(text, "nai") for text in split_prompt_segments(nai_part)
         ]

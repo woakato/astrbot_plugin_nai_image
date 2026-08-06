@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import json
 import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -8,6 +7,7 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 import aiohttp
+import yaml
 from aiohttp import web
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -22,6 +22,7 @@ if __package__:
         TRANSLATE_MODE_ON,
         extract_mixed_prompt,
         merge_translated_prompt,
+        normalize_prompt,
         normalize_translate_mode,
     )
 else:
@@ -31,6 +32,7 @@ else:
         TRANSLATE_MODE_ON,
         extract_mixed_prompt,
         merge_translated_prompt,
+        normalize_prompt,
         normalize_translate_mode,
     )
 
@@ -42,6 +44,43 @@ PROXY_PORT = 8765
 PLUGIN_NAME = "astrbot_plugin_nai_image"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/test_panel"
 BOT_REPLY_MODES = {"仅图片", "简洁", "完整"}
+
+
+class _LiteralYamlString(str):
+    pass
+
+
+class _GenerationParametersDumper(yaml.SafeDumper):
+    pass
+
+
+def _represent_literal_yaml_string(
+    dumper: yaml.SafeDumper,
+    value: _LiteralYamlString,
+):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style="|")
+
+
+_GenerationParametersDumper.add_representer(
+    _LiteralYamlString,
+    _represent_literal_yaml_string,
+)
+
+
+def _prepare_generation_parameters_for_yaml(value: Any) -> Any:
+    if isinstance(value, str) and ("\n" in value or "\r" in value):
+        normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+        return _LiteralYamlString(normalized)
+    if isinstance(value, dict):
+        return {
+            key: _prepare_generation_parameters_for_yaml(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_prepare_generation_parameters_for_yaml(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_prepare_generation_parameters_for_yaml(item) for item in value)
+    return value
 
 # ==== 试用生成（代码内 XOR 混淆方案）====
 # XOR 解密密钥（不是试用密钥本身）
@@ -229,7 +268,7 @@ def _parse_args(text: str) -> dict:
     for k, v in flags:
         if k in args:
             args[k] = v
-    prompt = re.sub(r"--\w+=[^\s]+", "", text).strip()
+    prompt = normalize_prompt(re.sub(r"--\w+=[^\s]+", "", text))
     args["prompt"] = prompt
     return args
 
@@ -438,14 +477,19 @@ class NAIGenerateImagePlugin(Star):
 
         parameters_path: Optional[Path] = None
         if generation_parameters is not None:
-            parameters_path = image_path.with_suffix(".json")
+            parameters_path = image_path.with_suffix(".yaml")
             parameters_temp_path = history_dir / f".{parameters_path.name}.tmp"
             try:
                 parameters_temp_path.write_text(
-                    json.dumps(
-                        generation_parameters,
-                        ensure_ascii=False,
-                        indent=2,
+                    yaml.dump(
+                        _prepare_generation_parameters_for_yaml(
+                            generation_parameters
+                        ),
+                        Dumper=_GenerationParametersDumper,
+                        allow_unicode=True,
+                        default_flow_style=False,
+                        sort_keys=False,
+                        width=4096,
                     ),
                     encoding="utf-8",
                 )
@@ -472,6 +516,8 @@ class NAIGenerateImagePlugin(Star):
                     removed += 1
                 except FileNotFoundError:
                     continue
+                old_path.with_suffix(".yaml").unlink(missing_ok=True)
+                # Remove sidecars created by versions that stored parameters as JSON.
                 old_path.with_suffix(".json").unlink(missing_ok=True)
 
         return image_path, parameters_path, removed
@@ -744,6 +790,7 @@ class NAIGenerateImagePlugin(Star):
             full_prompt = f"{_char_preset}, {base_prompt}"
         else:
             full_prompt = base_prompt
+        full_prompt = normalize_prompt(full_prompt)
 
         logger.info(
             f"{LOG_TAG} [generate:custom] style={style} size={size} "
@@ -925,8 +972,8 @@ class NAIGenerateImagePlugin(Star):
         except Exception:
             return error_response("请求体解析失败", status_code=400)
 
-        nai_prompt = (body.get("nai_prompt") or "").strip()
-        nl_prompt = (body.get("nl_prompt") or "").strip()
+        nai_prompt = normalize_prompt(body.get("nai_prompt") or "")
+        nl_prompt = normalize_prompt(body.get("nl_prompt") or "")
         if not nai_prompt and not nl_prompt:
             return error_response("请至少填写一个提示词框", status_code=400)
 
@@ -1093,8 +1140,8 @@ class NAIGenerateImagePlugin(Star):
         except Exception:
             return error_response("请求体解析失败", status_code=400)
 
-        nai_prompt = (body.get("nai_prompt") or "").strip()
-        nl_prompt = (body.get("nl_prompt") or "").strip()
+        nai_prompt = normalize_prompt(body.get("nai_prompt") or "")
+        nl_prompt = normalize_prompt(body.get("nl_prompt") or "")
         if not nai_prompt and not nl_prompt:
             return error_response("请至少填写一个提示词框", status_code=400)
 
@@ -1413,7 +1460,7 @@ class NAIGenerateImagePlugin(Star):
         apply_outfit: bool,
     ) -> tuple[str, str, bool, str]:
         """Prepare a prompt and return prompt, outfit source, default flag and kind."""
-        raw_prompt = prompt.strip()
+        raw_prompt = normalize_prompt(prompt)
         current_mode = getattr(self, "translate_mode", None)
         if current_mode is None:
             current_mode = (
@@ -1511,6 +1558,7 @@ class NAIGenerateImagePlugin(Star):
             logger.debug(
                 f"{LOG_TAG} [outfit] 模板合并后直接添加默认服装SD tags | preview='{self.default_outfit[:60]}...'"
             )
+        full_prompt = normalize_prompt(full_prompt)
 
         artists = self._resolve_artists(style)
 
@@ -1660,7 +1708,7 @@ class NAIGenerateImagePlugin(Star):
                 {"error": {"message": f"invalid json: {e!r}", "type": "invalid_request_error"}},
                 status=400,
             )
-        prompt = (body.get("prompt") or "").strip()
+        prompt = normalize_prompt(body.get("prompt") or "")
         if not prompt:
             logger.warning(f"{LOG_TAG} [proxy:gen] prompt 为空")
             return web.json_response(
@@ -1731,7 +1779,7 @@ class NAIGenerateImagePlugin(Star):
                     continue
                 parts_seen.append(part.name)
                 if part.name == "prompt":
-                    prompt = (await part.text()).strip()
+                    prompt = normalize_prompt(await part.text())
                 elif part.name == "size":
                     raw_size = (await part.text() or "").strip()
                     if raw_size:
@@ -1914,6 +1962,7 @@ class NAIGenerateImagePlugin(Star):
             style(string): 描述生成图片的风格。可选：vertical / comicDoujin / r18 / lolita25d / anime / galgame / 自定义
             size_cn(string): 描述生成图片的尺寸。可选：竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图。
         '''
+        prompt = normalize_prompt(prompt)
         if not self.enable_llm_tool:
             logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生图工具已禁用，请在插件设置中开启 enable_llm_tool")
             yield "生图工具已被管理员禁用，请在插件设置中开启 enable_llm_tool"

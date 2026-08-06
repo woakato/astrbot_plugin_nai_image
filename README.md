@@ -69,7 +69,7 @@
 data/plugin_data/astrbot_plugin_nai_image/image_history/
 ```
 
-开启 `save_generation_parameters` 后，每张图片旁会生成一个同名 `.json` 文档，记录实际发送给生图接口的参数，但不会保存 Token。此选项需配合 `save_image_history` 使用。
+开启 `save_generation_parameters` 后，每张图片旁会生成一个同名 `.yaml` 文档，记录实际发送给生图接口的参数，但不会保存 Token。输入提示词中的换行会在生图前统一转为逗号分隔，连续水平空白会压缩为单个空格；其他多行参数值仍使用 YAML 字面量块保留换行。此选项需配合 `save_image_history` 使用。
 
 `image_history_limit` 设置本地最多保留的图片数量。每次保存新图片后，插件会删除超出数量的最旧图片及其同名参数文档；设为 `0` 时只保存、不自动清理。归档或清理失败不会影响图片正常返回。
 
@@ -86,9 +86,9 @@ data/plugin_data/astrbot_plugin_nai_image/image_history/
 - **自动**：语法感知分段后保留 NAI 标签，只把自然语言片段合并后交给 LLM，再将转译结果拼回保留标签；纯 NAI 提示词不会调用 LLM
 - **自动模式显式标记**：在无法可靠区分的英文短语前添加 `|nl|`，其后的内容会作为自然语言处理。例如：`1girl, solo, best quality |nl| standing in rain with a clear umbrella`
 - 转译结果会自动剥离思考型模型（如 MiniMax-M3、DeepSeek-R1）输出的 `<think>...</think>` 思考块，只保留纯标签正文
-- **关闭转译时**：服装缓存池 / 默认服装补全等预处理会一并停用，仅保留「角色核心关键词与身体描述补全」（`character_preset`）的拼接，提示词按 NAI 标签原样发送
+- **关闭转译时**：服装缓存池 / 默认服装补全等预处理会一并停用，仅保留「角色核心关键词与身体描述补全」（`character_preset`）的拼接；提示词不做转译，仅统一换行和连续空白
 - **自动识别为纯 NAI 时**：同样跳过服装缓存和默认服装补全，避免修改原生标签与权重语法
-- **与「我会永远陪着你」联动时**：陪伴插件已新增「NAI联动模式」（生图提示词表达方式），开启后由陪伴插件的 LLM 直接按 NAI 4.5 规范输出原生标签 prompt，此时无需再开启本插件的转译——关闭 `enable_translate` 即可，提示词会原样提交生图
+- **与「我会永远陪着你」联动时**：陪伴插件已新增「NAI联动模式」（生图提示词表达方式），开启后由陪伴插件的 LLM 直接按 NAI 4.5 规范输出原生标签 prompt，此时无需再开启本插件的转译——关闭 `enable_translate` 即可，提示词仅做空白规范化后提交生图
 
 ### 服装缓存池（Outfit Cache）
 

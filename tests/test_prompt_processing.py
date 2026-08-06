@@ -5,9 +5,30 @@ from prompt_processing import (
     classify_prompt_segment,
     extract_mixed_prompt,
     merge_translated_prompt,
+    normalize_prompt,
     normalize_translate_mode,
     split_prompt_segments,
 )
+
+
+def test_prompt_normalization_replaces_line_breaks_and_collapses_spaces():
+    prompt = "  1girl,\r\n \r\n  solo\t  best quality\n, blue eyes  "
+
+    assert normalize_prompt(prompt) == "1girl, solo best quality, blue eyes"
+
+
+def test_prompt_normalization_keeps_single_line_tag_syntax():
+    prompt = "1.2::red dress, white bow::, {{blue hair, long hair}}, solo"
+
+    assert normalize_prompt(prompt) == prompt
+
+
+def test_explicit_natural_marker_can_be_on_its_own_line():
+    normalized = normalize_prompt("1girl, solo\n|nl|\n她站在雨中")
+    parts = extract_mixed_prompt(normalized)
+
+    assert parts.nai_text == "1girl, solo"
+    assert parts.natural_text == "她站在雨中"
 
 
 def test_translate_mode_accepts_new_values_and_legacy_booleans():

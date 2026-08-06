@@ -1,7 +1,7 @@
 import asyncio
-import json
 from unittest.mock import AsyncMock
 
+import yaml
 from astrbot.api.message_components import Image, Plain
 
 from main import NAIGenerateImagePlugin
@@ -92,23 +92,38 @@ def test_image_history_keeps_newest_managed_files(tmp_path):
     unmanaged_file.write_text("keep", encoding="utf-8")
 
     async def save_images():
-        await plugin._archive_generated_image(b"first", {"tag": "first prompt"})
+        await plugin._archive_generated_image(
+            b"first",
+            {"tag": "first prompt line 1\nfirst prompt line 2"},
+        )
+        first_image = next(plugin._image_history_dir.glob("nai_*.img"))
+        first_image.with_suffix(".json").write_text(
+            '{"tag": "legacy parameters"}',
+            encoding="utf-8",
+        )
         await plugin._archive_generated_image(b"second", {"tag": "second prompt"})
         await plugin._archive_generated_image(b"third", {"tag": "third prompt"})
 
     asyncio.run(save_images())
 
     saved_files = sorted(plugin._image_history_dir.glob("nai_*.img"))
-    parameter_files = sorted(plugin._image_history_dir.glob("nai_*.json"))
+    parameter_files = sorted(plugin._image_history_dir.glob("nai_*.yaml"))
     assert len(saved_files) == 2
     assert len(parameter_files) == 2
     assert {path.read_bytes() for path in saved_files} == {b"second", b"third"}
-    assert {json.loads(path.read_text(encoding="utf-8"))["tag"] for path in parameter_files} == {
+    saved_prompts = {
+        yaml.safe_load(path.read_text(encoding="utf-8"))["tag"]
+        for path in parameter_files
+    }
+    assert saved_prompts == {
         "second prompt",
         "third prompt",
     }
-    assert {path.stem for path in saved_files} == {path.stem for path in parameter_files}
+    saved_stems = {path.stem for path in saved_files}
+    parameter_stems = {path.stem for path in parameter_files}
+    assert saved_stems == parameter_stems
     assert unmanaged_file.read_text(encoding="utf-8") == "keep"
+    assert not list(plugin._image_history_dir.glob("nai_*.json"))
 
 
 def test_zero_history_limit_disables_cleanup(tmp_path):
@@ -127,7 +142,7 @@ def test_zero_history_limit_disables_cleanup(tmp_path):
     asyncio.run(save_images())
 
     assert len(list(plugin._image_history_dir.glob("nai_*.img"))) == 3
-    assert len(list(plugin._image_history_dir.glob("nai_*.json"))) == 3
+    assert len(list(plugin._image_history_dir.glob("nai_*.yaml"))) == 3
 
 
 def test_parameter_history_can_be_disabled(tmp_path):
@@ -141,7 +156,29 @@ def test_parameter_history_can_be_disabled(tmp_path):
     asyncio.run(plugin._archive_generated_image(b"image", {"tag": "prompt"}))
 
     assert len(list(plugin._image_history_dir.glob("nai_*.img"))) == 1
-    assert not list(plugin._image_history_dir.glob("nai_*.json"))
+    assert not list(plugin._image_history_dir.glob("nai_*.yaml"))
+
+
+def test_parameter_history_uses_yaml_literal_block_for_multiline_prompt(tmp_path):
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.save_image_history = True
+    plugin.save_generation_parameters = True
+    plugin.image_history_limit = 0
+    plugin._image_history_dir = tmp_path / "image_history"
+    plugin._image_history_lock = asyncio.Lock()
+    parameters = {
+        "tag": "1girl, solo\ncute\nglare nude",
+        "steps": 28,
+        "cfg": 0.3,
+    }
+
+    asyncio.run(plugin._archive_generated_image(b"image", parameters))
+
+    parameters_path = next(plugin._image_history_dir.glob("nai_*.yaml"))
+    content = parameters_path.read_text(encoding="utf-8")
+    assert "tag: |-\n  1girl, solo\n  cute\n  glare nude\n" in content
+    assert "\\n" not in content
+    assert yaml.safe_load(content) == parameters
 
 
 def test_auto_translate_skips_pure_nai_prompt():
@@ -165,6 +202,25 @@ def test_auto_translate_skips_pure_nai_prompt():
     assert not use_default
     assert prompt_kind == "nai"
     plugin._translate_prompt.assert_not_awaited()
+
+
+def test_prompt_is_normalized_before_disabled_translation_pipeline():
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.translate_mode = "关闭"
+    plugin.enable_translate = False
+
+    prepared, outfit_source, use_default, prompt_kind = asyncio.run(
+        plugin._prepare_translated_prompt(
+            "1girl,\n\n  solo\t  best quality",
+            translate_mode="关闭",
+            apply_outfit=True,
+        )
+    )
+
+    assert prepared == "1girl, solo best quality"
+    assert outfit_source == "none"
+    assert not use_default
+    assert prompt_kind == "nai"
 
 
 def test_auto_translate_only_sends_natural_segments_to_llm():
