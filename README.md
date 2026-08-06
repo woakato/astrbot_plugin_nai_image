@@ -13,11 +13,39 @@
 | `/image <提示词> --n=4` | 生成 4 张图片 (1-6) |
 | `/image <提示词> --style=anime` | 指定风格 |
 | `/image <提示词> --size=横图` | 指定比例 |
+| `/image <提示词> --cfg=0.3 --scale=6 --steps=28` | 单次覆盖生成参数 |
 | `/quota` | 查询 token 剩余配额 |
 | `/imgstatus` | 检查生图服务连通性 |
 
-风格：`vertical` / `comicDoujin` / `r18` / `lolita25d` / `anime` / `galgame` / `自定义`（等价于 `custom`）
-尺寸：`竖图` / `横图` / `方图` / `2K竖图` / `2K横图` / `2K方图` / `4K竖图` / `4K横图` / `4K方图`
+所有参数都只影响当前指令，不会修改插件配置。含空格的参数值需要使用单引号或双引号：
+
+```text
+/image 1girl, solo --style=custom --artist="best quality, artist:foo" --negative="bad anatomy, blurry, text"
+```
+
+| 参数 | 取值 | 说明 |
+| --- | --- | --- |
+| `--n` | `1-6` | 生成数量 |
+| `--style` | `vertical` / `comicDoujin` / `r18` / `lolita25d` / `anime` / `galgame` / `custom` | 也接受「自定义」及各风格的中文显示名 |
+| `--size` | `portrait` / `landscape` / `square` 及 2K/4K 形式 | 也接受「竖图 / 横图 / 方图」等中文值 |
+| `--steps` | `1-100` 整数 | 采样步数 |
+| `--scale` | `0-20` 数字 | 提示词引导强度 |
+| `--cfg` | `0-30` 数字 | CFG Rescale，支持小数和 `0` |
+| `--sampler` | 固定采样器名 | 与配置面板可选值一致 |
+| `--noise` | `karras` / `native` / `exponential` | `--noise_schedule` 是等价别名 |
+| `--translate` | `关闭/off` / `开启/on` / `自动/auto` | 单次覆盖转译模式 |
+| `--template` | `关闭/off` / `开启/on` | 单次决定是否拼接角色预设 |
+| `--model` | 模型名 | 仅允许字母、数字、点、下划线和连字符 |
+| `--artist` | 画师串 | 仅在有效风格为 `custom` / `自定义` 时可用 |
+| `--negative` | 反向提示词 | 可使用 `--negative=""` 清空当次反向提示词 |
+
+采样器可选：`k_dpmpp_2m_sde` / `k_dpmpp_2m` / `k_dpmpp_sde` / `k_dpmpp_2s_ancestral` / `k_euler_ancestral` / `k_euler`。未知参数、重复参数、超出范围或未闭合引号会直接报错，不会发起生图请求。
+
+`bot_reply_mode` 控制 `/image` 指令的回复内容：
+
+- `仅图片`：成功时只发送图片，失败报错保持不变
+- `简洁`：生成前只发送状态和最终生效的核心参数，不发送提示词
+- `完整`：发送完整提示词、最终核心参数及本次指定的画师串/反向提示词
 
 ## 试用点数+测试面板
 插件自带一个 **NAI 生图测试面板**，可在 AstrBot 管理后台的插件扩展页面直接在线调试生图参数  
@@ -31,7 +59,7 @@
 
 ## 工具
 
-`NAI_Generate_Image`：参数与 `/image` 命令相同，调用 NAI 生成一张图片并直接发送给当前用户，同时向 Agent 返回单一工具结果以保留完整对话历史。每个消息事件最多请求一次 NAI；模型重复调用时仍会收到对应工具结果，但不会再次生图或扣费，也不需要搭配 `send_message_to_user`。
+`NAI_Generate_Image`：接受提示词、风格和尺寸，调用 NAI 生成一张图片并直接发送给当前用户，同时向 Agent 返回单一工具结果以保留完整对话历史。每个消息事件最多请求一次 NAI；模型重复调用时仍会收到对应工具结果，但不会再次生图或扣费，也不需要搭配 `send_message_to_user`。
 
 ## 测试面板
 
@@ -55,22 +83,38 @@
 插件管理面板填写 `image_gen_key`（必填）及其他高级参数。
 详细配置项见 `_conf_schema.json`。
 
+### 生图历史
+
+开启 `save_image_history` 后，所有成功生成的图片都会保存到：
+
+```text
+data/plugin_data/astrbot_plugin_nai_image/image_history/
+```
+
+开启 `save_generation_parameters` 后，每张图片旁会生成一个同名 `.yaml` 文档，记录实际发送给生图接口的参数，但不会保存 Token。输入提示词中的换行会在生图前统一转为逗号分隔，连续水平空白会压缩为单个空格；其他多行参数值仍使用 YAML 字面量块保留换行。此选项需配合 `save_image_history` 使用。
+
+`image_history_limit` 设置本地最多保留的图片数量。每次保存新图片后，插件会删除超出数量的最旧图片及其同名参数文档；设为 `0` 时只保存、不自动清理。归档或清理失败不会影响图片正常返回。
+
 ### 提示词转译中间层
 
-可选开启一个 LLM 中间模型，在把 prompt 拼到预设之前先把自然语言描述翻译成 SD / NAI 标签风格。
+可选使用一个 LLM 中间模型，在把 prompt 拼到预设之前先把自然语言描述翻译成 SD / NAI 标签风格。
 
-- `enable_translate`：`true` 开启，`false` 关闭（默认关闭）
+- `enable_translate`：`关闭`（默认）/ `开启` / `自动`
 - `translate_provider`：通过 WebUI 的 provider 下拉选择器选择，留空则使用 AstrBot 默认 provider
 
 强烈建议选用轻量便宜的小模型，转译耗时通常在 1 秒内。转译失败 / provider 不可用时会自动回退原文，不影响出图主流程。
 
+- **开启**：与旧版开启开关的行为一致，整个提示词都会交给 LLM 转译
+- **自动**：语法感知分段后保留 NAI 标签，只把自然语言片段合并后交给 LLM，再将转译结果拼回保留标签；纯 NAI 提示词不会调用 LLM
+- **自动模式显式标记**：在无法可靠区分的英文短语前添加 `|nl|`，其后的内容会作为自然语言处理。例如：`1girl, solo, best quality |nl| standing in rain with a clear umbrella`
 - 转译结果会自动剥离思考型模型（如 MiniMax-M3、DeepSeek-R1）输出的 `<think>...</think>` 思考块，只保留纯标签正文
-- **关闭转译时**：服装缓存池 / 默认服装补全等预处理会一并停用，仅保留「角色核心关键词与身体描述补全」（`character_preset`）的拼接，提示词按 NAI 标签原样发送
-- **与「我会永远陪着你」联动时**：陪伴插件已新增「NAI联动模式」（生图提示词表达方式），开启后由陪伴插件的 LLM 直接按 NAI 4.5 规范输出原生标签 prompt，此时无需再开启本插件的转译——关闭 `enable_translate` 即可，提示词会原样提交生图
+- **关闭转译时**：服装缓存池 / 默认服装补全等预处理会一并停用，仅保留「角色核心关键词与身体描述补全」（`character_preset`）的拼接；提示词不做转译，仅统一换行和连续空白
+- **自动识别为纯 NAI 时**：同样跳过服装缓存和默认服装补全，避免修改原生标签与权重语法
+- **与「我会永远陪着你」联动时**：陪伴插件已新增「NAI联动模式」（生图提示词表达方式），开启后由陪伴插件的 LLM 直接按 NAI 4.5 规范输出原生标签 prompt，此时无需再开启本插件的转译——关闭 `enable_translate` 即可，提示词仅做空白规范化后提交生图
 
 ### 服装缓存池（Outfit Cache）
 
-> 仅在开启「提示词转译中间层」（`enable_translate`）时生效；关闭转译后本功能整体停用。
+> 在转译模式为「开启」时生效；「自动」模式下只对识别出的自然语言片段生效。关闭转译或自动识别为纯 NAI 时，本功能不参与处理。
 
 很多角色在"今天穿了什么"在一天内是固定的，但是角色在一天内也会换装，cosplay等等。  
 - `本插件新增缓存池，缓存池机制，能记录bot换过什么服装并在缓存时间内替换默认服装并保持。  

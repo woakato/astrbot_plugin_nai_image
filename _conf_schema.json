@@ -2,8 +2,8 @@
     "image_gen_key": {
         "type": "string",
         "default": "",
-        "description": "nai.sta1n.cn 的 token，必填",
-        "hint": "在 nai.sta1n.cn 申请到的 toUserId",
+        "description": "生图 Token",
+        "hint": "必填。在 nai.sta1n.cn 申请到的 toUserId。",
         "obvious": true
     },
     "base_url": {
@@ -29,8 +29,8 @@
     "image_size": {
         "type": "string",
         "default": "竖图",
-        "description": "默认尺寸（数字表示相对成本）",
-        "hint": "选择生成图片的尺寸和分辨率。2K和4K选项会产生更高成本。",
+        "description": "默认尺寸",
+        "hint": "选择生成图片的尺寸和分辨率；选项中的数字表示相对成本，2K 和 4K 会产生更高成本。",
         "options": [
             "竖图",
             "横图",
@@ -46,37 +46,70 @@
     "image_count": {
         "type": "int",
         "default": 2,
-        "description": "默认生成数量 (1-6)",
+        "description": "默认生成数量",
+        "hint": "每次生成 1-6 张图片。",
         "min": 1,
         "max": 6
+    },
+    "bot_reply_mode": {
+        "type": "string",
+        "default": "完整",
+        "description": "Bot 回复模式",
+        "hint": "「仅图片」只在成功后发送图片，失败报错不受影响；「简洁」只发送正在画图和简要参数；「完整」保留提示词及参数回复。",
+        "options": [
+            "仅图片",
+            "简洁",
+            "完整"
+        ]
+    },
+    "save_image_history": {
+        "type": "bool",
+        "default": false,
+        "description": "保存生图历史",
+        "hint": "开启后将所有成功生成的图片保存到 plugin_data/astrbot_plugin_nai_image/image_history。"
+    },
+    "save_generation_parameters": {
+        "type": "bool",
+        "default": false,
+        "description": "保存生图参数",
+        "hint": "配合「保存生图历史」使用。开启后为每张图片保存同名 YAML 文档，记录实际生图参数；不会保存 Token，提示词换行会在生图前转为逗号。"
+    },
+    "image_history_limit": {
+        "type": "int",
+        "default": 0,
+        "description": "历史保留数量",
+        "hint": "仅在保存生图历史时生效。每次保存后自动删除最旧图片及其同名参数文档，仅保留指定数量；设为 0 不清理。",
+        "min": 0
     },
     "custom_artists": {
         "type": "string",
         "default": "",
-        "description": "自定义画师串（仅在 默认风格=自定义 时生效）"
+        "description": "自定义画师串",
+        "hint": "仅在「默认风格」选择「自定义」时生效。"
     },
     "enable_template": {
         "type": "bool",
         "default": true,
-        "description": "是否启用提示词模板（开启后把下方「角色核心关键词与身体描述补全」拼接到提示词最前面；关闭后只发送原始提示词）"
+        "description": "启用提示词模板",
+        "hint": "开启后将「角色核心关键词与身体描述补全」拼接到提示词最前面；关闭后只发送原始提示词。"
     },
     "character_preset": {
         "type": "string",
         "default": "",
-        "description": "角色核心关键词与身体描述补全",
+        "description": "角色预设",
         "hint": "填入角色在 NAI 里的核心关键词和身体描述补全，如 muelsyse(Arknights), mechanical headwear 等。无论是否开启 LLM 转译，本项都会拼接（这是关闭转译后唯一保留的提示词预处理）。若源请求插件已带角色词则无需配置。"
     },
     "default_outfit": {
         "type": "string",
         "default": "",
-        "description": "默认服装（SD/NAI tag 风格）。仅在开启 LLM 转译时生效：自然语言里没有具体服装、服装缓存池也为空时自动补上这套。",
-        "hint": "用英文逗号分隔 SD/NAI tag。例如：modern fashion, dark green knit dress, fitted sweater, slim pants, leather boots"
+        "description": "默认服装",
+        "hint": "在转译模式为「开启」，或「自动」识别到自然语言时生效；提示词没有具体服装且缓存为空时自动补全。使用英文逗号分隔 SD/NAI tag，例如：modern fashion, dark green knit dress, fitted sweater, slim pants, leather boots。"
     },
     "outfit_cache_ttl_seconds": {
         "type": "int",
         "default": 3600,
-        "description": "服装缓存池持续时间（秒）。仅在开启 LLM 转译时生效；默认 3600 = 1 小时，设为 0 关闭缓存池（始终回退到默认服装）。",
-        "hint": "提示词里出现具体服装/换装描述时会缓存这套服装，之后的模糊描述（如「今天的穿搭」）自动沿用；超时失效后回退默认服装。关闭 LLM 转译后本功能整体停用。",
+        "description": "服装缓存时长",
+        "hint": "单位为秒，在「开启」模式或「自动」识别到自然语言时生效。具体服装或换装描述会写入缓存，后续模糊描述自动沿用；默认 3600 秒，超时后回退默认服装，设为 0 可关闭缓存。",
         "min": 0,
         "max": 86400
     },
@@ -96,9 +129,12 @@
         "description": "scale"
     },
     "cfg": {
-        "type": "int",
-        "default": 7,
-        "description": "cfg"
+        "type": "float",
+        "default": 7.0,
+        "description": "CFG Rescale",
+        "hint": "对应接口参数 cfg，默认 7，范围 0-30，支持小数和 0 值。",
+        "min": 0,
+        "max": 30
     },
     "sampler": {
         "type": "string",
@@ -121,33 +157,39 @@
     "negative": {
         "type": "string",
         "default": "",
-        "description": "自定义反向提示词，留空使用默认"
+        "description": "反向提示词",
+        "hint": "留空时使用插件内置的默认反向提示词。"
     },
     "proxy_port": {
         "type": "int",
         "default": 8765,
-        "description": "本地代理端口（陪伴插件通过此端口调用本插件的生图）",
-        "hint": "改完需要重载插件生效",
+        "description": "本地代理端口",
+        "hint": "陪伴插件通过此端口调用生图；修改后需要重载插件。",
         "min": 1024,
         "max": 65535
     },
     "enable_translate": {
-        "type": "bool",
-        "default": false,
-        "description": "是否开启中间模型转译（建议小模型）",
-        "hint": "开启后：先用所选模型把自然语言提示词翻译成 SD/NAI 标签（自动剥离思考型模型输出的 <think> 思考块），并启用服装缓存池 / 默认服装补全等预处理；转译失败自动回退原文。关闭后：上述预处理一并停用，仅保留「角色核心关键词与身体描述补全」的拼接，提示词按 NAI 标签原样发送。"
+        "type": "string",
+        "default": "关闭",
+        "description": "提示词转译模式",
+        "hint": "「关闭」原样发送提示词；「开启」将整个提示词交给 LLM 转译；「自动」保留 NAI 标签，只提取自然语言片段转译后拼接。自动模式可用 |nl| 显式标记后续自然语言。旧版布尔值会兼容转换。",
+        "options": [
+            "关闭",
+            "开启",
+            "自动"
+        ]
     },
     "translate_provider": {
         "type": "string",
         "default": "",
-        "description": "选择提示词转译的模型供应商（留空选择默认模型）",
+        "description": "转译模型供应商",
         "hint": "从 AstrBot 已配置的 provider 中选一个。留空时使用 AstrBot 的默认 provider。建议选择便宜/快速的小模型。",
         "_special": "select_provider"
     },
     "enable_llm_tool": {
         "type": "bool",
         "default": false,
-        "description": "是否启用 NAI_generate_image LLM 工具",
+        "description": "启用 LLM 生图工具",
         "hint": "关闭后 LLM agent 无法调用此工具；开启后允许 LLM 自主决定生图时机（每次限 1 张）。"
     }
 }
