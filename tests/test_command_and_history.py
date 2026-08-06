@@ -142,3 +142,51 @@ def test_parameter_history_can_be_disabled(tmp_path):
 
     assert len(list(plugin._image_history_dir.glob("nai_*.img"))) == 1
     assert not list(plugin._image_history_dir.glob("nai_*.json"))
+
+
+def test_auto_translate_skips_pure_nai_prompt():
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.translate_mode = "自动"
+    plugin.enable_translate = True
+    plugin._translate_prompt = AsyncMock(return_value="should not be used")
+    plugin._resolve_outfit = lambda prompt: ("unexpected", "prompt", False)
+    prompt = "1girl, solo, 1.2::blue hair::, {{looking at viewer}}"
+
+    prepared, outfit_source, use_default, prompt_kind = asyncio.run(
+        plugin._prepare_translated_prompt(
+            prompt,
+            translate_mode="自动",
+            apply_outfit=True,
+        )
+    )
+
+    assert prepared == prompt
+    assert outfit_source == "none"
+    assert not use_default
+    assert prompt_kind == "nai"
+    plugin._translate_prompt.assert_not_awaited()
+
+
+def test_auto_translate_only_sends_natural_segments_to_llm():
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.translate_mode = "自动"
+    plugin.enable_translate = True
+    plugin._translate_prompt = AsyncMock(
+        return_value="1girl, black dress, standing, rain"
+    )
+    plugin._resolve_outfit = lambda prompt: ("", "none", False)
+
+    prepared, _, _, prompt_kind = asyncio.run(
+        plugin._prepare_translated_prompt(
+            "1girl, solo, 她穿着黑色连衣裙站在雨里, best quality",
+            translate_mode="自动",
+            apply_outfit=True,
+        )
+    )
+
+    assert prompt_kind == "mixed"
+    assert prepared == "1girl, solo, black dress, standing, rain, best quality"
+    plugin._translate_prompt.assert_awaited_once_with(
+        "她穿着黑色连衣裙站在雨里",
+        force=True,
+    )

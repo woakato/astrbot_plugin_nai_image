@@ -103,13 +103,13 @@
         "type": "string",
         "default": "",
         "description": "默认服装",
-        "hint": "仅在开启 LLM 转译时生效；提示词没有具体服装且缓存为空时自动补全。使用英文逗号分隔 SD/NAI tag，例如：modern fashion, dark green knit dress, fitted sweater, slim pants, leather boots。"
+        "hint": "在转译模式为「开启」，或「自动」识别到自然语言时生效；提示词没有具体服装且缓存为空时自动补全。使用英文逗号分隔 SD/NAI tag，例如：modern fashion, dark green knit dress, fitted sweater, slim pants, leather boots。"
     },
     "outfit_cache_ttl_seconds": {
         "type": "int",
         "default": 3600,
         "description": "服装缓存时长",
-        "hint": "单位为秒，仅在开启 LLM 转译时生效。具体服装或换装描述会写入缓存，后续模糊描述自动沿用；默认 3600 秒，超时后回退默认服装，设为 0 可关闭缓存。",
+        "hint": "单位为秒，在「开启」模式或「自动」识别到自然语言时生效。具体服装或换装描述会写入缓存，后续模糊描述自动沿用；默认 3600 秒，超时后回退默认服装，设为 0 可关闭缓存。",
         "min": 0,
         "max": 86400
     },
@@ -169,10 +169,15 @@
         "max": 65535
     },
     "enable_translate": {
-        "type": "bool",
-        "default": false,
-        "description": "启用提示词转译",
-        "hint": "建议使用小模型。开启后将自然语言转为 SD/NAI 标签，自动剥离 <think> 思考块，并启用服装缓存和默认服装补全；失败时回退原文。关闭后仅保留角色预设拼接，提示词按 NAI 标签原样发送。"
+        "type": "string",
+        "default": "关闭",
+        "description": "提示词转译模式",
+        "hint": "「关闭」原样发送提示词；「开启」将整个提示词交给 LLM 转译；「自动」保留 NAI 标签，只提取自然语言片段转译后拼接。自动模式可用 |nl| 显式标记后续自然语言。旧版布尔值会兼容转换。",
+        "options": [
+            "关闭",
+            "开启",
+            "自动"
+        ]
     },
     "translate_provider": {
         "type": "string",

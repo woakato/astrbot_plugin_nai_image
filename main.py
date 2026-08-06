@@ -15,6 +15,25 @@ from astrbot.api.message_components import Image as Img, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, json_response, request as web_request
 
+if __package__:
+    from .prompt_processing import (
+        TRANSLATE_MODE_AUTO,
+        TRANSLATE_MODE_OFF,
+        TRANSLATE_MODE_ON,
+        extract_mixed_prompt,
+        merge_translated_prompt,
+        normalize_translate_mode,
+    )
+else:
+    from prompt_processing import (
+        TRANSLATE_MODE_AUTO,
+        TRANSLATE_MODE_OFF,
+        TRANSLATE_MODE_ON,
+        extract_mixed_prompt,
+        merge_translated_prompt,
+        normalize_translate_mode,
+    )
+
 LOG_TAG = "[NAI-Image]"
 
 IMAGE_GEN_BASE_URL_DEFAULT = "https://nai.sta1n.cn"
@@ -335,7 +354,11 @@ class NAIGenerateImagePlugin(Star):
         self._session: Optional[aiohttp.ClientSession] = None
         self.proxy_runner: Optional[web.AppRunner] = None
         self.proxy_port: int = int(config.get("proxy_port") or PROXY_PORT)
-        self.enable_translate: bool = bool(config.get("enable_translate", False))
+        self.translate_mode: str = normalize_translate_mode(
+            config.get("enable_translate", TRANSLATE_MODE_OFF)
+        )
+        # Keep the bool attribute for integrations that inspect the old field.
+        self.enable_translate: bool = self.translate_mode != TRANSLATE_MODE_OFF
         self.translate_provider: str = (config.get("translate_provider") or "").strip()
 
         # ==== Outfit 缓存池配置 ====
@@ -369,7 +392,7 @@ class NAIGenerateImagePlugin(Star):
             f"parameters={'ON' if self.save_generation_parameters else 'OFF'} "
             f"limit={self.image_history_limit} | "
             f"template={'启用' if self.enable_template and self.character_preset else '未启用'} | "
-            f"translate={'启用' if self.enable_translate else '未启用'} "
+            f"translate={self.translate_mode} "
             f"provider='{self.translate_provider or '默认'}' | "
             f"outfit: default={'已设' if self.default_outfit else '未设'} "
             f"cache_ttl={self.outfit_cache_ttl_seconds}s | "
@@ -668,7 +691,7 @@ class NAIGenerateImagePlugin(Star):
         custom_artists: Optional[str] = None,
         character_preset: Optional[str] = None,
         enable_template: Optional[bool] = None,
-        enable_translate: Optional[bool] = None,
+        enable_translate: Optional[bool | str] = None,
         token_override: Optional[str] = None,
     ) -> tuple[Optional[bytes], str]:
         """生成单张图片（全参数可覆盖版本，供测试面板使用）。
@@ -694,7 +717,9 @@ class NAIGenerateImagePlugin(Star):
         _negative = negative if negative is not None else self.negative
         _model = model if model is not None else self.model
         _enable_template = enable_template if enable_template is not None else self.enable_template
-        _enable_translate = enable_translate if enable_translate is not None else self.enable_translate
+        _translate_mode = normalize_translate_mode(
+            enable_translate if enable_translate is not None else self.translate_mode
+        )
 
         # artists 解析
         if style == "custom":
@@ -707,12 +732,12 @@ class NAIGenerateImagePlugin(Star):
         # character_preset
         _char_preset = character_preset if character_preset is not None else self.character_preset
 
-        # 1) 可选转译：先翻译原始 prompt
-        if _enable_translate:
-            translated = await self._translate_prompt(prompt.strip())
-            base_prompt = translated
-        else:
-            base_prompt = prompt.strip()
+        # 1) 可选转译：自动模式只转译自然语言片段。
+        base_prompt, _, _, prompt_kind = await self._prepare_translated_prompt(
+            prompt,
+            translate_mode=_translate_mode,
+            apply_outfit=False,
+        )
 
         # 2) 与角色预设模板合并
         if _enable_template and _char_preset:
@@ -723,7 +748,8 @@ class NAIGenerateImagePlugin(Star):
         logger.info(
             f"{LOG_TAG} [generate:custom] style={style} size={size} "
             f"steps={_steps} scale={_scale} cfg={_cfg} sampler={_sampler} "
-            f"model={_model} prompt='{full_prompt[:60]}...'"
+            f"model={_model} translate={_translate_mode}/{prompt_kind} "
+            f"prompt='{full_prompt[:60]}...'"
         )
 
         url = (
@@ -1052,7 +1078,7 @@ class NAIGenerateImagePlugin(Star):
             "enable_template": self.enable_template,
             "character_preset": self.character_preset,
             "default_outfit": self.default_outfit,
-            "enable_translate": self.enable_translate,
+            "enable_translate": self.translate_mode,
             "translate_provider": self.translate_provider,
             "proxy_port": self.proxy_port,
             "image_styles_options": IMAGE_STYLES,
@@ -1256,14 +1282,14 @@ class NAIGenerateImagePlugin(Star):
             logger.warning(f"{LOG_TAG} [translate] 选择 provider 异常: {e!r}")
             return None
 
-    async def _translate_prompt(self, prompt: str) -> str:
+    async def _translate_prompt(self, prompt: str, *, force: bool = False) -> str:
         """如果开启转译，把自然语言 prompt 转成 SD/NAI 标签风格。
 
         失败时原样返回 prompt，不影响主流程。
         """
         import re as _re
 
-        if not self.enable_translate:
+        if not force and not self.enable_translate:
             return prompt
         if not prompt or not prompt.strip():
             return prompt
@@ -1379,6 +1405,76 @@ class NAIGenerateImagePlugin(Star):
         )
         return translated
 
+    async def _prepare_translated_prompt(
+        self,
+        prompt: str,
+        *,
+        translate_mode: Optional[str] = None,
+        apply_outfit: bool,
+    ) -> tuple[str, str, bool, str]:
+        """Prepare a prompt and return prompt, outfit source, default flag and kind."""
+        raw_prompt = prompt.strip()
+        current_mode = getattr(self, "translate_mode", None)
+        if current_mode is None:
+            current_mode = (
+                TRANSLATE_MODE_ON
+                if getattr(self, "enable_translate", False)
+                else TRANSLATE_MODE_OFF
+            )
+        mode = normalize_translate_mode(
+            translate_mode if translate_mode is not None else current_mode
+        )
+        if mode == TRANSLATE_MODE_OFF:
+            return raw_prompt, "none", False, "nai"
+
+        mixed_parts = None
+        translation_input = raw_prompt
+        prompt_kind = "natural"
+        if mode == TRANSLATE_MODE_AUTO:
+            mixed_parts = extract_mixed_prompt(raw_prompt)
+            if not mixed_parts.has_natural:
+                logger.info(
+                    f"{LOG_TAG} [translate:auto] 判定为 NAI 标签，原样透传 | "
+                    f"preview='{raw_prompt[:60]}...'"
+                )
+                return raw_prompt, "none", False, "nai"
+            translation_input = mixed_parts.natural_text
+            prompt_kind = "mixed" if mixed_parts.nai_text else "natural"
+            logger.info(
+                f"{LOG_TAG} [translate:auto] kind={prompt_kind} "
+                f"explicit={'yes' if mixed_parts.explicit_natural else 'no'} | "
+                f"nai='{mixed_parts.nai_text[:60]}...' "
+                f"natural='{translation_input[:60]}...'"
+            )
+
+        outfit_ctx, outfit_source, use_default_outfit = "", "none", False
+        if apply_outfit:
+            outfit_ctx, outfit_source, use_default_outfit = self._resolve_outfit(
+                translation_input
+            )
+        if outfit_ctx:
+            effective_translation_input = (
+                f"{translation_input.rstrip()}\n\n"
+                f"[延续上文穿搭或当前默认服装] {outfit_ctx}"
+            )
+        else:
+            effective_translation_input = translation_input
+
+        translated = await self._translate_prompt(
+            effective_translation_input,
+            force=True,
+        )
+        if mixed_parts is not None:
+            prepared_prompt = merge_translated_prompt(mixed_parts, translated)
+        else:
+            prepared_prompt = translated
+
+        logger.debug(
+            f"{LOG_TAG} [translate:{mode}] input={effective_translation_input!r} "
+            f"prepared={prepared_prompt!r}"
+        )
+        return prepared_prompt, outfit_source, use_default_outfit, prompt_kind
+
     async def _generate_one(
         self, prompt: str, style: str, size: str
     ) -> tuple[Optional[bytes], str]:
@@ -1397,29 +1493,18 @@ class NAIGenerateImagePlugin(Star):
             logger.warning(f"{LOG_TAG} [generate] 跳过：session 未初始化")
             return None, "no_session"
 
-        # 0) Outfit 缓存池：仅在开启 LLM 转译时参与预处理。
-        #    关闭转译时跳过服装池缓存 / 默认服装补全等功能，只保留
-        #    character_preset（默认角色核心关键词与身体描述补全）的模板合并。
-        if self.enable_translate:
-            outfit_ctx, outfit_source, use_default_outfit = self._resolve_outfit(prompt)
-        else:
-            outfit_ctx, outfit_source, use_default_outfit = "", "none", False
-        
-        if outfit_ctx:
-            # 如果有具体服装、缓存或默认服装，追加到自然语言提示词中一起翻译
-            effective_prompt = (
-                f"{prompt.rstrip()}\n\n"
-                f"[延续上文穿搭或当前默认服装] {outfit_ctx}"
+        # 0) 关闭时原样发送；开启时整体转译；自动时只转译自然语言片段。
+        translated_prompt, outfit_source, use_default_outfit, prompt_kind = (
+            await self._prepare_translated_prompt(
+                prompt,
+                translate_mode=self.translate_mode,
+                apply_outfit=True,
             )
-        else:
-            effective_prompt = prompt
+        )
 
-        # 1) 可选：把自然语言 prompt 转译为 SD/NAI 标签风格
-        translated_prompt = await self._translate_prompt(effective_prompt)
-        
         # 2) 与预设模板合并
         full_prompt = self._build_full_prompt(translated_prompt)
-        
+
         # 3) 如果需要，直接追加默认服装（假设default_outfit已经是SD tags格式）
         if use_default_outfit and self.default_outfit:
             full_prompt = f"{full_prompt}, {self.default_outfit}"
@@ -1431,13 +1516,12 @@ class NAIGenerateImagePlugin(Star):
 
         logger.info(
             f"{LOG_TAG} [generate] 开始 | style={style} size={size} | "
-            f"translate={'ON' if self.enable_translate else 'OFF'} | "
-            f"outfit={outfit_source if outfit_ctx else 'none'} | "
+            f"translate={self.translate_mode}/{prompt_kind} | "
+            f"outfit={outfit_source} | "
             f"prompt(原始)='{prompt[:60]}...' "
             f"prompt(转译后)='{translated_prompt[:60]}...' "
             f"prompt(模板后,前60字)='{full_prompt[:60]}...'"
         )
-        logger.debug(f"{LOG_TAG} [generate] effective_prompt = {effective_prompt!r}")
         logger.debug(f"{LOG_TAG} [generate] translated_prompt(完整) = {translated_prompt!r}")
         logger.debug(f"{LOG_TAG} [generate] full_prompt(完整) = {full_prompt!r}")
         logger.debug(f"{LOG_TAG} [generate] artists = {artists!r}")
