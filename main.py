@@ -2023,7 +2023,7 @@ class NAIGenerateImagePlugin(Star):
 
         logger.info(
             f"{LOG_TAG} [cmd:image] 最终参数 | style={style} size_cn={size_cn} "
-            f"n={n} steps={effective_steps} scale={effective_scale} "
+            f"size={size} n={n} steps={effective_steps} scale={effective_scale} "
             f"cfg={effective_cfg} sampler={effective_sampler} "
             f"noise={effective_noise} translate={effective_translate} "
             f"template={effective_template} model={effective_model}"
@@ -2114,9 +2114,16 @@ class NAIGenerateImagePlugin(Star):
         调用send_message_to_user；生成成功后本工具会直接发送图片。
 
         Args:
-            prompt(string): 生成图片的提示词，请使用NovelAI的提示词格式，这是一种标签化而非自然语言的描述方式，标签之间用英文逗号隔开。        
-            style(string): 描述生成图片的风格。可选：vertical / comicDoujin / r18 / lolita25d / anime / galgame / 自定义
-            size_cn(string): 描述生成图片的尺寸。可选：竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图。
+            prompt(string): NovelAI 提示词，使用标签化格式，标签间用英文逗号隔开。格式规范：
+                - 质量词放前面：masterpiece, best quality, highly detailed
+                - 角色描述：1girl/1boy, solo, 具体外貌特征
+                - 画师风格引用：artist:画师名（如 artist:wlop）
+                - 权重调整：{tag} 表示加强，(tag:1.5) 表示权重1.5倍，tag::0.8:: 表示权重0.8
+                - 场景/背景：outdoor, cityscape, sunset
+                - 避免自然语言句子，用标签组合
+                示例：masterpiece, best quality, 1girl, solo, long hair, blue eyes, artist:wlop, outdoor, sunset
+            style(string): 画风。可选：vertical(韩漫清新) / comicDoujin(日漫同人) / r18(写实唯美) / lolita25d(萝莉唯美) / anime(日系动画) / galgame(GalGame) / custom(自定义)
+            size_cn(string): 尺寸。可选：竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图
         '''
         prompt = normalize_prompt(prompt)
         if not self.enable_llm_tool:
@@ -2147,6 +2154,8 @@ class NAIGenerateImagePlugin(Star):
             yield f"未知尺寸: {size_cn}\n可选: {', '.join(IMAGE_SIZES.keys())}"
             return
         
+        # 与 /image 命令保持一致：直接使用中文 size_cn 值（竖图/横图/方图/2K竖图/...）发送给 API
+        # 上游（如 nai.sta1n.cn）只识别中文尺寸值，英文别名（portrait/2k_portrait）会导致 2K/4K 生成失败
         size = size_cn
 
         generation_state = None
