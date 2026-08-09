@@ -360,7 +360,7 @@ def test_prompt_is_normalized_before_disabled_translation_pipeline():
     assert prepared == "1girl, solo best quality"
     assert outfit_source == "none"
     assert not use_default
-    assert prompt_kind == "nai"
+    assert prompt_kind == "off"
 
 
 def test_auto_translate_only_sends_natural_segments_to_llm():

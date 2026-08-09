@@ -344,7 +344,7 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.3")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.4")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context, config)
@@ -1520,7 +1520,7 @@ class NAIGenerateImagePlugin(Star):
             translate_mode if translate_mode is not None else current_mode
         )
         if mode == TRANSLATE_MODE_OFF:
-            return raw_prompt, "none", False, "nai"
+            return raw_prompt, "none", False, "off"
 
         mixed_parts = None
         translation_input = raw_prompt
@@ -1663,8 +1663,8 @@ class NAIGenerateImagePlugin(Star):
             f"steps={_steps} scale={_scale} cfg={_cfg} sampler={_sampler} "
             f"noise={_noise} model={_model} | "
             f"translate={_translate_mode}/{prompt_kind} "
-            f"template={'on' if _enable_template else 'off'} | "
-            f"outfit={outfit_source} | "
+            f"template={'on' if _enable_template and self.character_preset else 'off'} | "
+            f"outfit={outfit_source}{'+default' if use_default_outfit and self.default_outfit else ''} | "
             f"prompt(原始)='{prompt[:60]}...' "
             f"prompt(转译后)='{translated_prompt[:60]}...' "
             f"prompt(模板后,前60字)='{full_prompt[:60]}...'"
@@ -2132,11 +2132,11 @@ class NAIGenerateImagePlugin(Star):
         '''
         prompt = normalize_prompt(prompt)
         if not self.enable_llm_tool:
-            logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生图工具已禁用，请在插件设置中开启 enable_llm_tool")
+            logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 生图工具已禁用，请在插件设置中开启 enable_llm_tool")
             yield "生图工具已被管理员禁用，请在插件设置中开启 enable_llm_tool"
             return
 
-        logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 调用NAI_Generate_Image, 参数： prompt: {prompt}, style: {style}, size_cn:{size_cn}")
+        logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 调用NAI_Generate_Image, 参数： prompt: {prompt[:100]}, style: {style}, size_cn:{size_cn}")
         if style == "自定义":
             style = "custom"
         if not prompt:
@@ -2182,7 +2182,7 @@ class NAIGenerateImagePlugin(Star):
             event.set_extra("_nai_image_generation_state", "running")
 
         logger.info(
-            f"{LOG_TAG} [NAI_Generate_Image:image] 最终参数 | style={style} size_cn={size_cn} "
+            f"{LOG_TAG} [tool:NAI_Generate_Image] 最终参数 | style={style} size_cn={size_cn} "
             f"size={size} n=1"
         )
 
