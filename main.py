@@ -344,7 +344,20 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.4")
+def migrate_legacy_translate_config(config: dict) -> Optional[str]:
+    """检测旧版布尔 enable_translate，归一化为字符串三态并写回 dict。
+
+    返回迁移后的字符串值；未发生迁移（已是字符串或缺失）返回 None。
+    """
+    legacy = config.get("enable_translate")
+    if isinstance(legacy, bool):
+        normalized = normalize_translate_mode(legacy)
+        config["enable_translate"] = normalized
+        return normalized
+    return None
+
+
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.5")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context, config)
@@ -407,6 +420,14 @@ class NAIGenerateImagePlugin(Star):
         self._session: Optional[aiohttp.ClientSession] = None
         self.proxy_runner: Optional[web.AppRunner] = None
         self.proxy_port: int = int(config.get("proxy_port") or PROXY_PORT)
+        # v2.2.4 及更早版本的 enable_translate 为布尔值，新版 schema 要求字符串三态。
+        # 保留布尔值会导致 dashboard 保存配置时因类型校验失败，这里加载时归一化并
+        # 尝试写回磁盘，保证旧配置用户升级后仍可正常保存；写回失败不影响本次运行。
+        if migrate_legacy_translate_config(config) is not None:
+            try:
+                self._persist_translate_config_migration()
+            except Exception as exc:
+                logger.warning(f"{LOG_TAG} 旧版布尔转译配置迁移失败: {exc}")
         self.translate_mode: str = normalize_translate_mode(
             config.get("enable_translate", TRANSLATE_MODE_OFF)
         )
@@ -478,6 +499,35 @@ class NAIGenerateImagePlugin(Star):
         if len(img_bytes) >= 12 and img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
             return ".webp"
         return ".img"
+
+    def _persist_translate_config_migration(self) -> None:
+        """把磁盘插件配置中的旧版布尔 enable_translate 迁移为字符串并保存。"""
+        import json as _json
+        import os as _os
+
+        from astrbot.core.config.astrbot_config import AstrBotConfig
+        from astrbot.core.utils.astrbot_path import get_astrbot_config_path
+
+        schema_path = _os.path.join(
+            _os.path.dirname(_os.path.abspath(__file__)), "_conf_schema.json"
+        )
+        with open(schema_path, encoding="utf-8") as _f:
+            schema = _json.load(_f)
+        plugin_cfg = AstrBotConfig(
+            config_path=_os.path.join(
+                get_astrbot_config_path(), f"{PLUGIN_NAME}_config.json"
+            ),
+            schema=schema,
+        )
+        if isinstance(plugin_cfg.get("enable_translate"), bool):
+            plugin_cfg["enable_translate"] = normalize_translate_mode(
+                plugin_cfg["enable_translate"]
+            )
+            plugin_cfg.save_config()
+            logger.info(
+                f"{LOG_TAG} 已自动迁移旧版布尔 enable_translate 配置 -> "
+                f"{plugin_cfg['enable_translate']}"
+            )
 
     def _get_image_history_dir(self) -> Path:
         """延迟解析插件数据目录，避免模块加载阶段依赖 AstrBot 运行环境。"""

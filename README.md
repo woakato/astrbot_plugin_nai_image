@@ -99,7 +99,7 @@ data/plugin_data/astrbot_plugin_nai_image/image_history/
 
 可选使用一个 LLM 中间模型，在把 prompt 拼到预设之前先把自然语言描述翻译成 SD / NAI 标签风格。
 
-- `enable_translate`：`关闭`（默认）/ `开启` / `自动`
+- `enable_translate`：`关闭`（默认）/ `开启` / `自动`（旧版布尔值会在插件加载时自动迁移为对应字符串）
 - `translate_provider`：通过 WebUI 的 provider 下拉选择器选择，留空则使用 AstrBot 默认 provider
 
 强烈建议选用轻量便宜的小模型，转译耗时通常在 1 秒内。转译失败 / provider 不可用时会自动回退原文，不影响出图主流程。
