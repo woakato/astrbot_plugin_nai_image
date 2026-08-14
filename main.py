@@ -366,7 +366,7 @@ def migrate_legacy_translate_config(config: dict) -> Optional[str]:
     return None
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.3.1")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.3.2")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         global _active_plugin
@@ -473,7 +473,9 @@ class NAIGenerateImagePlugin(Star):
             )
         except (TypeError, ValueError):
             self.companion_image_retention_days = 30
-        self.enable_proxy: bool = bool(config.get("enable_proxy", True))
+        # 本地 OpenAI 兼容代理默认关闭：直连（extension API）已覆盖陪伴插件的
+        # 全部需求，代理只在旧式外部调用或自定义集成时才需要手动开启。
+        self.enable_proxy: bool = bool(config.get("enable_proxy", False))
         # 陪伴系列插件通过 get_nai_image_api() / extension_api 直连本插件。
         self.extension_api = NAIImageCompanionExtensionAPI(self)
         _active_plugin = self

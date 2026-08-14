@@ -83,7 +83,7 @@ class NAIImageCompanionExtensionAPI:
             "default_style": plugin.image_style,
             "default_size": plugin.image_size,
             "prompt_format": getattr(plugin, "companion_prompt_format", "") or "自然语言模式（en）",
-            "proxy_enabled": bool(getattr(plugin, "enable_proxy", True)),
+            "proxy_enabled": bool(getattr(plugin, "enable_proxy", False)),
             "proxy_online": plugin.proxy_runner is not None,
             "proxy_port": plugin.proxy_port,
             "generation_count": self.generation_count,

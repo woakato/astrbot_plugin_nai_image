@@ -164,15 +164,21 @@
         "type": "int",
         "default": 8765,
         "description": "本地代理端口",
-        "hint": "「启用本地代理」开启时生效；修改后需要重载插件。",
+        "hint": "「启用本地 OpenAI 兼容代理」开启时生效；修改后需要重载插件。",
         "min": 1024,
-        "max": 65535
+        "max": 65535,
+        "condition": {
+            "enable_companion_link": false
+        }
     },
     "enable_proxy": {
         "type": "bool",
-        "default": true,
+        "default": false,
         "description": "启用本地 OpenAI 兼容代理",
-        "hint": "开启后在 127.0.0.1:<代理端口> 提供 /v1/images 接口，供陪伴插件或其他客户端调用。关闭后不再占用端口；陪伴插件直连（extension API）不受影响。"
+        "hint": "开启后在 127.0.0.1:<代理端口> 提供 /v1/images 接口，供陪伴插件或其他客户端调用。默认关闭，不占用端口；需要时手动开启。陪伴插件直连（extension API）不受影响，启用陪伴插件直连时本选项隐藏。",
+        "condition": {
+            "enable_companion_link": false
+        }
     },
     "enable_companion_link": {
         "type": "bool",
@@ -202,19 +208,25 @@
         "type": "string",
         "default": "关闭",
         "description": "提示词转译模式",
-        "hint": "「关闭」原样发送提示词；「开启」将整个提示词交给 LLM 转译；「自动」保留 NAI 标签，只提取自然语言片段转译后拼接。自动模式可用 |nl| 显式标记后续自然语言。旧版布尔值会在插件加载时自动迁移为「关闭」/「开启」并写回配置。",
+        "hint": "「关闭」原样发送提示词；「开启」将整个提示词交给 LLM 转译；「自动」保留 NAI 标签，只提取自然语言片段转译后拼接。自动模式可用 |nl| 显式标记后续自然语言。旧版布尔值会在插件加载时自动迁移为「关闭」/「开启」并写回配置。启用陪伴插件直连时本选项隐藏（直连提示词由陪伴插件侧按模式处理）。",
         "options": [
             "关闭",
             "开启",
             "自动"
-        ]
+        ],
+        "condition": {
+            "enable_companion_link": false
+        }
     },
     "translate_provider": {
         "type": "string",
         "default": "",
         "description": "转译模型供应商",
-        "hint": "从 AstrBot 已配置的 provider 中选一个。留空时使用 AstrBot 的默认 provider。建议选择便宜/快速的小模型。",
-        "_special": "select_provider"
+        "hint": "从 AstrBot 已配置的 provider 中选一个。留空时使用 AstrBot 的默认 provider。建议选择便宜/快速的小模型。启用陪伴插件直连时本选项隐藏。",
+        "_special": "select_provider",
+        "condition": {
+            "enable_companion_link": false
+        }
     },
     "enable_llm_tool": {
         "type": "bool",
