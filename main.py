@@ -366,7 +366,7 @@ def migrate_legacy_translate_config(config: dict) -> Optional[str]:
     return None
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.3.3")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.3.4")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         global _active_plugin
@@ -473,9 +473,9 @@ class NAIGenerateImagePlugin(Star):
             )
         except (TypeError, ValueError):
             self.companion_image_retention_days = 30
-        # 「强制关闭代理」默认开启：只要开着，本地代理就绝不启动（即使
-        # enable_proxy 为 true）。关闭后代理才按 enable_proxy 配置运行。
-        self.force_disable_proxy: bool = bool(config.get("force_disable_proxy", True))
+        # 「绕过系统代理直连生图站」默认开启：请求 nai.sta1n.cn 时忽略
+        # 系统/环境代理强制直连，避免梯子代理出口导致连不上生图站。
+        self.bypass_system_proxy: bool = bool(config.get("bypass_system_proxy", True))
         self.enable_proxy: bool = bool(config.get("enable_proxy", True))
         # 陪伴系列插件通过 get_nai_image_api() / extension_api 直连本插件。
         self.extension_api = NAIImageCompanionExtensionAPI(self)
@@ -505,7 +505,7 @@ class NAIGenerateImagePlugin(Star):
             f"companion_format={self.companion_prompt_format} "
             f"companion_retention={self.companion_image_retention_days}d | "
             f"proxy={'ON' if self.enable_proxy else 'OFF'} "
-            f"force_disable_proxy={'ON' if self.force_disable_proxy else 'OFF'} "
+            f"bypass_system_proxy={'ON' if self.bypass_system_proxy else 'OFF'} "
             f"proxy_port={self.proxy_port}"
         )
 
@@ -677,25 +677,26 @@ class NAIGenerateImagePlugin(Star):
     async def initialize(self):
         logger.info(f"{LOG_TAG} [initialize] 阶段开始")
         # 1) aiohttp session —— 失败也继续，至少把代理先起来
+        #    trust_env：开启「绕过系统代理」时忽略环境变量代理，强制直连
+        #    生图站，避免梯子的 HTTP 代理出口把请求带偏。
         try:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180))
-            logger.info(f"{LOG_TAG} [initialize] aiohttp session 创建成功 (timeout=180s)")
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=180),
+                trust_env=not self.bypass_system_proxy,
+            )
+            logger.info(
+                f"{LOG_TAG} [initialize] aiohttp session 创建成功 (timeout=180s, "
+                f"trust_env={not self.bypass_system_proxy})"
+            )
         except Exception as e:
             logger.error(f"{LOG_TAG} [initialize] aiohttp session 创建失败: {e!r}（将继续，远程出图会受影响）")
 
-        # 2) 本地代理 —— 由「强制关闭代理」与 enable_proxy 共同决定。
-        #    强制开关优先：开着时无论 enable_proxy 如何都不启动代理。
-        #    先停掉旧实例（热重载场景），再带 3 次 retry（间隔 1s）启动。
-        if self.force_disable_proxy:
+        # 2) 本地代理 —— 由 enable_proxy 控制。开启时先停掉旧实例（热重载
+        #    场景），再带 3 次 retry（间隔 1s）启动，应对 TIME_WAIT 等端口占用。
+        if not self.enable_proxy:
             await self._stop_proxy_server()
             logger.info(
-                f"{LOG_TAG} [initialize] 本地代理已强制关闭（force_disable_proxy=true），"
-                f"不占用端口；陪伴插件可改用直连 extension API 生图"
-            )
-        elif not self.enable_proxy:
-            await self._stop_proxy_server()
-            logger.info(
-                f"{LOG_TAG} [initialize] 本地代理未启用（enable_proxy=false），"
+                f"{LOG_TAG} [initialize] 本地代理已关闭（enable_proxy=false），"
                 f"陪伴插件可改用直连 extension API 生图"
             )
         else:
@@ -755,7 +756,7 @@ class NAIGenerateImagePlugin(Star):
 
         logger.info(
             f"{LOG_TAG} [initialize] 阶段完成 | token={'OK' if self.image_gen_key else 'MISSING'} | "
-            f"proxy={'UP' if self.proxy_runner else ('OFF' if (self.force_disable_proxy or not self.enable_proxy) else 'DOWN')} | "
+            f"proxy={'UP' if self.proxy_runner else ('OFF' if not self.enable_proxy else 'DOWN')} | "
             f"trial_key={'OK' if self._trial_key else 'N/A'} "
             f"trial_used={self._trial_usage_count}/{TRIAL_MAX_USES}"
         )
@@ -1272,7 +1273,7 @@ class NAIGenerateImagePlugin(Star):
             "translate_provider": self.translate_provider,
             "proxy_port": self.proxy_port,
             "enable_proxy": self.enable_proxy,
-            "force_disable_proxy": self.force_disable_proxy,
+            "bypass_system_proxy": self.bypass_system_proxy,
             "enable_companion_link": self.enable_companion_link,
             "companion_prompt_format": self.companion_prompt_format,
             "companion_image_retention_days": self.companion_image_retention_days,
@@ -2318,25 +2319,19 @@ class NAIGenerateImagePlugin(Star):
         yield event.plain_result("正在检查生图服务...")
 
         # 1) 本地代理是否在线 —— 关系到陪伴插件能不能调通
-        #    强制关闭时不做探测，直接报告。
         proxy_ok = False
         proxy_msg = ""
-        if self.force_disable_proxy:
-            proxy_msg = "（已强制关闭，force_disable_proxy=true）"
-        elif not self.enable_proxy:
-            proxy_msg = "（未启用，enable_proxy=false）"
-        else:
-            try:
-                if not self._session:
-                    proxy_msg = "（aiohttp session 未初始化）"
-                else:
-                    async with self._session.get(
-                        f"http://{PROXY_HOST}:{self.proxy_port}/v1/proxy_status",
-                        timeout=aiohttp.ClientTimeout(total=3),
-                    ) as r:
-                        proxy_ok = r.status == 200
-            except Exception as e:
-                proxy_msg = f"（{type(e).__name__}）"
+        try:
+            if not self._session:
+                proxy_msg = "（aiohttp session 未初始化）"
+            else:
+                async with self._session.get(
+                    f"http://{PROXY_HOST}:{self.proxy_port}/v1/proxy_status",
+                    timeout=aiohttp.ClientTimeout(total=3),
+                ) as r:
+                    proxy_ok = r.status == 200
+        except Exception as e:
+            proxy_msg = f"（{type(e).__name__}）"
 
         # 2) 不再探测上游可达性（该检查较耗时，已移除；生图失败时以生图报错为准）
         lines = []
@@ -2346,5 +2341,9 @@ class NAIGenerateImagePlugin(Star):
         lines.append(
             f"上游 {self.base_url}: token={'✅ 已配置' if self.image_gen_key else '❌ 未配置'}"
             "（已取消在线探测，实际可用性以生图结果为准）"
+        )
+        lines.append(
+            f"绕过系统代理直连生图站: {'✅ 开启' if self.bypass_system_proxy else '❌ 关闭'}"
+            "（开启时忽略系统/环境代理；TUN 类梯子需在梯子软件里给 nai.sta1n.cn 加直连规则）"
         )
         yield event.plain_result("\n".join(lines))
