@@ -1,6 +1,16 @@
 # 更新日志
 
-## 未发布
+## v2.3.1 (2026-08-14)
+
+### 功能优化
+
+- **陪伴插件直连扩展接口**：新增 `companion_api.py`，按 `astrbot_plugin_image_companion` 的接口契约暴露 `extension_api` 与模块级 `get_nai_image_api()`，提供 `status` / `capability_status` / `maintenance` / `generate_for_companion` / `test_endpoint` 方法。陪伴系列插件可在进程内直连本插件生图，无需经过本地 OpenAI 兼容代理。
+- **陪伴直连提示词模式**：新增「自然语言模式（en）」与「nai tag模式」配置。自然语言模式把英文自然语言（可含背景信息与需求）原样直接提交给 NAI、不做 LLM 转译；nai tag模式按 NovelAI 标签规则归一化后透传。
+- **直连生图本土化适配**：`generate_for_companion` 适配陪伴请求契约（`prompt_text` / `prompt_sections` / `workflow_kind` / `size` / `ratio` / `style` / `negative` / `prompt_format`），会把陪伴插件发来的背景信息与需求合并成最终提示词，并把「1024x1024」「9:16」等常见尺寸写法归一化为 NAI 尺寸；生成图片按天自动清理。
+- **本地代理开关**：新增 `enable_proxy` 配置，关闭后不再启动 127.0.0.1 本地代理端口；核心生图（`_generate_one` / `/image` / LLM 工具 / 测试面板）不受影响。
+- **移除上游可达性预检**：`capability_status` 不再探测 nai.sta1n.cn（每次约 1 秒以上，陪伴插件高频轮询时会反复触发），只按 token 与会话状态做本地就绪判断；真实失败由生图结果明确返回。`imgstatus` 指令同步取消在线探测，只报告本地代理与 token 状态。
+
+## v2.2.5
 
 ### 功能优化
 
