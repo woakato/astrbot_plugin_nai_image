@@ -25,6 +25,7 @@ class FakePlugin:
     companion_prompt_format = "自然语言模式（en）"
     companion_image_retention_days = 30
     enable_proxy = True
+    force_disable_proxy = True
     _session = FakeSession()
     last_prompt = None
     last_negative = None
@@ -77,6 +78,7 @@ async def main() -> None:
     # status snapshot
     snap = api.status()
     assert snap["token_configured"] is True and snap["proxy_enabled"] is True
+    assert snap["proxy_force_disabled"] is True
 
     # natural language mode: background sections + requirement, no translation
     result = await api.generate_for_companion(

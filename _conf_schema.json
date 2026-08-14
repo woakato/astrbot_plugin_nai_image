@@ -173,9 +173,9 @@
     },
     "enable_proxy": {
         "type": "bool",
-        "default": false,
+        "default": true,
         "description": "启用本地 OpenAI 兼容代理",
-        "hint": "开启后在 127.0.0.1:<代理端口> 提供 /v1/images 接口，供陪伴插件或其他客户端调用。默认关闭，不占用端口；需要时手动开启。陪伴插件直连（extension API）不受影响，启用陪伴插件直连时本选项隐藏。",
+        "hint": "开启后在 127.0.0.1:<代理端口> 提供 /v1/images 接口，供陪伴插件或其他客户端调用。是否真正启动还取决于「强制关闭代理」开关（默认强制关闭）。启用陪伴插件直连时本选项隐藏。",
         "condition": {
             "enable_companion_link": false
         }
@@ -185,6 +185,12 @@
         "default": true,
         "description": "启用陪伴插件直连",
         "hint": "开启后为陪伴系列插件暴露与 image_companion 一致的扩展接口（get_nai_image_api / extension_api），生图请求直接在进程内调用本插件，无需经过本地代理。"
+    },
+    "force_disable_proxy": {
+        "type": "bool",
+        "default": true,
+        "description": "强制关闭代理",
+        "hint": "默认开启：无论「启用本地 OpenAI 兼容代理」如何设置，本地代理都不会启动、不占用端口。只有关闭本开关后，代理才按「启用本地 OpenAI 兼容代理」的配置运行。陪伴插件直连不受本开关影响。"
     },
     "companion_prompt_format": {
         "type": "string",
