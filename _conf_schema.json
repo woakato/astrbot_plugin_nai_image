@@ -164,9 +164,39 @@
         "type": "int",
         "default": 8765,
         "description": "本地代理端口",
-        "hint": "陪伴插件通过此端口调用生图；修改后需要重载插件。",
+        "hint": "「启用本地代理」开启时生效；修改后需要重载插件。",
         "min": 1024,
         "max": 65535
+    },
+    "enable_proxy": {
+        "type": "bool",
+        "default": true,
+        "description": "启用本地 OpenAI 兼容代理",
+        "hint": "开启后在 127.0.0.1:<代理端口> 提供 /v1/images 接口，供陪伴插件或其他客户端调用。关闭后不再占用端口；陪伴插件直连（extension API）不受影响。"
+    },
+    "enable_companion_link": {
+        "type": "bool",
+        "default": true,
+        "description": "启用陪伴插件直连",
+        "hint": "开启后为陪伴系列插件暴露与 image_companion 一致的扩展接口（get_nai_image_api / extension_api），生图请求直接在进程内调用本插件，无需经过本地代理。"
+    },
+    "companion_prompt_format": {
+        "type": "string",
+        "default": "自然语言模式（en）",
+        "description": "陪伴直连提示词模式",
+        "hint": "自然语言模式（en）：把陪伴插件发来的英文自然语言（可含背景信息与需求）原样直接提交给 NAI，不经过 LLM 转译，更适合新版 NAI；nai tag模式：提示词按 NovelAI 标签规则归一化后原样透传，更灵活。",
+        "options": [
+            "自然语言模式（en）",
+            "nai tag模式"
+        ]
+    },
+    "companion_image_retention_days": {
+        "type": "int",
+        "default": 30,
+        "description": "陪伴直连图片保留天数",
+        "hint": "陪伴直连生成的图片保存在 plugin_data/astrbot_plugin_nai_image/companion_images，按天清理超期文件；设为 0 不按时间清理。",
+        "min": 0,
+        "max": 3650
     },
     "enable_translate": {
         "type": "string",

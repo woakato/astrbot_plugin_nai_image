@@ -23,6 +23,7 @@ if __package__:
         parse_image_command,
         strip_image_command_prefix,
     )
+    from .companion_api import NAIImageCompanionExtensionAPI
     from .prompt_processing import (
         TRANSLATE_MODE_AUTO,
         TRANSLATE_MODE_OFF,
@@ -58,6 +59,14 @@ PROXY_PORT = 8765
 PLUGIN_NAME = "astrbot_plugin_nai_image"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/test_panel"
 BOT_REPLY_MODES = {"仅图片", "简洁", "完整"}
+
+_active_plugin: Optional["NAIGenerateImagePlugin"] = None
+
+
+def get_nai_image_api() -> Any:
+    """返回当前插件实例的陪伴直连扩展 API；插件未加载时返回 None。"""
+    plugin = _active_plugin
+    return getattr(plugin, "extension_api", None) if plugin is not None else None
 
 
 class _LiteralYamlString(str):
@@ -357,9 +366,10 @@ def migrate_legacy_translate_config(config: dict) -> Optional[str]:
     return None
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.2.5")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.3.1")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
+        global _active_plugin
         super().__init__(context, config)
         logger.info(f"{LOG_TAG} [init] 插件实例化开始")
         logger.debug(f"{LOG_TAG} [init] config keys: {list(config.keys())}")
@@ -450,6 +460,24 @@ class NAIGenerateImagePlugin(Star):
         #读取配置是否启用自主生图工具
         self.enable_llm_tool: bool = bool(config.get("enable_llm_tool", False))
 
+        # ==== 陪伴插件直连（extension API）与本地代理开关 ====
+        self.enable_companion_link: bool = bool(config.get("enable_companion_link", True))
+        self.companion_prompt_format: str = (
+            config.get("companion_prompt_format") or "自然语言模式（en）"
+        ).strip()
+        if "nai" not in self.companion_prompt_format.casefold() and "自然语言" not in self.companion_prompt_format:
+            self.companion_prompt_format = "自然语言模式（en）"
+        try:
+            self.companion_image_retention_days: int = max(
+                0, min(3650, int(config.get("companion_image_retention_days") or 30))
+            )
+        except (TypeError, ValueError):
+            self.companion_image_retention_days = 30
+        self.enable_proxy: bool = bool(config.get("enable_proxy", True))
+        # 陪伴系列插件通过 get_nai_image_api() / extension_api 直连本插件。
+        self.extension_api = NAIImageCompanionExtensionAPI(self)
+        _active_plugin = self
+
         # ==== 试用生成状态 ====
         self._trial_key: Optional[str] = None       # 代码内解密，仅存内存
         self._trial_usage_count: int = 0             # 本地文件追踪
@@ -470,6 +498,10 @@ class NAIGenerateImagePlugin(Star):
             f"provider='{self.translate_provider or '默认'}' | "
             f"outfit: default={'已设' if self.default_outfit else '未设'} "
             f"cache_ttl={self.outfit_cache_ttl_seconds}s | "
+            f"companion_link={'ON' if self.enable_companion_link else 'OFF'} "
+            f"companion_format={self.companion_prompt_format} "
+            f"companion_retention={self.companion_image_retention_days}d | "
+            f"proxy={'ON' if self.enable_proxy else 'OFF'} "
             f"proxy_port={self.proxy_port}"
         )
 
@@ -647,27 +679,35 @@ class NAIGenerateImagePlugin(Star):
         except Exception as e:
             logger.error(f"{LOG_TAG} [initialize] aiohttp session 创建失败: {e!r}（将继续，远程出图会受影响）")
 
-        # 2) 本地代理 —— 永远是必备。先停掉旧实例（热重载场景），再启动新的。
-        #    带 3 次 retry，间隔 1s，应对 TIME_WAIT 等端口占用场景。
-        await self._stop_proxy_server()
-        last_err = None
-        for attempt in range(1, 4):
-            try:
-                await self._start_proxy_server()
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                logger.warning(
-                    f"{LOG_TAG} [initialize] 代理启动失败 attempt={attempt}/3: {e!r}"
-                )
-                if attempt < 3:
-                    await asyncio.sleep(1.0)
-        if last_err is not None:
-            logger.error(
-                f"{LOG_TAG} [initialize] 代理服务器最终启动失败，端口 {PROXY_HOST}:{self.proxy_port} "
-                f"不可用 —— 上游 healthcheck 会走 nai.sta1n.cn, 不会被本地 8765 错误掩盖。last_err={last_err!r}"
+        # 2) 本地代理 —— 由 enable_proxy 控制。开启时先停掉旧实例（热重载
+        #    场景），再带 3 次 retry（间隔 1s）启动，应对 TIME_WAIT 等端口占用。
+        if not self.enable_proxy:
+            await self._stop_proxy_server()
+            logger.info(
+                f"{LOG_TAG} [initialize] 本地代理已关闭（enable_proxy=false），"
+                f"陪伴插件可改用直连 extension API 生图"
             )
+        else:
+            # 先停掉旧实例（热重载场景），再启动新的。
+            await self._stop_proxy_server()
+            last_err = None
+            for attempt in range(1, 4):
+                try:
+                    await self._start_proxy_server()
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.warning(
+                        f"{LOG_TAG} [initialize] 代理启动失败 attempt={attempt}/3: {e!r}"
+                    )
+                    if attempt < 3:
+                        await asyncio.sleep(1.0)
+            if last_err is not None:
+                logger.error(
+                    f"{LOG_TAG} [initialize] 代理服务器最终启动失败，端口 {PROXY_HOST}:{self.proxy_port} "
+                    f"不可用 —— 上游 healthcheck 会走 nai.sta1n.cn, 不会被本地 {self.proxy_port} 错误掩盖。last_err={last_err!r}"
+                )
 
         # 3) 注册测试面板 Web API（路由需带插件名前缀才能被 Bridge SDK 匹配）
         try:
@@ -704,13 +744,16 @@ class NAIGenerateImagePlugin(Star):
 
         logger.info(
             f"{LOG_TAG} [initialize] 阶段完成 | token={'OK' if self.image_gen_key else 'MISSING'} | "
-            f"proxy={'UP' if self.proxy_runner else 'DOWN'} | "
+            f"proxy={'UP' if self.proxy_runner else ('OFF' if not self.enable_proxy else 'DOWN')} | "
             f"trial_key={'OK' if self._trial_key else 'N/A'} "
             f"trial_used={self._trial_usage_count}/{TRIAL_MAX_USES}"
         )
 
     async def terminate(self):
+        global _active_plugin
         logger.info(f"{LOG_TAG} [terminate] 阶段开始")
+        if _active_plugin is self:
+            _active_plugin = None
         try:
             await self._stop_proxy_server()
         except Exception as e:
@@ -1217,6 +1260,10 @@ class NAIGenerateImagePlugin(Star):
             "enable_translate": self.translate_mode,
             "translate_provider": self.translate_provider,
             "proxy_port": self.proxy_port,
+            "enable_proxy": self.enable_proxy,
+            "enable_companion_link": self.enable_companion_link,
+            "companion_prompt_format": self.companion_prompt_format,
+            "companion_image_retention_days": self.companion_image_retention_days,
             "image_styles_options": IMAGE_STYLES,
             "image_size_options": IMAGE_SIZES,
             "default_negative": DEFAULT_NEGATIVE,
@@ -1332,30 +1379,6 @@ class NAIGenerateImagePlugin(Star):
             "merge_info": merge_info,
             "elapsed_info": f"{len(images_b64)} 张",
         })
-
-    async def _check_status(self) -> tuple[bool, int]:
-        logger.info(f"{LOG_TAG} [status] 开始检查 {self.base_url}")
-        if not self._session:
-            logger.warning(f"{LOG_TAG} [status] session 未初始化")
-            return False, -1
-        start = time.perf_counter()
-        try:
-            async with self._session.get(
-                self.base_url, timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                latency = int((time.perf_counter() - start) * 1000)
-                if resp.status != 200:
-                    logger.warning(
-                        f"{LOG_TAG} [status] 不可用 | status={resp.status} latency={latency}ms"
-                    )
-                    return False, latency
-                logger.info(
-                    f"{LOG_TAG} [status] 可用 | status={resp.status} latency={latency}ms"
-                )
-                return True, latency
-        except Exception as e:
-            logger.warning(f"{LOG_TAG} [status] 检查失败: {e!r}")
-            return False, -1
 
     async def _fetch_quota(self) -> Optional[int]:
         if not self.image_gen_key or not self._session:
@@ -2297,15 +2320,13 @@ class NAIGenerateImagePlugin(Star):
         except Exception as e:
             proxy_msg = f"（{type(e).__name__}）"
 
-        # 2) 上游 nai.sta1n.cn 可达性
-        ok, latency = await self._check_status()
-
+        # 2) 不再探测上游可达性（该检查较耗时，已移除；生图失败时以生图报错为准）
         lines = []
         lines.append(
             f"本地代理 127.0.0.1:{self.proxy_port}: {'✅ 在线' if proxy_ok else '❌ 离线'} {proxy_msg}"
         )
-        if ok:
-            lines.append(f"上游 {self.base_url}: ✅ 延迟约 {latency}ms")
-        else:
-            lines.append(f"上游 {self.base_url}: ❌ 不可用")
+        lines.append(
+            f"上游 {self.base_url}: token={'✅ 已配置' if self.image_gen_key else '❌ 未配置'}"
+            "（已取消在线探测，实际可用性以生图结果为准）"
+        )
         yield event.plain_result("\n".join(lines))
