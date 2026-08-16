@@ -29,10 +29,12 @@ class FakePlugin:
     _session = FakeSession()
     last_prompt = None
     last_negative = None
+    last_kwargs = None
 
     async def _generate_one(self, prompt, style, size, **kwargs):
         FakePlugin.last_prompt = prompt
         FakePlugin.last_negative = kwargs.get("negative")
+        FakePlugin.last_kwargs = dict(kwargs)
         # return a 1x1 PNG
         png = bytes.fromhex(
             "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
@@ -106,6 +108,8 @@ async def main() -> None:
     assert result["image_path"].endswith(".png")
     assert result["metadata"]["kind"] == "selfie"
     assert pathlib.Path(result["image_path"]).exists()
+    # 转译模式交由插件全局 enable_translate 配置决定，直连不再强制关闭
+    assert "enable_translate" not in FakePlugin.last_kwargs, FakePlugin.last_kwargs
 
     # natural language mode without sections: bare requirement, newlines collapsed, no commas injected
     await api.generate_for_companion(
@@ -141,10 +145,11 @@ async def main() -> None:
     maintenance = await api.maintenance(None)
     assert "removed_files" in maintenance, maintenance
 
-    # test_endpoint (direct pass, no translation)
+    # test_endpoint (prompt passthrough, translation governed by plugin config)
     test = await api.test_endpoint(None, {"style": "vertical"}, "a test image")
     assert test["ok"] is True and test["image_path"], test
     assert FakePlugin.last_prompt == "a test image", FakePlugin.last_prompt
+    assert "enable_translate" not in FakePlugin.last_kwargs, FakePlugin.last_kwargs
 
     # disabled plugin -> handled False
     FakePlugin.enable_companion_link = False

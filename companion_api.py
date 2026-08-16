@@ -205,9 +205,10 @@ class NAIImageCompanionExtensionAPI:
         style = self._coerce_style(req.get("style"))
         size = self._coerce_size(_first_text(req.get("size"), req.get("ratio")))
 
-        # 把背景信息与需求合并成最终提示词。两种模式都直接提交给 NAI：
-        # nai tag 模式按标签规则归一化；自然语言模式保留英文句子原样，
-        # 不做 LLM 转译（新版 NAI 已支持英文自然语言直接生图）。
+        # 把背景信息与需求合并成最终提示词。nai tag 模式按标签规则归一化；
+        # 自然语言模式保留英文句子原样（新版 NAI 已支持英文自然语言直接
+        # 生图）。提交前是否再经 LLM 转译由插件全局 enable_translate 配置
+        # 决定（默认「关闭」即原样提交）。
         background, section_negative = self._collect_prompt_sections(
             req.get("prompt_sections")
         )
@@ -235,13 +236,14 @@ class NAIImageCompanionExtensionAPI:
             negative = section_negative or None
 
         try:
-            # enable_translate=False：提示词已按模式处理完毕，禁止二次转译。
+            # 转译模式交由插件全局 enable_translate 配置决定：「关闭」时与
+            # 原直连行为一致（按模式处理完直接提交）；「开启/自动」时自然
+            # 语言会先经转译模型转成 NAI 标签再提交。
             img_bytes, reason = await plugin._generate_one(
                 prepared_prompt,
                 style,
                 size,
                 negative=negative,
-                enable_translate=False,
             )
         except Exception as exc:
             logger.exception(
@@ -319,7 +321,6 @@ class NAIImageCompanionExtensionAPI:
                 normalize_prompt(text),
                 style,
                 size,
-                enable_translate=False,
             )
         except Exception as exc:
             logger.warning(f"{_LOG_TAG} 端点测试生图异常: {type(exc).__name__}: {exc}")

@@ -366,7 +366,7 @@ def migrate_legacy_translate_config(config: dict) -> Optional[str]:
     return None
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.3.4")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.3.5")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         global _active_plugin
@@ -1393,10 +1393,17 @@ class NAIGenerateImagePlugin(Star):
             "elapsed_info": f"{len(images_b64)} 张",
         })
 
-    async def _fetch_quota(self) -> Optional[int]:
+    async def _fetch_quota(self) -> dict[str, Any]:
+        """向上游查询当前 token 的剩余额度与状态。
+
+        Returns:
+            成功时 ``{"ok": True, "value": int, "balance": int, "enabled": bool}``；
+            失败时 ``{"ok": False, "message": str}``，message 为上游返回的
+            业务错误（如 user not found）或本地网络/解析错误摘要。
+        """
         if not self.image_gen_key or not self._session:
             logger.warning(f"{LOG_TAG} [quota] 跳过：token 或 session 缺失")
-            return None
+            return {"ok": False, "message": "插件未配置 image_gen_key 或 session 未初始化，请重载插件"}
         url = f"{self.base_url.rstrip('/')}/api/api/getUser"
         logger.info(f"{LOG_TAG} [quota] 查询中... | url={url}")
         try:
@@ -1409,18 +1416,25 @@ class NAIGenerateImagePlugin(Star):
                 logger.debug(f"{LOG_TAG} [quota] HTTP {resp.status}")
                 if resp.status != 200:
                     logger.warning(f"{LOG_TAG} [quota] 非 200 响应: {resp.status}")
-                    return None
+                    return {"ok": False, "message": f"上游返回 HTTP {resp.status}"}
                 data = await resp.json()
                 logger.debug(f"{LOG_TAG} [quota] response data: {data}")
-                if data.get("status") == "ok" and data.get("type") == "sta1n":
-                    val = int(data.get("data", {}).get("value", 0))
-                    logger.info(f"{LOG_TAG} [quota] 查询成功 | 剩余 {val}")
-                    return val
-                logger.warning(f"{LOG_TAG} [quota] 响应不符合预期: {data}")
-                return None
+                if data.get("status") != "ok":
+                    message = str(data.get("message") or "上游返回异常状态")
+                    logger.warning(f"{LOG_TAG} [quota] 上游业务错误: {message}")
+                    return {"ok": False, "message": message}
+                quota_data = data.get("data") or {}
+                result = {
+                    "ok": True,
+                    "value": int(quota_data.get("value", 0) or 0),
+                    "balance": int(quota_data.get("balance", 0) or 0),
+                    "enabled": bool(quota_data.get("enabled", True)),
+                }
+                logger.info(f"{LOG_TAG} [quota] 查询成功 | 剩余 {result['value']} enabled={result['enabled']}")
+                return result
         except Exception as e:
             logger.warning(f"{LOG_TAG} [quota] 请求异常: {e!r}")
-            return None
+            return {"ok": False, "message": f"请求异常: {type(e).__name__}"}
 
     def _resolve_translate_provider_id(self) -> Optional[str]:
         """根据配置和上下文，选出转译用的 provider ID。
@@ -2297,20 +2311,25 @@ class NAIGenerateImagePlugin(Star):
     
     @filter.command("quota")
     async def quota(self, event: AstrMessageEvent):
+        """查询上游生图站的剩余额度与 token 状态。"""
         sender = event.get_sender_id() if hasattr(event, "get_sender_id") else "?"
         logger.info(f"{LOG_TAG} [cmd:quota] 收到指令 | sender={sender}")
         if not self.image_gen_key:
             logger.warning(f"{LOG_TAG} [cmd:quota] token 未配置")
             yield event.plain_result("未配置 image_gen_key。")
             return
-        yield event.plain_result("正在查询配额...")
-        val = await self._fetch_quota()
-        if val is None:
-            logger.warning(f"{LOG_TAG} [cmd:quota] 查询失败")
-            yield event.plain_result("配额查询失败，请检查 token 或网络。")
-        else:
-            logger.info(f"{LOG_TAG} [cmd:quota] 返回 {val}")
-            yield event.plain_result(f"剩余配额: {val}")
+        yield event.plain_result("正在查询额度...")
+        result = await self._fetch_quota()
+        if not result.get("ok"):
+            message = result.get("message", "未知原因")
+            logger.warning(f"{LOG_TAG} [cmd:quota] 查询失败 | message={message}")
+            yield event.plain_result(f"额度查询失败：{message}")
+            return
+        logger.info(f"{LOG_TAG} [cmd:quota] 返回 {result['value']}")
+        lines = [f"剩余额度: {result['value']}"]
+        if not result.get("enabled", True):
+            lines.append("⚠️ 该 token 已被站点停用（enabled=false），生图可能失败")
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("imgstatus")
     async def imgstatus(self, event: AstrMessageEvent):

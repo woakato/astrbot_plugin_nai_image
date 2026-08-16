@@ -386,3 +386,130 @@ def test_auto_translate_only_sends_natural_segments_to_llm():
         "她穿着黑色连衣裙站在雨里",
         force=True,
     )
+
+
+class FakeQuotaResponse:
+    def __init__(self, status, payload):
+        self.status = status
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+
+class FakeQuotaRequestContext:
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class FakeQuotaSession:
+    def __init__(self, response):
+        self._response = response
+        self.posted_url = ""
+        self.posted_json = None
+
+    def post(self, url, **kwargs):
+        self.posted_url = url
+        self.posted_json = kwargs.get("json")
+        return FakeQuotaRequestContext(self._response)
+
+
+def make_quota_plugin(response):
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.image_gen_key = "test-token"
+    plugin.base_url = "https://example.invalid"
+    plugin._session = FakeQuotaSession(response)
+    return plugin
+
+
+def test_fetch_quota_parses_upstream_success_payload():
+    plugin = make_quota_plugin(
+        FakeQuotaResponse(
+            200,
+            {
+                "status": "ok",
+                "type": "sta1n",
+                "data": {"value": 943, "balance": 943, "enabled": True},
+            },
+        )
+    )
+
+    result = asyncio.run(plugin._fetch_quota())
+
+    assert result == {"ok": True, "value": 943, "balance": 943, "enabled": True}
+    assert plugin._session.posted_url == "https://example.invalid/api/api/getUser"
+    assert plugin._session.posted_json == {"toUserId": "test-token"}
+
+
+def test_fetch_quota_surfaces_upstream_business_error():
+    plugin = make_quota_plugin(
+        FakeQuotaResponse(
+            200,
+            {
+                "status": "error",
+                "type": "std",
+                "message": "user not found",
+                "data": {"value": 0},
+            },
+        )
+    )
+
+    result = asyncio.run(plugin._fetch_quota())
+
+    assert result == {"ok": False, "message": "user not found"}
+
+
+def test_fetch_quota_reports_non_200_status():
+    plugin = make_quota_plugin(FakeQuotaResponse(403, {}))
+
+    result = asyncio.run(plugin._fetch_quota())
+
+    assert result == {"ok": False, "message": "上游返回 HTTP 403"}
+
+
+def test_quota_command_reports_remaining_and_disabled_token():
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.image_gen_key = "test-token"
+    plugin._fetch_quota = AsyncMock(
+        return_value={"ok": True, "value": 12, "balance": 12, "enabled": False}
+    )
+    event = FakeCommandEvent("quota")
+
+    results = asyncio.run(collect_results(plugin.quota(event)))
+
+    assert [text for _, text in results] == [
+        "正在查询额度...",
+        "剩余额度: 12\n⚠️ 该 token 已被站点停用（enabled=false），生图可能失败",
+    ]
+
+
+def test_quota_command_reports_upstream_error_message():
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.image_gen_key = "test-token"
+    plugin._fetch_quota = AsyncMock(
+        return_value={"ok": False, "message": "user not found"}
+    )
+    event = FakeCommandEvent("quota")
+
+    results = asyncio.run(collect_results(plugin.quota(event)))
+
+    assert [text for _, text in results] == [
+        "正在查询额度...",
+        "额度查询失败：user not found",
+    ]
+
+
+def test_quota_command_requires_token():
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.image_gen_key = ""
+    event = FakeCommandEvent("quota")
+
+    results = asyncio.run(collect_results(plugin.quota(event)))
+
+    assert results == [("plain", "未配置 image_gen_key。")]
