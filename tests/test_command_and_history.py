@@ -388,6 +388,46 @@ def test_auto_translate_only_sends_natural_segments_to_llm():
     )
 
 
+def test_outfit_cache_switch_off_still_uses_excerpt_but_skips_cache():
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.enable_outfit_cache = False
+    plugin.outfit_cache_ttl_seconds = 3600
+    plugin.default_outfit = "modern fashion"
+    plugin.outfit_cache_text = None
+    plugin.outfit_cache_expires_at = None
+
+    # 命中具体服装词：片段仍作为本次上下文返回，但不写入缓存
+    ctx, source, use_default = plugin._resolve_outfit("她穿上了红色连衣裙")
+    assert ctx and "红色连衣裙" in ctx, ctx
+    assert source == "prompt"
+    assert use_default is False
+    assert plugin.outfit_cache_text is None
+
+    # 模糊描述：开关关闭不读缓存，回退默认服装标记
+    ctx, source, use_default = plugin._resolve_outfit("a girl standing in the rain")
+    assert ctx == ""
+    assert source == "none"
+    assert use_default is True
+
+
+def test_outfit_cache_switch_on_writes_and_reuses_cache():
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.enable_outfit_cache = True
+    plugin.outfit_cache_ttl_seconds = 3600
+    plugin.default_outfit = ""
+    plugin.outfit_cache_text = None
+    plugin.outfit_cache_expires_at = None
+
+    _, source, _ = plugin._resolve_outfit("她穿上了红色连衣裙")
+    assert source == "prompt"
+    assert plugin.outfit_cache_text and "红色连衣裙" in plugin.outfit_cache_text
+
+    cached_ctx, source, use_default = plugin._resolve_outfit("a girl standing in the rain")
+    assert cached_ctx == plugin.outfit_cache_text
+    assert source == "cache"
+    assert use_default is False
+
+
 class FakeQuotaResponse:
     def __init__(self, status, payload):
         self.status = status

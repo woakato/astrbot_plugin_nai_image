@@ -105,13 +105,22 @@
         "description": "默认服装",
         "hint": "在转译模式为「开启」，或「自动」识别到自然语言时生效；提示词没有具体服装且缓存为空时自动补全。使用英文逗号分隔 SD/NAI tag，例如：modern fashion, dark green knit dress, fitted sweater, slim pants, leather boots。"
     },
+    "enable_outfit_cache": {
+        "type": "bool",
+        "default": true,
+        "description": "启用服装缓存池",
+        "hint": "开启后记录提示词中出现过的具体服装/换装描述，并在缓存时长内对模糊描述自动沿用；关闭后不写入也不读取缓存，本次提示词中的服装上下文与「默认服装」逻辑不受影响。"
+    },
     "outfit_cache_ttl_seconds": {
         "type": "int",
         "default": 3600,
         "description": "服装缓存时长",
-        "hint": "单位为秒，在「开启」模式或「自动」识别到自然语言时生效。具体服装或换装描述会写入缓存，后续模糊描述自动沿用；默认 3600 秒，超时后回退默认服装，设为 0 可关闭缓存。",
+        "hint": "单位为秒，仅在「启用服装缓存池」开启时生效。具体服装或换装描述会写入缓存，后续模糊描述自动沿用；默认 3600 秒，超时后回退默认服装，设为 0 亦不启用缓存写入。",
         "min": 0,
-        "max": 86400
+        "max": 86400,
+        "condition": {
+            "enable_outfit_cache": true
+        }
     },
     "model": {
         "type": "string",

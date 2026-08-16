@@ -366,7 +366,7 @@ def migrate_legacy_translate_config(config: dict) -> Optional[str]:
     return None
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.3.5")
+@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.3.6")
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         global _active_plugin
@@ -447,6 +447,8 @@ class NAIGenerateImagePlugin(Star):
 
         # ==== Outfit 缓存池配置 ====
         self.default_outfit: str = (config.get("default_outfit") or "").strip()
+        # 「启用服装缓存池」总开关：关闭后不写入也不读取缓存（ttl=0 亦同）。
+        self.enable_outfit_cache: bool = bool(config.get("enable_outfit_cache", True))
         try:
             self.outfit_cache_ttl_seconds: int = max(
                 0, min(86400, int(config.get("outfit_cache_ttl_seconds") or 3600))
@@ -500,6 +502,7 @@ class NAIGenerateImagePlugin(Star):
             f"translate={self.translate_mode} "
             f"provider='{self.translate_provider or '默认'}' | "
             f"outfit: default={'已设' if self.default_outfit else '未设'} "
+            f"cache={'ON' if self.enable_outfit_cache and self.outfit_cache_ttl_seconds > 0 else 'OFF'} "
             f"cache_ttl={self.outfit_cache_ttl_seconds}s | "
             f"companion_link={'ON' if self.enable_companion_link else 'OFF'} "
             f"companion_format={self.companion_prompt_format} "
@@ -831,12 +834,14 @@ class NAIGenerateImagePlugin(Star):
         """
         is_specific = _has_specific_outfit(user_prompt)
         is_change = _detect_outfit_change(user_prompt)
+        # 开关关闭或 ttl=0 时缓存整体停用：不写入、不读取。
+        cache_enabled = self.enable_outfit_cache and self.outfit_cache_ttl_seconds > 0
 
         # 1) 命中具体词 / 换装动词 → 抽出片段写缓存，并把片段本身作为本次上下文
         if is_specific or is_change:
             excerpt = _extract_outfit_excerpt(user_prompt)
             if excerpt:
-                if self.outfit_cache_ttl_seconds > 0:
+                if cache_enabled:
                     self._outfit_cache_set(excerpt)
                     logger.info(
                         f"{LOG_TAG} [outfit] 命中具体/换装 | "
@@ -846,12 +851,13 @@ class NAIGenerateImagePlugin(Star):
                     )
                 else:
                     logger.info(
-                        f"{LOG_TAG} [outfit] 命中具体/换装但缓存被禁用 (ttl=0)"
+                        f"{LOG_TAG} [outfit] 命中具体/换装但缓存已停用 "
+                        f"(enable={self.enable_outfit_cache} ttl={self.outfit_cache_ttl_seconds}s)"
                     )
                 return excerpt, "prompt", False
 
         # 2) 源 prompt 模糊 → 只使用缓存（TTL 内），不再返回默认服装（留到模板合并阶段）
-        if self.outfit_cache_ttl_seconds > 0:
+        if cache_enabled:
             cached = self._outfit_cache_get()
             if cached:
                 logger.debug(
