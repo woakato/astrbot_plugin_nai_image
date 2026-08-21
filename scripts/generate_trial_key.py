@@ -14,9 +14,10 @@
     2. 将输出的字符串粘贴到 main.py 中 _TRIAL_KEY_ENC = "..." 的引号内
     3. 重新打包发布插件
 """
+
 import base64
-import sys
 import os
+import sys
 
 # 必须与 main.py 中的 _TRIAL_OBF_KEY 完全一致
 _TRIAL_OBF_KEY = b"nai_plugin_trial_2024_obf_key"
@@ -27,8 +28,7 @@ def encrypt_trial_key(raw_key: str) -> str:
     raw_bytes = raw_key.strip().encode("utf-8")
     key_len = len(_TRIAL_OBF_KEY)
     encrypted = bytes(
-        raw_bytes[i] ^ _TRIAL_OBF_KEY[i % key_len]
-        for i in range(len(raw_bytes))
+        raw_bytes[i] ^ _TRIAL_OBF_KEY[i % key_len] for i in range(len(raw_bytes))
     )
     return base64.b64encode(encrypted).decode("ascii")
 
@@ -38,8 +38,7 @@ def decrypt_trial_key(encrypted_b64: str) -> str:
     encrypted = base64.b64decode(encrypted_b64.strip())
     key_len = len(_TRIAL_OBF_KEY)
     decrypted = bytes(
-        encrypted[i] ^ _TRIAL_OBF_KEY[i % key_len]
-        for i in range(len(encrypted))
+        encrypted[i] ^ _TRIAL_OBF_KEY[i % key_len] for i in range(len(encrypted))
     )
     return decrypted.decode("utf-8").rstrip("\x00").strip()
 

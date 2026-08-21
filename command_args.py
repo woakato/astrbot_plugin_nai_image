@@ -261,8 +261,7 @@ def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
             index += 1
             continue
         if not (
-            text.startswith("--", index)
-            and (index == 0 or text[index - 1].isspace())
+            text.startswith("--", index) and (index == 0 or text[index - 1].isspace())
         ):
             index += 1
             continue
@@ -291,9 +290,7 @@ def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
 
         value_start = name_end + 1
         if value_start < len(text) and text[value_start] in {'"', "'"}:
-            value, argument_end = _read_quoted_value(
-                text, value_start, canonical_name
-            )
+            value, argument_end = _read_quoted_value(text, value_start, canonical_name)
         else:
             argument_end = value_start
             while argument_end < len(text) and not text[argument_end].isspace():
@@ -396,9 +393,7 @@ def parse_image_command(
 
     translate_mode = None
     if "translate" in values:
-        translate_mode = _TRANSLATE_ALIASES.get(
-            values["translate"].strip().casefold()
-        )
+        translate_mode = _TRANSLATE_ALIASES.get(values["translate"].strip().casefold())
         if translate_mode is None:
             raise ImageCommandArgumentError(
                 "参数 --translate 无效，可选: 关闭/off、开启/on、自动/auto。"
@@ -406,9 +401,7 @@ def parse_image_command(
 
     enable_template = None
     if "template" in values:
-        enable_template = _TEMPLATE_ALIASES.get(
-            values["template"].strip().casefold()
-        )
+        enable_template = _TEMPLATE_ALIASES.get(values["template"].strip().casefold())
         if enable_template is None:
             raise ImageCommandArgumentError(
                 "参数 --template 无效，可选: 关闭/off、开启/on。"

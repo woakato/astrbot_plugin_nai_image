@@ -16,6 +16,18 @@
 | `/image <提示词> --cfg=0.3 --scale=6 --steps=28` | 单次覆盖生成参数 |
 | `/quota` | 向上游查询 token 剩余额度与启用状态 |
 | `/imgstatus` | 检查本地代理与 token 配置状态（不再在线探测上游） |
+| `/nai_interrogate` / `/反推` | 使用配置的多模态模型分析附带图片并输出 NAI tags；默认只反推，不自动生图 |
+
+### 参考图反推
+
+配置 `interrogate_provider` 选择支持图片输入的多模态 Provider 后，可直接发送带图消息并使用 `/反推`，也可以传入本地路径或 URL：
+
+```text
+/反推
+/nai_interrogate C:\\images\\reference.png 保留人物外貌，只改变姿势
+```
+
+反推结果只作为文本返回，不会自动调用 NAI 生图，也不会写入图片历史或服装缓存。模型必须支持 AstrBot Provider 的 `image_urls` 参数；本地图片会在请求时转换为 data URL。
 
 所有参数都只影响当前指令，不会修改插件配置。含空格的参数值需要使用单引号或双引号：
 

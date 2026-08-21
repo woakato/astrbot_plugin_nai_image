@@ -8,6 +8,7 @@ OpenAI 兼容代理即可完成生图。
 本模块只依赖插件实例暴露的既有方法（``_generate_one`` 等），不修改任何
 核心生图逻辑，也不做上游可达性预检。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -82,7 +83,8 @@ class NAIImageCompanionExtensionAPI:
             "base_url": plugin.base_url,
             "default_style": plugin.image_style,
             "default_size": plugin.image_size,
-            "prompt_format": getattr(plugin, "companion_prompt_format", "") or "自然语言模式（en）",
+            "prompt_format": getattr(plugin, "companion_prompt_format", "")
+            or "自然语言模式（en）",
             "proxy_enabled": bool(getattr(plugin, "enable_proxy", True)),
             "bypass_system_proxy": bool(getattr(plugin, "bypass_system_proxy", True)),
             "proxy_online": plugin.proxy_runner is not None,
@@ -147,7 +149,9 @@ class NAIImageCompanionExtensionAPI:
         image_dir = self._companion_image_dir()
         cutoff = time.time() - retention * 86400
         try:
-            removed = await asyncio.to_thread(self._cleanup_expired_images, image_dir, cutoff)
+            removed = await asyncio.to_thread(
+                self._cleanup_expired_images, image_dir, cutoff
+            )
         except Exception as exc:
             logger.warning(f"{_LOG_TAG} 直连生图清理失败: {type(exc).__name__}: {exc}")
             return {"removed_files": 0, "note": f"清理失败: {type(exc).__name__}"}
@@ -175,7 +179,9 @@ class NAIImageCompanionExtensionAPI:
 
     # ==== 生图 ====
 
-    async def generate_for_companion(self, owner: Any, request: dict[str, Any]) -> dict[str, Any]:
+    async def generate_for_companion(
+        self, owner: Any, request: dict[str, Any]
+    ) -> dict[str, Any]:
         """按陪伴请求契约生成一张图片并返回文件路径。
 
         对陪伴插件传过来的请求做本土化适配：``prompt_text`` 是需求正文，
@@ -195,11 +201,11 @@ class NAIImageCompanionExtensionAPI:
         # （穿搭、场景、视觉记忆、构图要求等，正/负向分开）。
         raw_prompt = _first_text(req.get("prompt_text"), req.get("prompt"))
         workflow_kind = _first_text(req.get("workflow_kind"), "text2img")[:40]
-        session_key = _first_text(req.get("session_key"), req.get("continuity_key"))[:340]
+        session_key = _first_text(req.get("session_key"), req.get("continuity_key"))[
+            :340
+        ]
         if _first_text(req.get("reference_image_path")):
-            logger.info(
-                f"{_LOG_TAG} 上游为纯文生图，忽略参考图 | kind={workflow_kind}"
-            )
+            logger.info(f"{_LOG_TAG} 上游为纯文生图，忽略参考图 | kind={workflow_kind}")
 
         prompt_format = self._resolve_prompt_format(req)
         style = self._coerce_style(req.get("style"))
@@ -261,7 +267,9 @@ class NAIImageCompanionExtensionAPI:
             from .main import _format_generate_error
 
             note = _format_generate_error(reason)
-            self._note_generation(workflow_kind, prompt_format, style, size, "", False, note)
+            self._note_generation(
+                workflow_kind, prompt_format, style, size, "", False, note
+            )
             return {
                 "handled": True,
                 "backend": "NAI 生图",
@@ -292,7 +300,9 @@ class NAIImageCompanionExtensionAPI:
             image_path=str(image_path),
         )
         note = "生成完成"
-        self._note_generation(workflow_kind, prompt_format, style, size, str(image_path), True, note)
+        self._note_generation(
+            workflow_kind, prompt_format, style, size, str(image_path), True, note
+        )
         return {
             "handled": True,
             "backend": "NAI 生图",
@@ -301,7 +311,9 @@ class NAIImageCompanionExtensionAPI:
             "metadata": metadata,
         }
 
-    async def test_endpoint(self, owner: Any, endpoint: dict[str, Any], prompt: str) -> dict[str, Any]:
+    async def test_endpoint(
+        self, owner: Any, endpoint: dict[str, Any], prompt: str
+    ) -> dict[str, Any]:
         """跑一次真实上游生图作为端点诊断，返回 ``{ok, image_path, message}``。
 
         NAI 上游地址固定，``endpoint`` 中的 ``style`` / ``size`` 会被用于本次
@@ -315,7 +327,9 @@ class NAIImageCompanionExtensionAPI:
             return {"ok": False, "message": "测试提示词为空"}
         endpoint_dict = endpoint if isinstance(endpoint, dict) else {}
         style = self._coerce_style(endpoint_dict.get("style"))
-        size = self._coerce_size(_first_text(endpoint_dict.get("size"), endpoint_dict.get("ratio")))
+        size = self._coerce_size(
+            _first_text(endpoint_dict.get("size"), endpoint_dict.get("ratio"))
+        )
         try:
             img_bytes, reason = await plugin._generate_one(
                 normalize_prompt(text),
@@ -371,9 +385,7 @@ class NAIImageCompanionExtensionAPI:
                     return
             elif section is not None:
                 source = str(
-                    getattr(section, "source", "")
-                    or getattr(section, "name", "")
-                    or ""
+                    getattr(section, "source", "") or getattr(section, "name", "") or ""
                 )
                 positive = str(getattr(section, "positive", "") or "").strip()
                 negative = str(getattr(section, "negative", "") or "").strip()
@@ -407,7 +419,9 @@ class NAIImageCompanionExtensionAPI:
                 return normalize_prompt(requirement)
             return normalize_prompt(", ".join(text for text in background if text))
         if background:
-            parts = ["Background: " + ". ".join(text.rstrip(".") for text in background)]
+            parts = [
+                "Background: " + ". ".join(text.rstrip(".") for text in background)
+            ]
             if requirement:
                 parts.append("Requirements: " + requirement.rstrip("."))
             return _WHITESPACE_RE.sub(" ", ". ".join(parts) + ".").strip()
@@ -425,7 +439,9 @@ class NAIImageCompanionExtensionAPI:
         raw = _first_text(request.get("prompt_format")).casefold()
         if raw:
             return _PROMPT_FORMAT_NAI if "nai" in raw else _PROMPT_FORMAT_NATURAL
-        configured = str(getattr(self._plugin, "companion_prompt_format", "") or "").casefold()
+        configured = str(
+            getattr(self._plugin, "companion_prompt_format", "") or ""
+        ).casefold()
         if "nai" in configured:
             return _PROMPT_FORMAT_NAI
         return _PROMPT_FORMAT_NATURAL
@@ -488,7 +504,9 @@ class NAIImageCompanionExtensionAPI:
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        logger.info(f"{_LOG_TAG} 直连生图已保存 | path={image_path} bytes={len(img_bytes)}")
+        logger.info(
+            f"{_LOG_TAG} 直连生图已保存 | path={image_path} bytes={len(img_bytes)}"
+        )
         return image_path
 
     def _build_result_metadata(

@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import mimetypes
+import re
 import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -9,11 +11,14 @@ from urllib.parse import quote
 import aiohttp
 import yaml
 from aiohttp import web
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Image as Img, Plain
+from astrbot.api.message_components import Image as Img
+from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, StarTools, register
-from astrbot.api.web import error_response, json_response, request as web_request
+from astrbot.api.web import error_response, json_response
+from astrbot.api.web import request as web_request
 
 if __package__:
     from .command_args import (
@@ -52,6 +57,24 @@ else:
     )
 
 LOG_TAG = "[NAI-Image]"
+
+_IMAGE_PROMPT_SPEC_PATH = Path(__file__).resolve().parents[1] / "image_prompt_spec.txt"
+
+
+def _load_image_prompt_spec() -> str:
+    """Load the verbatim image prompt specification shared by image workflows.
+
+    Returns:
+        The specification text, or an empty string when the bundled resource is unavailable.
+    """
+    try:
+        return _IMAGE_PROMPT_SPEC_PATH.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.warning(f"{LOG_TAG} image prompt spec unavailable: {exc}")
+        return ""
+
+
+IMAGE_PROMPT_SPEC = _load_image_prompt_spec()
 
 IMAGE_GEN_BASE_URL_DEFAULT = "https://nai.sta1n.cn"
 PROXY_HOST = "127.0.0.1"
@@ -116,6 +139,7 @@ def _prepare_generation_parameters_for_yaml(value: Any) -> Any:
         return tuple(_prepare_generation_parameters_for_yaml(item) for item in value)
     return value
 
+
 # ==== 试用生成（代码内 XOR 混淆方案）====
 # XOR 解密密钥（不是试用密钥本身）
 _TRIAL_OBF_KEY = b"nai_plugin_trial_2024_obf_key"
@@ -126,6 +150,7 @@ TRIAL_MAX_USES = 3
 
 # 自然语言 → SD/NAI 标签风格提示词 的转译系统提示
 TRANSLATE_SYSTEM_PROMPT = (
+    f"{IMAGE_PROMPT_SPEC}\n\n"
     "You translate natural-language descriptions into compact, comma-separated "
     "Stable Diffusion / NovelAI prompt tags. Output ONLY the tags — no "
     "explanations, no markdown, no thinking block, no labels, no preamble.\n"
@@ -204,47 +229,44 @@ IMAGE_SIZES = {
     "2K方图": "2k_square",
     "4K竖图": "4k_portrait",
     "4K横图": "4k_landscape",
-    "4K方图": "4k_square"
+    "4K方图": "4k_square",
 }
 
 DEFAULT_ARTISTS = {
-    "vertical": "masterpiece, best quality,[[[artist:dishwasher1910]]], {{yd_(orange_maru)}}, [artist:ciloranko], [artist:sho_(sho_lwlw)], [ningen mame], soft lighting,year 2024",
-    "comicDoujin": "masterpiece,best quality,ultra detailed,by 小田武士,by 内尾和正,by あずーる,TV anime screencap,clean cel shading,soft lineart,subtle bloom glow",
+    "vertical": "[[[artist:dishwasher1910]]], {{yd_(orange_maru)}}, [artist:ciloranko], [artist:sho_(sho_lwlw)], [ningen mame], year 2024,",
+    "comicDoujin": (
+        "(masterpiece:1.3), (best quality:1.2), (highres), (absurdres),\n"
+        "(extremely detailed illustration:1.2), (anime style:1.1),\n\n"
+        "(artist:feipin zhanshi:1.0), (artist:nlebo-hentai:0.9), (artist:sos adult:0.85),\n"
+        "(artist:hews:0.4),\n\n"
+        "(detailed skin texture:1.15), (glossy skin:1.1),\n"
+        "(thick lineart:1.1), (high contrast:1.15),\n"
+        "(vivid colors:1.1), (detailed shading:1.15),\n"
+        "(warm color palette:1.05),\n"
+        "(cute face:1.1), (detailed eyes:1.15), (detailed face:1.1),"
+    ),
     "r18": (
-        "20::best quality, absurdres, very aesthetic, detailed, masterpiece::, 20::highly finished::, "
-        "10::ultra detailed::, 5::masterpiece::, 5::best quality::, "
-        "2.4::kidmo::, 1.2::omone hokoma agm::, 1.1::dino, wanke, liduke::, "
-        "0.8::rurudo, mignon, artist:pottsness, artist:toosaka asagi::, 0.7::misaka_12003-gou::, "
-        "0.6::artist:chocoan, artist:ciloranko, artist:rhasta, artist:sho_sho_lwlw::, "
-        "dino_(dinoartforame), agoto, akakura, "
-        "year 2025, textless version, no text, The image is highly intricate finished drawn. "
-        "1.35::A highly finished photo-style artwork that has graphic texture, realistic skin surface, "
-        "and lifelike flesh with little obliques::, smooth line, glossy skin, realistic, 4k, "
-        "1.63::photorealistic::, 1.63::photo(medium)::, 3::simple background::, 2::depth of field::, "
-        "1.5::vivid color, lively color::, desaturated, muted tones, cinematic desaturation, "
-        "pale aesthetic, silver-toned, -2::green::, -1.5::vibrant, colorful, saturated::"
+        "0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, "
+        "textless version, The image is highly intricate finished drawn. "
+        "Only the character's face is in anime style, but their body is in realistic style. "
+        "1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, "
+        "and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \n"
+        "20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text,"
     ),
     "lolita25d": (
-        "20::best quality, absurdres, very aesthetic, detailed, masterpiece::, 20::highly finished::, "
-        "10::ultra detailed::, 5::masterpiece::, 5::best quality::, "
-        "2.4::kidmo::, 1.2::omone hokoma agm::, 1.1::dino, wanke, liduke::, "
-        "0.8::rurudo, mignon, artist:pottsness, artist:toosaka asagi::, 0.7::misaka_12003-gou::, "
-        "0.6::artist:chocoan, artist:ciloranko, artist:rhasta, artist:sho_sho_lwlw::, "
-        "dino_(dinoartforame), agoto, akakura, "
-        "0.9::rurudo(Only body shape), mignon(Only body shape)::, "
-        "year 2025, textless version, {{petite,loli}}, Petite figure, no text, "
-        "1.35::A highly finished photo-style artwork that has graphic texture, realistic skin surface, "
-        "and lifelike flesh with little obliques::, smooth line, glossy skin, realistic, 4k, "
-        "1.63::photorealistic::, 1.63::photo(medium)::, 3::simple background::, 2::depth of field::, "
-        "1.5::vivid color, lively color::, desaturated, muted tones, "
-        "-2::green::, -1.5::vibrant, colorful, saturated::"
+        "0.9::misaka_12003-gou & dino, rurudo,  mignon,wanke & liduk::, year 2025, realistic, 4k, -2::green ::, "
+        "textless version, The image is highly intricate finished drawn. "
+        "Only the character's face is in anime style, but their body is in realistic style. "
+        "1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, "
+        "and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \n"
+        "20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text,"
     ),
     "anime": (
         "1.4::asanagi::,{{{{{artist:asanagi}}}}},1.2::xiaoluo_xl::,1.3::Artist: misaka_12003-gou::,"
         "1.2::Artist:shexyo::,0.7::Artist:b.sa_(bbbs)::,1::Artist:qiandaiyiyu::,"
         "1.05::artist:natedecock::,1.05::artist:kunaboto::,0.75::artist:kandata_nijou::,"
-        "1.05::artist:zer0.zer0::,1.05::artist:jasony::,0.75::misaka_12003-gou::, "
-        "dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green::, "
+        "1.05::artist:zer0.zer0 ::,1.05::artist:jasony::,0.75::misaka_12003-gou ::, "
+        "dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, "
         "{textless version, The image is highly intricate finished drawn,write realistically,true to life}, "
         "1.35::A highly finished photo-style artwork that has lively color, graphic texture, "
         "realistic skin surface, and lifelike flesh with little obliques::, "
@@ -285,7 +307,10 @@ def _format_generate_error(reason: str) -> str:
         return _map[reason]
     # 前缀匹配（reason 可能带详细错误信息，如 "http_4xx (HTTP 400): ..."）
     if reason.startswith("http_4xx"):
-        return "🚫 上游返回 4xx。常见原因：token 无效、提示词含敏感词、或参数不合法。\n" + reason
+        return (
+            "🚫 上游返回 4xx。常见原因：token 无效、提示词含敏感词、或参数不合法。\n"
+            + reason
+        )
     if reason.startswith("http_5xx"):
         return "🔥 上游返回 5xx。nai.sta1n.cn 服务器内部错误，请稍后重试。\n" + reason
     if reason.startswith("http_other"):
@@ -298,18 +323,65 @@ def _format_generate_error(reason: str) -> str:
 
 # 命中即视为"具体服装"的关键词（中文为主，覆盖常见服饰品类）
 _OUTFIT_CONCRETE_TOKENS = (
-    "裙", "裤", "衣", "上衣", "下装", "外套", "衬衫", "T恤", "罩衫", "卫衣",
-    "汉服", "校服", "旗袍", "和服", "西装", "风衣", "夹克", "毛衣", "针织衫",
-    "连衣裙", "半裙", "短裙", "长裙", "牛仔裤", "阔腿裤", "喇叭裤", "运动裤",
-    "皮衣", "羽绒服", "棉衣", "大衣",
-    "靴", "鞋", "袜", "丝袜", "帽", "围巾", "手套", "披风", "斗篷",
-    "JK", "jk", "洛丽塔", "lolita",
+    "裙",
+    "裤",
+    "衣",
+    "上衣",
+    "下装",
+    "外套",
+    "衬衫",
+    "T恤",
+    "罩衫",
+    "卫衣",
+    "汉服",
+    "校服",
+    "旗袍",
+    "和服",
+    "西装",
+    "风衣",
+    "夹克",
+    "毛衣",
+    "针织衫",
+    "连衣裙",
+    "半裙",
+    "短裙",
+    "长裙",
+    "牛仔裤",
+    "阔腿裤",
+    "喇叭裤",
+    "运动裤",
+    "皮衣",
+    "羽绒服",
+    "棉衣",
+    "大衣",
+    "靴",
+    "鞋",
+    "袜",
+    "丝袜",
+    "帽",
+    "围巾",
+    "手套",
+    "披风",
+    "斗篷",
+    "JK",
+    "jk",
+    "洛丽塔",
+    "lolita",
 )
 
 # 命中即视为"换装动作"的关键词（组合型，避免裸"穿"/"换"误判）
 _OUTFIT_CHANGE_KEYWORDS = (
-    "换上新", "换了新", "换上", "今天穿", "今晚穿", "早上穿",
-    "刚换上", "新换了", "换了件", "换了条", "穿上了",
+    "换上新",
+    "换了新",
+    "换上",
+    "今天穿",
+    "今晚穿",
+    "早上穿",
+    "刚换上",
+    "新换了",
+    "换了件",
+    "换了条",
+    "穿上了",
 )
 
 
@@ -353,7 +425,7 @@ def _extract_outfit_excerpt(prompt: str, max_chars: int = 200) -> str:
     return excerpt.strip() or prompt[idx:end].strip()
 
 
-def migrate_legacy_translate_config(config: dict) -> Optional[str]:
+def migrate_legacy_translate_config(config: dict) -> str | None:
     """检测旧版布尔 enable_translate，归一化为字符串三态并写回 dict。
 
     返回迁移后的字符串值；未发生迁移（已是字符串或缺失）返回 None。
@@ -366,7 +438,12 @@ def migrate_legacy_translate_config(config: dict) -> Optional[str]:
     return None
 
 
-@register("astrbot_plugin_nai_image", "缪缪的小水泡", "基于 nai.sta1n.cn 的 NovelAI 生图插件", "2.3.6")
+@register(
+    "astrbot_plugin_nai_image",
+    "缪缪的小水泡",
+    "基于 nai.sta1n.cn 的 NovelAI 生图插件",
+    "2.3.7",
+)
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         global _active_plugin
@@ -374,14 +451,14 @@ class NAIGenerateImagePlugin(Star):
         logger.info(f"{LOG_TAG} [init] 插件实例化开始")
         logger.debug(f"{LOG_TAG} [init] config keys: {list(config.keys())}")
 
-        self.base_url: str = (config.get("base_url") or IMAGE_GEN_BASE_URL_DEFAULT).strip() or IMAGE_GEN_BASE_URL_DEFAULT
+        self.base_url: str = (
+            config.get("base_url") or IMAGE_GEN_BASE_URL_DEFAULT
+        ).strip() or IMAGE_GEN_BASE_URL_DEFAULT
         self.image_gen_key: str = (config.get("image_gen_key") or "").strip()
         self.image_style: str = (
             normalize_image_style(config.get("image_style")) or "vertical"
         )
-        self.image_size: str = (
-            normalize_image_size(config.get("image_size")) or "竖图"
-        )
+        self.image_size: str = normalize_image_size(config.get("image_size")) or "竖图"
         try:
             self.image_count: int = max(1, min(6, int(config.get("image_count") or 2)))
         except (TypeError, ValueError):
@@ -403,7 +480,7 @@ class NAIGenerateImagePlugin(Star):
             )
         except (TypeError, ValueError):
             self.image_history_limit = 0
-        self._image_history_dir: Optional[Path] = None
+        self._image_history_dir: Path | None = None
         self._image_history_lock = asyncio.Lock()
         self.custom_artists: str = config.get("custom_artists") or ""
         self.model: str = config.get("model") or "nai-diffusion-4-5-full"
@@ -427,8 +504,8 @@ class NAIGenerateImagePlugin(Star):
         self.negative: str = neg if neg else DEFAULT_NEGATIVE
         self.enable_template: bool = bool(config.get("enable_template", True))
         self.character_preset: str = (config.get("character_preset") or "").strip()
-        self._session: Optional[aiohttp.ClientSession] = None
-        self.proxy_runner: Optional[web.AppRunner] = None
+        self._session: aiohttp.ClientSession | None = None
+        self.proxy_runner: web.AppRunner | None = None
         self.proxy_port: int = int(config.get("proxy_port") or PROXY_PORT)
         # v2.2.4 及更早版本的 enable_translate 为布尔值，新版 schema 要求字符串三态。
         # 保留布尔值会导致 dashboard 保存配置时因类型校验失败，这里加载时归一化并
@@ -444,6 +521,15 @@ class NAIGenerateImagePlugin(Star):
         # 保留旧版布尔属性，避免仍读取 enable_translate 的外部联动失效。
         self.enable_translate: bool = self.translate_mode != TRANSLATE_MODE_OFF
         self.translate_provider: str = (config.get("translate_provider") or "").strip()
+        self.interrogate_provider: str = (
+            config.get("interrogate_provider") or ""
+        ).strip()
+        try:
+            self.interrogate_max_tokens: int = max(
+                128, min(4096, int(config.get("interrogate_max_tokens") or 700))
+            )
+        except (TypeError, ValueError):
+            self.interrogate_max_tokens = 700
 
         # ==== Outfit 缓存池配置 ====
         self.default_outfit: str = (config.get("default_outfit") or "").strip()
@@ -456,18 +542,23 @@ class NAIGenerateImagePlugin(Star):
         except (TypeError, ValueError):
             self.outfit_cache_ttl_seconds = 3600
         # 单槽位 outfit 缓存：纯内存，重载插件即清空。
-        self.outfit_cache_text: Optional[str] = None
-        self.outfit_cache_expires_at: Optional[float] = None
+        self.outfit_cache_text: str | None = None
+        self.outfit_cache_expires_at: float | None = None
 
-        #读取配置是否启用自主生图工具
+        # 读取配置是否启用自主生图工具
         self.enable_llm_tool: bool = bool(config.get("enable_llm_tool", False))
 
         # ==== 陪伴插件直连（extension API）与本地代理开关 ====
-        self.enable_companion_link: bool = bool(config.get("enable_companion_link", True))
+        self.enable_companion_link: bool = bool(
+            config.get("enable_companion_link", True)
+        )
         self.companion_prompt_format: str = (
             config.get("companion_prompt_format") or "自然语言模式（en）"
         ).strip()
-        if "nai" not in self.companion_prompt_format.casefold() and "自然语言" not in self.companion_prompt_format:
+        if (
+            "nai" not in self.companion_prompt_format.casefold()
+            and "自然语言" not in self.companion_prompt_format
+        ):
             self.companion_prompt_format = "自然语言模式（en）"
         try:
             self.companion_image_retention_days: int = max(
@@ -484,9 +575,9 @@ class NAIGenerateImagePlugin(Star):
         _active_plugin = self
 
         # ==== 试用生成状态 ====
-        self._trial_key: Optional[str] = None       # 代码内解密，仅存内存
-        self._trial_usage_count: int = 0             # 本地文件追踪
-        self._trial_usage_file: Optional[str] = None
+        self._trial_key: str | None = None  # 代码内解密，仅存内存
+        self._trial_usage_count: int = 0  # 本地文件追踪
+        self._trial_usage_file: str | None = None
 
         logger.info(
             f"{LOG_TAG} [init] 配置加载完成 | "
@@ -516,7 +607,7 @@ class NAIGenerateImagePlugin(Star):
         self,
         user_prompt: str,
         *,
-        enable_template: Optional[bool] = None,
+        enable_template: bool | None = None,
     ) -> str:
         """按单次覆盖或全局配置决定是否在用户提示词前拼接角色模板。"""
 
@@ -535,7 +626,11 @@ class NAIGenerateImagePlugin(Star):
             return ".png"
         if img_bytes.startswith(b"\xff\xd8\xff"):
             return ".jpg"
-        if len(img_bytes) >= 12 and img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
+        if (
+            len(img_bytes) >= 12
+            and img_bytes[:4] == b"RIFF"
+            and img_bytes[8:12] == b"WEBP"
+        ):
             return ".webp"
         return ".img"
 
@@ -572,16 +667,18 @@ class NAIGenerateImagePlugin(Star):
         """延迟解析插件数据目录，避免模块加载阶段依赖 AstrBot 运行环境。"""
 
         if self._image_history_dir is None:
-            self._image_history_dir = StarTools.get_data_dir(PLUGIN_NAME) / "image_history"
+            self._image_history_dir = (
+                StarTools.get_data_dir(PLUGIN_NAME) / "image_history"
+            )
         return self._image_history_dir
 
     @staticmethod
     def _write_and_cleanup_image_history(
         history_dir: Path,
         img_bytes: bytes,
-        generation_parameters: Optional[dict[str, Any]],
+        generation_parameters: dict[str, Any] | None,
         history_limit: int,
-    ) -> tuple[Path, Optional[Path], int]:
+    ) -> tuple[Path, Path | None, int]:
         """同步写入图片和可选 YAML 参数，并按数量清理最旧记录。
 
         文件先写入同目录临时文件再原子替换，避免异常中断留下半份记录。
@@ -597,16 +694,14 @@ class NAIGenerateImagePlugin(Star):
         finally:
             image_temp_path.unlink(missing_ok=True)
 
-        parameters_path: Optional[Path] = None
+        parameters_path: Path | None = None
         if generation_parameters is not None:
             parameters_path = image_path.with_suffix(".yaml")
             parameters_temp_path = history_dir / f".{parameters_path.name}.tmp"
             try:
                 parameters_temp_path.write_text(
                     yaml.dump(
-                        _prepare_generation_parameters_for_yaml(
-                            generation_parameters
-                        ),
+                        _prepare_generation_parameters_for_yaml(generation_parameters),
                         Dumper=_GenerationParametersDumper,
                         allow_unicode=True,
                         default_flow_style=False,
@@ -632,7 +727,9 @@ class NAIGenerateImagePlugin(Star):
                 except FileNotFoundError:
                     continue
             managed_files.sort()
-            for _, _, old_path in managed_files[: max(0, len(managed_files) - history_limit)]:
+            for _, _, old_path in managed_files[
+                : max(0, len(managed_files) - history_limit)
+            ]:
                 try:
                     old_path.unlink()
                     removed += 1
@@ -692,7 +789,9 @@ class NAIGenerateImagePlugin(Star):
                 f"trust_env={not self.bypass_system_proxy})"
             )
         except Exception as e:
-            logger.error(f"{LOG_TAG} [initialize] aiohttp session 创建失败: {e!r}（将继续，远程出图会受影响）")
+            logger.error(
+                f"{LOG_TAG} [initialize] aiohttp session 创建失败: {e!r}（将继续，远程出图会受影响）"
+            )
 
         # 2) 本地代理 —— 由 enable_proxy 控制。开启时先停掉旧实例（热重载
         #    场景），再带 3 次 retry（间隔 1s）启动，应对 TIME_WAIT 等端口占用。
@@ -727,30 +826,44 @@ class NAIGenerateImagePlugin(Star):
         # 3) 注册测试面板 Web API（路由需带插件名前缀才能被 Bridge SDK 匹配）
         try:
             self.context.register_web_api(
-                f"{PAGE_API_PREFIX}/config", self._test_panel_get_config, ["GET"],
+                f"{PAGE_API_PREFIX}/config",
+                self._test_panel_get_config,
+                ["GET"],
                 "NAI 测试面板：获取当前配置",
             )
             self.context.register_web_api(
-                f"{PAGE_API_PREFIX}/generate", self._test_panel_generate, ["POST"],
+                f"{PAGE_API_PREFIX}/generate",
+                self._test_panel_generate,
+                ["POST"],
                 "NAI 测试面板：生图测试",
             )
             self.context.register_web_api(
-                f"{PAGE_API_PREFIX}/trial_status", self._test_panel_trial_status, ["GET"],
+                f"{PAGE_API_PREFIX}/trial_status",
+                self._test_panel_trial_status,
+                ["GET"],
                 "NAI 测试面板：试用状态",
             )
             self.context.register_web_api(
-                f"{PAGE_API_PREFIX}/trial_generate", self._test_panel_trial_generate, ["POST"],
+                f"{PAGE_API_PREFIX}/trial_generate",
+                self._test_panel_trial_generate,
+                ["POST"],
                 "NAI 测试面板：试用生图",
             )
             self.context.register_web_api(
-                f"{PAGE_API_PREFIX}/save_cache", self._test_panel_save_cache, ["POST"],
+                f"{PAGE_API_PREFIX}/save_cache",
+                self._test_panel_save_cache,
+                ["POST"],
                 "NAI 测试面板：保存面板缓存",
             )
             self.context.register_web_api(
-                f"{PAGE_API_PREFIX}/load_cache", self._test_panel_load_cache, ["GET"],
+                f"{PAGE_API_PREFIX}/load_cache",
+                self._test_panel_load_cache,
+                ["GET"],
                 "NAI 测试面板：加载面板缓存",
             )
-            logger.info(f"{LOG_TAG} [initialize] 测试面板 Web API 已注册 | prefix={PAGE_API_PREFIX}")
+            logger.info(
+                f"{LOG_TAG} [initialize] 测试面板 Web API 已注册 | prefix={PAGE_API_PREFIX}"
+            )
         except Exception as e:
             logger.warning(f"{LOG_TAG} [initialize] 注册测试面板 Web API 失败: {e!r}")
 
@@ -791,7 +904,7 @@ class NAIGenerateImagePlugin(Star):
         return DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
 
     # ==== Outfit 缓存池读写 ====
-    def _outfit_cache_get(self) -> Optional[str]:
+    def _outfit_cache_get(self) -> str | None:
         """读缓存。TTL 到期自动清除（直接返回 None）。"""
         if self.outfit_cache_text is None:
             return None
@@ -877,19 +990,19 @@ class NAIGenerateImagePlugin(Star):
         style: str,
         size: str,
         *,
-        steps: Optional[int] = None,
-        scale: Optional[float] = None,
-        cfg: Optional[float] = None,
-        sampler: Optional[str] = None,
-        noise_schedule: Optional[str] = None,
-        negative: Optional[str] = None,
-        model: Optional[str] = None,
-        custom_artists: Optional[str] = None,
-        character_preset: Optional[str] = None,
-        enable_template: Optional[bool] = None,
-        enable_translate: Optional[bool | str] = None,
-        token_override: Optional[str] = None,
-    ) -> tuple[Optional[bytes], str]:
+        steps: int | None = None,
+        scale: float | None = None,
+        cfg: float | None = None,
+        sampler: str | None = None,
+        noise_schedule: str | None = None,
+        negative: str | None = None,
+        model: str | None = None,
+        custom_artists: str | None = None,
+        character_preset: str | None = None,
+        enable_template: bool | None = None,
+        enable_translate: bool | str | None = None,
+        token_override: str | None = None,
+    ) -> tuple[bytes | None, str]:
         """生成单张图片（全参数可覆盖版本，供测试面板使用）。
 
         所有可选参数留 None 时使用插件默认配置。
@@ -912,21 +1025,27 @@ class NAIGenerateImagePlugin(Star):
         _noise = noise_schedule if noise_schedule is not None else self.noise_schedule
         _negative = negative if negative is not None else self.negative
         _model = model if model is not None else self.model
-        _enable_template = enable_template if enable_template is not None else self.enable_template
+        _enable_template = (
+            enable_template if enable_template is not None else self.enable_template
+        )
         _translate_mode = normalize_translate_mode(
             enable_translate if enable_translate is not None else self.translate_mode
         )
 
         # artists 解析
         if style == "custom":
-            _artists = custom_artists if custom_artists is not None else self.custom_artists
+            _artists = (
+                custom_artists if custom_artists is not None else self.custom_artists
+            )
             if not _artists:
                 _artists = DEFAULT_ARTISTS.get("vertical", "")
         else:
             _artists = DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
 
         # character_preset
-        _char_preset = character_preset if character_preset is not None else self.character_preset
+        _char_preset = (
+            character_preset if character_preset is not None else self.character_preset
+        )
 
         # 1) 可选转译：自动模式只转译自然语言片段。
         base_prompt, _, _, prompt_kind = await self._prepare_translated_prompt(
@@ -997,7 +1116,9 @@ class NAIGenerateImagePlugin(Star):
                         f"size={size} body='{err_body[:300]}'"
                     )
                     # 将状态码和错误摘要编入 reason，让前端可见
-                    err_summary = err_body[:200].replace("\n", " ").strip() if err_body else ""
+                    err_summary = (
+                        err_body[:200].replace("\n", " ").strip() if err_body else ""
+                    )
                     if 400 <= resp.status < 500:
                         reason = f"http_4xx (HTTP {resp.status})"
                     elif 500 <= resp.status < 600:
@@ -1012,10 +1133,11 @@ class NAIGenerateImagePlugin(Star):
                     return None, "empty_response"
                 # 解析 PNG 尺寸用于日志排查
                 _w, _h = 0, 0
-                if len(img_bytes) >= 24 and img_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+                if len(img_bytes) >= 24 and img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
                     import struct
-                    _w = struct.unpack('>I', img_bytes[16:20])[0]
-                    _h = struct.unpack('>I', img_bytes[20:24])[0]
+
+                    _w = struct.unpack(">I", img_bytes[16:20])[0]
+                    _h = struct.unpack(">I", img_bytes[20:24])[0]
                 logger.info(
                     f"{LOG_TAG} [generate:custom] 成功 | size={size} "
                     f"png={_w}x{_h} bytes={len(img_bytes)}"
@@ -1039,8 +1161,7 @@ class NAIGenerateImagePlugin(Star):
         encrypted = base64.b64decode(encrypted_b64.strip())
         key_len = len(_TRIAL_OBF_KEY)
         decrypted = bytes(
-            encrypted[i] ^ _TRIAL_OBF_KEY[i % key_len]
-            for i in range(len(encrypted))
+            encrypted[i] ^ _TRIAL_OBF_KEY[i % key_len] for i in range(len(encrypted))
         )
         return decrypted.decode("utf-8").rstrip("\x00").strip()
 
@@ -1068,7 +1189,9 @@ class NAIGenerateImagePlugin(Star):
             if trial_file.exists():
                 data = json.loads(trial_file.read_text(encoding="utf-8"))
                 self._trial_usage_count = int(data.get("count", 0))
-                logger.info(f"{LOG_TAG} [trial] 本地试用次数: {self._trial_usage_count}/{TRIAL_MAX_USES}")
+                logger.info(
+                    f"{LOG_TAG} [trial] 本地试用次数: {self._trial_usage_count}/{TRIAL_MAX_USES}"
+                )
             else:
                 logger.info(f"{LOG_TAG} [trial] 无本地试用记录，从 0 开始")
         except Exception as e:
@@ -1091,30 +1214,39 @@ class NAIGenerateImagePlugin(Star):
 
     async def _test_panel_trial_status(self) -> Any:
         """Web API: 返回试用生成状态。"""
-        return json_response({
-            "available": bool(self._trial_key) and self._trial_usage_count < TRIAL_MAX_USES,
-            "key_loaded": bool(self._trial_key),
-            "used": self._trial_usage_count,
-            "max_uses": TRIAL_MAX_USES,
-            "remaining": max(0, TRIAL_MAX_USES - self._trial_usage_count),
-        })
+        return json_response(
+            {
+                "available": bool(self._trial_key)
+                and self._trial_usage_count < TRIAL_MAX_USES,
+                "key_loaded": bool(self._trial_key),
+                "used": self._trial_usage_count,
+                "max_uses": TRIAL_MAX_USES,
+                "remaining": max(0, TRIAL_MAX_USES - self._trial_usage_count),
+            }
+        )
 
     async def _test_panel_trial_generate(self) -> Any:
         """Web API: 使用试用密钥生图（每次调用 +1 次数，达上限拒绝）。"""
         # 检查密钥
         if not self._trial_key:
-            return json_response({
-                "status": "error",
-                "message": "试用密钥未加载，请稍后重试或联系插件作者。",
-            }, status_code=503)
+            return json_response(
+                {
+                    "status": "error",
+                    "message": "试用密钥未加载，请稍后重试或联系插件作者。",
+                },
+                status_code=503,
+            )
 
         # 检查次数
         if self._trial_usage_count >= TRIAL_MAX_USES:
-            return json_response({
-                "status": "error",
-                "message": f"试用次数已达上限（{TRIAL_MAX_USES} 次）。请配置自己的密钥后使用正式生图。",
-                "reason": "trial_exhausted",
-            }, status_code=403)
+            return json_response(
+                {
+                    "status": "error",
+                    "message": f"试用次数已达上限（{TRIAL_MAX_USES} 次）。请配置自己的密钥后使用正式生图。",
+                    "reason": "trial_exhausted",
+                },
+                status_code=403,
+            )
 
         # 解析请求
         try:
@@ -1131,7 +1263,7 @@ class NAIGenerateImagePlugin(Star):
         size = body.get("size") or "portrait"
 
         # 解析可选覆盖参数（与正式生成一致）
-        def _opt_int(key: str) -> Optional[int]:
+        def _opt_int(key: str) -> int | None:
             val = body.get(key)
             if val is None or val == "":
                 return None
@@ -1140,7 +1272,7 @@ class NAIGenerateImagePlugin(Star):
             except (TypeError, ValueError):
                 return None
 
-        def _opt_float(key: str) -> Optional[float]:
+        def _opt_float(key: str) -> float | None:
             val = body.get(key)
             if val is None or val == "":
                 return None
@@ -1149,7 +1281,7 @@ class NAIGenerateImagePlugin(Star):
             except (TypeError, ValueError):
                 return None
 
-        def _opt_str(key: str) -> Optional[str]:
+        def _opt_str(key: str) -> str | None:
             val = body.get(key)
             if val is None or val == "":
                 return None
@@ -1185,17 +1317,20 @@ class NAIGenerateImagePlugin(Star):
             model=_opt_str("model"),
             custom_artists=_opt_str("custom_artists"),
             token_override=self._trial_key,
-            character_preset="",       # 面板独立，不合并 settings 的角色预设
-            enable_template=False,     # 面板独立，不套用 settings 的模板
-            enable_translate=False,    # 转译已在上方完成
+            character_preset="",  # 面板独立，不合并 settings 的角色预设
+            enable_template=False,  # 面板独立，不套用 settings 的模板
+            enable_translate=False,  # 转译已在上方完成
         )
 
         if not img_bytes:
-            return json_response({
-                "status": "error",
-                "message": _format_generate_error(reason),
-                "reason": reason,
-            }, status_code=502)
+            return json_response(
+                {
+                    "status": "error",
+                    "message": _format_generate_error(reason),
+                    "reason": reason,
+                },
+                status_code=502,
+            )
 
         # 成功：次数 +1 并持久化
         self._trial_usage_count += 1
@@ -1206,13 +1341,15 @@ class NAIGenerateImagePlugin(Star):
         )
 
         b64 = base64.b64encode(img_bytes).decode()
-        return json_response({
-            "status": "ok",
-            "data": [{"b64_json": b64}],
-            "merge_info": merge_info,
-            "trial_used": self._trial_usage_count,
-            "trial_remaining": max(0, TRIAL_MAX_USES - self._trial_usage_count),
-        })
+        return json_response(
+            {
+                "status": "ok",
+                "data": [{"b64_json": b64}],
+                "merge_info": merge_info,
+                "trial_used": self._trial_usage_count,
+                "trial_remaining": max(0, TRIAL_MAX_USES - self._trial_usage_count),
+            }
+        )
 
     async def _test_panel_save_cache(self) -> Any:
         """Web API: 保存面板状态缓存到本地文件（替代 localStorage，因为 iframe sandbox 限制）。"""
@@ -1254,39 +1391,41 @@ class NAIGenerateImagePlugin(Star):
 
     async def _test_panel_get_config(self) -> Any:
         """Web API: 返回当前插件配置（脱敏 token）。"""
-        return json_response({
-            "image_gen_key": "已配置" if self.image_gen_key else "未配置",
-            "base_url": self.base_url,
-            "image_style": self.image_style,
-            "image_size": self.image_size,
-            "image_count": self.image_count,
-            "bot_reply_mode": self.bot_reply_mode,
-            "save_image_history": self.save_image_history,
-            "save_generation_parameters": self.save_generation_parameters,
-            "image_history_limit": self.image_history_limit,
-            "custom_artists": self.custom_artists,
-            "model": self.model,
-            "steps": self.steps,
-            "scale": self.scale,
-            "cfg": self.cfg_value,
-            "sampler": self.sampler,
-            "noise_schedule": self.noise_schedule,
-            "negative": self.negative,
-            "enable_template": self.enable_template,
-            "character_preset": self.character_preset,
-            "default_outfit": self.default_outfit,
-            "enable_translate": self.translate_mode,
-            "translate_provider": self.translate_provider,
-            "proxy_port": self.proxy_port,
-            "enable_proxy": self.enable_proxy,
-            "bypass_system_proxy": self.bypass_system_proxy,
-            "enable_companion_link": self.enable_companion_link,
-            "companion_prompt_format": self.companion_prompt_format,
-            "companion_image_retention_days": self.companion_image_retention_days,
-            "image_styles_options": IMAGE_STYLES,
-            "image_size_options": IMAGE_SIZES,
-            "default_negative": DEFAULT_NEGATIVE,
-        })
+        return json_response(
+            {
+                "image_gen_key": "已配置" if self.image_gen_key else "未配置",
+                "base_url": self.base_url,
+                "image_style": self.image_style,
+                "image_size": self.image_size,
+                "image_count": self.image_count,
+                "bot_reply_mode": self.bot_reply_mode,
+                "save_image_history": self.save_image_history,
+                "save_generation_parameters": self.save_generation_parameters,
+                "image_history_limit": self.image_history_limit,
+                "custom_artists": self.custom_artists,
+                "model": self.model,
+                "steps": self.steps,
+                "scale": self.scale,
+                "cfg": self.cfg_value,
+                "sampler": self.sampler,
+                "noise_schedule": self.noise_schedule,
+                "negative": self.negative,
+                "enable_template": self.enable_template,
+                "character_preset": self.character_preset,
+                "default_outfit": self.default_outfit,
+                "enable_translate": self.translate_mode,
+                "translate_provider": self.translate_provider,
+                "proxy_port": self.proxy_port,
+                "enable_proxy": self.enable_proxy,
+                "bypass_system_proxy": self.bypass_system_proxy,
+                "enable_companion_link": self.enable_companion_link,
+                "companion_prompt_format": self.companion_prompt_format,
+                "companion_image_retention_days": self.companion_image_retention_days,
+                "image_styles_options": IMAGE_STYLES,
+                "image_size_options": IMAGE_SIZES,
+                "default_negative": DEFAULT_NEGATIVE,
+            }
+        )
 
     async def _test_panel_generate(self) -> Any:
         """Web API: 接收双提示词生图请求，后端转译+合并后生成，返回 base64 图片 + 合并步骤。"""
@@ -1304,7 +1443,7 @@ class NAIGenerateImagePlugin(Star):
         size = body.get("size") or "portrait"
 
         # 解析可选覆盖参数
-        def _opt_int(key: str) -> Optional[int]:
+        def _opt_int(key: str) -> int | None:
             val = body.get(key)
             if val is None or val == "":
                 return None
@@ -1313,7 +1452,7 @@ class NAIGenerateImagePlugin(Star):
             except (TypeError, ValueError):
                 return None
 
-        def _opt_float(key: str) -> Optional[float]:
+        def _opt_float(key: str) -> float | None:
             val = body.get(key)
             if val is None or val == "":
                 return None
@@ -1322,7 +1461,7 @@ class NAIGenerateImagePlugin(Star):
             except (TypeError, ValueError):
                 return None
 
-        def _opt_str(key: str) -> Optional[str]:
+        def _opt_str(key: str) -> str | None:
             val = body.get(key)
             if val is None or val == "":
                 return None
@@ -1358,7 +1497,7 @@ class NAIGenerateImagePlugin(Star):
 
         # ==== 逐张生成（每张独立调用，避免复制同一张图） ====
         images_b64: list[str] = []
-        first_reason: Optional[str] = None
+        first_reason: str | None = None
         for i in range(n):
             logger.info(f"{LOG_TAG} [test_panel:generate] 生成第 {i + 1}/{n} 张")
             img_bytes, reason = await self._generate_one_custom(
@@ -1373,9 +1512,9 @@ class NAIGenerateImagePlugin(Star):
                 negative=_opt_str("negative"),
                 model=_opt_str("model"),
                 custom_artists=_opt_str("custom_artists"),
-                character_preset="",       # 面板独立，不合并 settings 的角色预设
-                enable_template=False,       # 面板独立，不套用 settings 的模板
-                enable_translate=False,      # 转译已在上方完成
+                character_preset="",  # 面板独立，不合并 settings 的角色预设
+                enable_template=False,  # 面板独立，不套用 settings 的模板
+                enable_translate=False,  # 转译已在上方完成
             )
             if img_bytes:
                 images_b64.append(base64.b64encode(img_bytes).decode())
@@ -1386,18 +1525,23 @@ class NAIGenerateImagePlugin(Star):
                 )
 
         if not images_b64:
-            return json_response({
-                "status": "error",
-                "message": _format_generate_error(first_reason or "unknown"),
-                "reason": first_reason,
-            }, status_code=502)
+            return json_response(
+                {
+                    "status": "error",
+                    "message": _format_generate_error(first_reason or "unknown"),
+                    "reason": first_reason,
+                },
+                status_code=502,
+            )
 
-        return json_response({
-            "status": "ok",
-            "data": [{"b64_json": b64} for b64 in images_b64],
-            "merge_info": merge_info,
-            "elapsed_info": f"{len(images_b64)} 张",
-        })
+        return json_response(
+            {
+                "status": "ok",
+                "data": [{"b64_json": b64} for b64 in images_b64],
+                "merge_info": merge_info,
+                "elapsed_info": f"{len(images_b64)} 张",
+            }
+        )
 
     async def _fetch_quota(self) -> dict[str, Any]:
         """向上游查询当前 token 的剩余额度与状态。
@@ -1409,7 +1553,10 @@ class NAIGenerateImagePlugin(Star):
         """
         if not self.image_gen_key or not self._session:
             logger.warning(f"{LOG_TAG} [quota] 跳过：token 或 session 缺失")
-            return {"ok": False, "message": "插件未配置 image_gen_key 或 session 未初始化，请重载插件"}
+            return {
+                "ok": False,
+                "message": "插件未配置 image_gen_key 或 session 未初始化，请重载插件",
+            }
         url = f"{self.base_url.rstrip('/')}/api/api/getUser"
         logger.info(f"{LOG_TAG} [quota] 查询中... | url={url}")
         try:
@@ -1436,13 +1583,15 @@ class NAIGenerateImagePlugin(Star):
                     "balance": int(quota_data.get("balance", 0) or 0),
                     "enabled": bool(quota_data.get("enabled", True)),
                 }
-                logger.info(f"{LOG_TAG} [quota] 查询成功 | 剩余 {result['value']} enabled={result['enabled']}")
+                logger.info(
+                    f"{LOG_TAG} [quota] 查询成功 | 剩余 {result['value']} enabled={result['enabled']}"
+                )
                 return result
         except Exception as e:
             logger.warning(f"{LOG_TAG} [quota] 请求异常: {e!r}")
             return {"ok": False, "message": f"请求异常: {type(e).__name__}"}
 
-    def _resolve_translate_provider_id(self) -> Optional[str]:
+    def _resolve_translate_provider_id(self) -> str | None:
         """根据配置和上下文，选出转译用的 provider ID。
 
         - self.translate_provider 留空 → 取 AstrBot 当前默认 provider
@@ -1490,7 +1639,9 @@ class NAIGenerateImagePlugin(Star):
 
         provider_id = self._resolve_translate_provider_id()
         if not provider_id:
-            logger.warning(f"{LOG_TAG} [translate] 没有可用 provider，跳过转译，原样透传")
+            logger.warning(
+                f"{LOG_TAG} [translate] 没有可用 provider，跳过转译，原样透传"
+            )
             return prompt
 
         logger.info(
@@ -1506,7 +1657,7 @@ class NAIGenerateImagePlugin(Star):
                 response = await llm_generate(
                     chat_provider_id=provider_id,
                     prompt=prompt,
-                    system_prompt=TRANSLATE_SYSTEM_PROMPT,
+                    system_prompt=IMAGE_PROMPT_SPEC or TRANSLATE_SYSTEM_PROMPT,
                     temperature=0.4,
                 )
         except AttributeError:
@@ -1528,7 +1679,7 @@ class NAIGenerateImagePlugin(Star):
                 try:
                     response = await prov.text_chat(
                         prompt=prompt,
-                        system_prompt=TRANSLATE_SYSTEM_PROMPT,
+                        system_prompt=IMAGE_PROMPT_SPEC or TRANSLATE_SYSTEM_PROMPT,
                         temperature=0.4,
                     )
                 except TypeError:
@@ -1543,7 +1694,11 @@ class NAIGenerateImagePlugin(Star):
         translated = ""
         if response is not None:
             translated = getattr(response, "completion_text", "") or ""
-            if not translated and hasattr(response, "result_chain") and response.result_chain:
+            if (
+                not translated
+                and hasattr(response, "result_chain")
+                and response.result_chain
+            ):
                 buf = []
                 for comp in response.result_chain:
                     txt = getattr(comp, "text", None)
@@ -1603,7 +1758,7 @@ class NAIGenerateImagePlugin(Star):
         self,
         prompt: str,
         *,
-        translate_mode: Optional[str] = None,
+        translate_mode: str | None = None,
         apply_outfit: bool,
     ) -> tuple[str, str, bool, str]:
         """按转译模式预处理提示词，并解析可选的服装上下文。
@@ -1684,17 +1839,17 @@ class NAIGenerateImagePlugin(Star):
         style: str,
         size: str,
         *,
-        steps: Optional[int] = None,
-        scale: Optional[float] = None,
-        cfg: Optional[float] = None,
-        sampler: Optional[str] = None,
-        noise_schedule: Optional[str] = None,
-        negative: Optional[str] = None,
-        model: Optional[str] = None,
-        custom_artists: Optional[str] = None,
-        enable_template: Optional[bool] = None,
-        enable_translate: Optional[bool | str] = None,
-    ) -> tuple[Optional[bytes], str]:
+        steps: int | None = None,
+        scale: float | None = None,
+        cfg: float | None = None,
+        sampler: str | None = None,
+        noise_schedule: str | None = None,
+        negative: str | None = None,
+        model: str | None = None,
+        custom_artists: str | None = None,
+        enable_template: bool | None = None,
+        enable_translate: bool | str | None = None,
+    ) -> tuple[bytes | None, str]:
         """使用最终参数生成单张图片。
 
         所有关键字参数都是仅对本次请求生效的覆盖值；传入 ``None`` 时才使用
@@ -1730,12 +1885,15 @@ class NAIGenerateImagePlugin(Star):
         )
 
         # 1) 关闭时原样发送；开启时整体转译；自动时只转译自然语言片段。
-        translated_prompt, outfit_source, use_default_outfit, prompt_kind = (
-            await self._prepare_translated_prompt(
-                prompt,
-                translate_mode=_translate_mode,
-                apply_outfit=True,
-            )
+        (
+            translated_prompt,
+            outfit_source,
+            use_default_outfit,
+            prompt_kind,
+        ) = await self._prepare_translated_prompt(
+            prompt,
+            translate_mode=_translate_mode,
+            apply_outfit=True,
         )
 
         # 2) 与预设模板合并
@@ -1755,9 +1913,7 @@ class NAIGenerateImagePlugin(Star):
         # 自定义风格允许单次覆盖画师串；空串仍按既有逻辑回退默认画师串。
         if style == "custom":
             artists = (
-                custom_artists
-                if custom_artists is not None
-                else self.custom_artists
+                custom_artists if custom_artists is not None else self.custom_artists
             )
             if not artists:
                 artists = DEFAULT_ARTISTS.get("vertical", "")
@@ -1775,7 +1931,9 @@ class NAIGenerateImagePlugin(Star):
             f"prompt(转译后)='{translated_prompt[:60]}...' "
             f"prompt(模板后,前60字)='{full_prompt[:60]}...'"
         )
-        logger.debug(f"{LOG_TAG} [generate] translated_prompt(完整) = {translated_prompt!r}")
+        logger.debug(
+            f"{LOG_TAG} [generate] translated_prompt(完整) = {translated_prompt!r}"
+        )
         logger.debug(f"{LOG_TAG} [generate] full_prompt(完整) = {full_prompt!r}")
         logger.debug(f"{LOG_TAG} [generate] artists = {artists!r}")
 
@@ -1898,11 +2056,18 @@ class NAIGenerateImagePlugin(Star):
         )
 
     async def _proxy_handle_generations(self, request: web.Request):
-        logger.info(f"{LOG_TAG} [proxy:gen] 收到 POST {request.path} from {request.remote}")
+        logger.info(
+            f"{LOG_TAG} [proxy:gen] 收到 POST {request.path} from {request.remote}"
+        )
         if not self.image_gen_key or not self._session:
             logger.warning(f"{LOG_TAG} [proxy:gen] 拒绝：token 或 session 缺失")
             return web.json_response(
-                {"error": {"message": "NAI 插件未配置 image_gen_key", "type": "invalid_request_error"}},
+                {
+                    "error": {
+                        "message": "NAI 插件未配置 image_gen_key",
+                        "type": "invalid_request_error",
+                    }
+                },
                 status=400,
             )
         try:
@@ -1911,14 +2076,24 @@ class NAIGenerateImagePlugin(Star):
         except Exception as e:
             logger.warning(f"{LOG_TAG} [proxy:gen] JSON 解析失败: {e!r}")
             return web.json_response(
-                {"error": {"message": f"invalid json: {e!r}", "type": "invalid_request_error"}},
+                {
+                    "error": {
+                        "message": f"invalid json: {e!r}",
+                        "type": "invalid_request_error",
+                    }
+                },
                 status=400,
             )
         prompt = normalize_prompt(body.get("prompt") or "")
         if not prompt:
             logger.warning(f"{LOG_TAG} [proxy:gen] prompt 为空")
             return web.json_response(
-                {"error": {"message": "prompt is required", "type": "invalid_request_error"}},
+                {
+                    "error": {
+                        "message": "prompt is required",
+                        "type": "invalid_request_error",
+                    }
+                },
                 status=400,
             )
         size = body.get("size") or "1024x1024"
@@ -1935,7 +2110,12 @@ class NAIGenerateImagePlugin(Star):
         except Exception as e:
             logger.warning(f"{LOG_TAG} [proxy:gen] _generate_one 异常: {e!r}")
             return web.json_response(
-                {"error": {"message": f"generate exception: {e!r}", "type": "internal_error"}},
+                {
+                    "error": {
+                        "message": f"generate exception: {e!r}",
+                        "type": "internal_error",
+                    }
+                },
                 status=500,
             )
 
@@ -1967,11 +2147,18 @@ class NAIGenerateImagePlugin(Star):
         )
 
     async def _proxy_handle_edits(self, request: web.Request):
-        logger.info(f"{LOG_TAG} [proxy:edit] 收到 POST {request.path} from {request.remote}")
+        logger.info(
+            f"{LOG_TAG} [proxy:edit] 收到 POST {request.path} from {request.remote}"
+        )
         if not self.image_gen_key or not self._session:
             logger.warning(f"{LOG_TAG} [proxy:edit] 拒绝：token 或 session 缺失")
             return web.json_response(
-                {"error": {"message": "NAI 插件未配置 image_gen_key", "type": "invalid_request_error"}},
+                {
+                    "error": {
+                        "message": "NAI 插件未配置 image_gen_key",
+                        "type": "invalid_request_error",
+                    }
+                },
                 status=400,
             )
         prompt = ""
@@ -2001,13 +2188,23 @@ class NAIGenerateImagePlugin(Star):
         except Exception as e:
             logger.warning(f"{LOG_TAG} [proxy:edit] multipart 解析失败: {e!r}")
             return web.json_response(
-                {"error": {"message": f"invalid multipart: {e!r}", "type": "invalid_request_error"}},
+                {
+                    "error": {
+                        "message": f"invalid multipart: {e!r}",
+                        "type": "invalid_request_error",
+                    }
+                },
                 status=400,
             )
         if not prompt:
             logger.warning(f"{LOG_TAG} [proxy:edit] prompt 为空")
             return web.json_response(
-                {"error": {"message": "prompt is required", "type": "invalid_request_error"}},
+                {
+                    "error": {
+                        "message": "prompt is required",
+                        "type": "invalid_request_error",
+                    }
+                },
                 status=400,
             )
         logger.info(
@@ -2020,7 +2217,12 @@ class NAIGenerateImagePlugin(Star):
         except Exception as e:
             logger.warning(f"{LOG_TAG} [proxy:edit] _generate_one 异常: {e!r}")
             return web.json_response(
-                {"error": {"message": f"generate exception: {e!r}", "type": "internal_error"}},
+                {
+                    "error": {
+                        "message": f"generate exception: {e!r}",
+                        "type": "internal_error",
+                    }
+                },
                 status=500,
             )
         if not img_bytes:
@@ -2061,8 +2263,7 @@ class NAIGenerateImagePlugin(Star):
         text = strip_image_command_prefix(raw_text)
         sender = event.get_sender_id() if hasattr(event, "get_sender_id") else "?"
         logger.info(
-            f"{LOG_TAG} [cmd:image] 收到指令 | sender={sender} | "
-            f"text='{text[:100]}'"
+            f"{LOG_TAG} [cmd:image] 收到指令 | sender={sender} | text='{text[:100]}'"
         )
 
         if not text.strip():
@@ -2073,7 +2274,7 @@ class NAIGenerateImagePlugin(Star):
                 "生成: --steps=1-100 --scale=0-20 --cfg=0-30 "
                 "--sampler=... --noise=karras|native|exponential\n"
                 "覆盖: --translate=关闭|开启|自动 --template=关闭|开启 "
-                "--model=... --artist=\"...\" --negative=\"...\"\n"
+                '--model=... --artist="..." --negative="..."\n'
                 "style/size/translate/template 的值均支持中英文。"
             )
             return
@@ -2094,7 +2295,9 @@ class NAIGenerateImagePlugin(Star):
 
         if not self.image_gen_key:
             logger.warning(f"{LOG_TAG} [cmd:image] token 未配置")
-            yield event.plain_result("未配置 image_gen_key，请先在插件配置中填写 token。")
+            yield event.plain_result(
+                "未配置 image_gen_key，请先在插件配置中填写 token。"
+            )
             return
 
         n = args.n if args.n is not None else self.image_count
@@ -2104,12 +2307,16 @@ class NAIGenerateImagePlugin(Star):
         size = size_cn
 
         # 回复中展示的参数与 _generate_one 最终采用的覆盖/回退规则保持一致。
-        effective_steps = args.steps if args.steps is not None else getattr(self, "steps", 24)
-        effective_scale = args.scale if args.scale is not None else getattr(self, "scale", 6)
-        effective_cfg = args.cfg if args.cfg is not None else getattr(self, "cfg_value", 7.0)
-        effective_sampler = args.sampler or getattr(
-            self, "sampler", "k_dpmpp_2m_sde"
+        effective_steps = (
+            args.steps if args.steps is not None else getattr(self, "steps", 24)
         )
+        effective_scale = (
+            args.scale if args.scale is not None else getattr(self, "scale", 6)
+        )
+        effective_cfg = (
+            args.cfg if args.cfg is not None else getattr(self, "cfg_value", 7.0)
+        )
+        effective_sampler = args.sampler or getattr(self, "sampler", "k_dpmpp_2m_sde")
         effective_noise = args.noise_schedule or getattr(
             self, "noise_schedule", "karras"
         )
@@ -2121,9 +2328,7 @@ class NAIGenerateImagePlugin(Star):
             if args.enable_template is not None
             else getattr(self, "enable_template", True)
         )
-        effective_model = args.model or getattr(
-            self, "model", "nai-diffusion-4-5-full"
-        )
+        effective_model = args.model or getattr(self, "model", "nai-diffusion-4-5-full")
         # 只传递用户明确指定的字段，避免 None 覆盖插件级默认配置。
         generation_overrides = args.generation_overrides()
 
@@ -2154,12 +2359,10 @@ class NAIGenerateImagePlugin(Star):
                 f"提示词: {prompt}\n{brief_parameters}{override_details}"
             )
         elif self.bot_reply_mode == "简洁":
-            yield event.plain_result(
-                f"正在画图...\n{brief_parameters}"
-            )
+            yield event.plain_result(f"正在画图...\n{brief_parameters}")
 
         success = 0
-        first_reason: Optional[str] = None
+        first_reason: str | None = None
         # 每张图都是独立请求；单张失败不会中止后续图片的生成。
         for i in range(n):
             logger.info(f"{LOG_TAG} [cmd:image] 生成第 {i + 1}/{n} 张")
@@ -2189,7 +2392,9 @@ class NAIGenerateImagePlugin(Star):
                 logger.warning(
                     f"{LOG_TAG} [cmd:image] 第 {i + 1}/{n} 张失败 | reason={reason}"
                 )
-                yield event.plain_result(f"第 {i + 1}/{n} 张生成失败：{_format_generate_error(reason)}")
+                yield event.plain_result(
+                    f"第 {i + 1}/{n} 张生成失败：{_format_generate_error(reason)}"
+                )
 
         if success == 0:
             logger.error(
@@ -2201,10 +2406,167 @@ class NAIGenerateImagePlugin(Star):
         else:
             logger.info(f"{LOG_TAG} [cmd:image] 完成 | 成功 {success}/{n}")
 
+    def _interrogate_image_source(self, event: AstrMessageEvent, argument: str) -> str:
+        """Resolve a reference image from an explicit path/URL or message content.
 
-    '''
+        Args:
+            event: Current message event containing optional image segments.
+            argument: Optional path or URL supplied after the command.
+
+        Returns:
+            A URL, data URL, or local path accepted by the multimodal provider.
+        """
+        explicit = str(argument or "").strip().strip("\"'")
+        if explicit:
+            return explicit
+        message_obj = getattr(event, "message_obj", None)
+        roots = [
+            getattr(message_obj, "message", None),
+            getattr(message_obj, "raw_message", None),
+        ]
+
+        def visit(value: Any) -> str:
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    found = visit(item)
+                    if found:
+                        return found
+                return ""
+            if isinstance(value, dict):
+                kind = str(value.get("type") or value.get("post_type") or "").lower()
+                data = (
+                    value.get("data") if isinstance(value.get("data"), dict) else value
+                )
+                if kind == "image" or any(
+                    key in data for key in ("url", "path", "file", "src")
+                ):
+                    for key in (
+                        "url",
+                        "origin_url",
+                        "path",
+                        "file",
+                        "src",
+                        "image_path",
+                        "file_path",
+                    ):
+                        candidate = str(data.get(key) or "").strip()
+                        if candidate:
+                            return candidate
+                for key in ("message", "messages", "content", "data"):
+                    nested = value.get(key)
+                    if nested is not value:
+                        found = visit(nested)
+                        if found:
+                            return found
+                return ""
+            text = str(value or "")
+            match = re.search(r"\[CQ:image,([^\]]+)\]", text, re.IGNORECASE)
+            if match:
+                fields = dict(
+                    part.split("=", 1)
+                    for part in match.group(1).split(",")
+                    if "=" in part
+                )
+                return str(
+                    fields.get("url") or fields.get("path") or fields.get("file") or ""
+                ).strip()
+            return ""
+
+        for root in roots:
+            found = visit(root)
+            if found:
+                return found
+        return ""
+
+    async def _interrogate_image_url(self, source: str) -> str:
+        """Convert a local reference image into a multimodal data URL when needed."""
+        if re.match(r"^(?:https?|data:|base64://)", source, re.IGNORECASE):
+            return source
+        path = Path(source).expanduser()
+        if not path.is_file():
+            return source
+        raw = await asyncio.to_thread(path.read_bytes)
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+    @filter.command("nai_interrogate", alias={"反推", "nai反推"})
+    async def interrogate(self, event: AstrMessageEvent):
+        """Reverse-engineer a reference image into NAI tags using a vision model.
+
+        Args:
+            event: Message containing an image or an explicit path/URL.
+        """
+        raw = str(event.message_str or "").strip()
+        argument = re.sub(
+            r"^(?:/)?(?:nai_interrogate|反推|nai反推)\s*", "", raw, flags=re.IGNORECASE
+        ).strip()
+        explicit_source, _, explicit_extra = argument.partition(" ")
+        source = ""
+        if explicit_source and (
+            re.match(r"^(?:https?|data:|base64://)", explicit_source, re.IGNORECASE)
+            or Path(explicit_source).expanduser().is_file()
+        ):
+            source = explicit_source
+        else:
+            source = self._interrogate_image_source(event, "")
+            if not explicit_extra and explicit_source and source:
+                explicit_extra = explicit_source
+        if not source:
+            yield event.plain_result(
+                "请附带图片，或使用 /nai_interrogate <图片路径或URL> [补充要求]。"
+            )
+            return
+        provider_id = self.interrogate_provider or self.translate_provider
+        provider = None
+        if provider_id:
+            provider = self.context.get_provider_by_id(provider_id)
+        if provider is None:
+            provider = self.context.get_using_provider(event.unified_msg_origin)
+        if provider is None:
+            yield event.plain_result(
+                "未找到可用的多模态模型，请配置 interrogate_provider。"
+            )
+            return
+        image_url = await self._interrogate_image_url(source)
+        extra = explicit_extra.strip()
+        prompt = (
+            "Analyze the reference image and output a faithful NovelAI/Stable Diffusion tag prompt. "
+            "Describe only visible content. Preserve the subject's identity, appearance, clothing, "
+            "props, environment, camera/viewpoint, lighting, and composition. "
+            "Do not invent hidden details. Output only comma-separated English tags.\n"
+            f"Additional request: {extra or 'none'}"
+        )
+        try:
+            response = await asyncio.wait_for(
+                provider.text_chat(
+                    prompt=prompt,
+                    system_prompt=IMAGE_PROMPT_SPEC or TRANSLATE_SYSTEM_PROMPT,
+                    image_urls=[image_url],
+                    max_tokens=self.interrogate_max_tokens,
+                ),
+                timeout=120,
+            )
+            tags = str(getattr(response, "completion_text", "") or "").strip()
+            tags = re.sub(
+                r"<\s*think(?:ing)?\s*>.*?<\s*/\s*think(?:ing)?\s*>",
+                "",
+                tags,
+                flags=re.I | re.S,
+            )
+            tags = re.sub(r"^```[a-zA-Z0-9_-]*\s*|```$", "", tags).strip().strip("\"'`")
+            tags = re.sub(r"^\s*(?:output|tags?)\s*:\s*", "", tags, flags=re.I)
+            tags = normalize_prompt(tags)
+            if not tags:
+                yield event.plain_result("多模态模型没有返回有效的 NAI tag。")
+                return
+            yield event.plain_result(f"反推结果：\n{tags}")
+        except Exception as exc:
+            logger.warning(f"{LOG_TAG} [cmd:interrogate] failed: {exc!r}")
+            yield event.plain_result(f"图片反推失败：{type(exc).__name__}: {exc}")
+
+    """
     提供tool让llm可以自主决定生成图片。为了防止暴走，每个消息事件最多请求1张。
-    '''
+    """
 
     @filter.llm_tool()
     async def NAI_Generate_Image(
@@ -2214,7 +2576,7 @@ class NAIGenerateImagePlugin(Star):
         style: str,
         size_cn: str,
     ) -> AsyncGenerator[str, None]:
-        '''用NovelAI生成1张图片并直接发送给当前用户。
+        """用NovelAI生成1张图片并直接发送给当前用户。
 
         每个用户消息最多调用一次本工具。不要在同一响应中重复调用，也不要同时
         调用send_message_to_user；生成成功后本工具会直接发送图片。
@@ -2233,16 +2595,20 @@ class NAIGenerateImagePlugin(Star):
                 - 多风格混合：-2::artist collaboration:: 可融合 3 个以上画师风格
                 - 精简：避免堆叠重复/无意义 tags，描述清楚构图即可
                 示例：masterpiece, best quality, {人物 [1girl, solo, long hair, blue eyes, source#hug], {位置左}, ntags = [lowres, bad anatomy] 人物}, {人物 [1boy, short hair, target#hug], {位置右} 人物}, outdoor, sunset, artist:wlop
-            style(string): 画风。可选：vertical(韩漫清新) / comicDoujin(日漫同人) / r18(写实唯美) / lolita25d(萝莉唯美) / anime(日系动画) / galgame(GalGame) / custom(自定义)
+            style(string): 画风。可选：vertical(韩漫小清新风) / comicDoujin(漫画同人风) / r18(2.5D唯美风) / lolita25d(2.5D唯美风（萝）) / anime(本子里番风) / galgame(GalGame风) / custom(自定义)
             size_cn(string): 尺寸。可选：竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图
-        '''
+        """
         prompt = normalize_prompt(prompt)
         if not self.enable_llm_tool:
-            logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 生图工具已禁用，请在插件设置中开启 enable_llm_tool")
+            logger.warning(
+                f"{LOG_TAG} [tool:NAI_Generate_Image] 生图工具已禁用，请在插件设置中开启 enable_llm_tool"
+            )
             yield "生图工具已被管理员禁用，请在插件设置中开启 enable_llm_tool"
             return
 
-        logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 调用NAI_Generate_Image, 参数： prompt: {prompt[:100]}, style: {style}, size_cn:{size_cn}")
+        logger.info(
+            f"{LOG_TAG} [tool:NAI_Generate_Image] 调用NAI_Generate_Image, 参数： prompt: {prompt[:100]}, style: {style}, size_cn:{size_cn}"
+        )
         if style == "自定义":
             style = "custom"
         if not prompt:
@@ -2254,17 +2620,17 @@ class NAIGenerateImagePlugin(Star):
             logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] token 未配置")
             yield "生成失败，未配置 image_gen_key，请告知用户先在插件配置中填写 token。"
             return
-        
+
         if style not in IMAGE_STYLES and style != "custom":
             logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 未知风格: {style}")
             yield f"未知风格: {style}\n可选: {', '.join(IMAGE_STYLES.keys())}"
             return
-        
+
         if size_cn not in IMAGE_SIZES:
             logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 未知尺寸: {size_cn}")
             yield f"未知尺寸: {size_cn}\n可选: {', '.join(IMAGE_SIZES.keys())}"
             return
-        
+
         # 与 /image 命令保持一致：直接使用中文 size_cn 值（竖图/横图/方图/2K竖图/...）发送给 API
         # 上游（如 nai.sta1n.cn）只识别中文尺寸值，英文别名（portrait/2k_portrait）会导致 2K/4K 生成失败
         size = size_cn
@@ -2309,12 +2675,10 @@ class NAIGenerateImagePlugin(Star):
             yield "图片已生成并发送给用户，请根据本次请求继续回复。"
             return
 
-        logger.warning(
-            f"{LOG_TAG} [tool:NAI_Generate_Image] 失败 | reason={reason}"
-        )
+        logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 失败 | reason={reason}")
         yield f"生成失败：{_format_generate_error(reason)}"
         return
-    
+
     @filter.command("quota")
     async def quota(self, event: AstrMessageEvent):
         """查询上游生图站的剩余额度与 token 状态。"""

@@ -24,13 +24,22 @@
             "galgame",
             "自定义"
         ],
+        "labels": [
+            "韩漫小清新风",
+            "漫画同人风",
+            "2.5D唯美风",
+            "2.5D唯美风（萝）",
+            "本子里番风",
+            "GalGame风",
+            "自定义"
+        ],
         "hint": "选「自定义」时使用下方「自定义画师串」，其余风格使用内置画师串。旧配置里的 custom 与「自定义」等价。"
     },
     "image_size": {
         "type": "string",
         "default": "竖图",
         "description": "默认尺寸",
-        "hint": "选择生成图片的尺寸和分辨率；选项中的数字表示相对成本，2K 和 4K 会产生更高成本。",
+        "hint": "选择生成图片的尺寸和分辨率。消耗额度：V4.5模型基础尺寸(竖/横/方图)消耗1点，2K消耗15点，4K消耗25点；V5模型最低消耗5点(竖/横/方图消耗5点，2K消耗15点，4K消耗25点)。",
         "options": [
             "竖图",
             "横图",
@@ -125,7 +134,16 @@
     "model": {
         "type": "string",
         "default": "nai-diffusion-4-5-full",
-        "description": "生图模型"
+        "description": "生图模型",
+        "hint": "选择生成模型。nai-diffusion-4-5-full 为 V4.5 完整版（标准尺寸单张消耗 1 点）；nai-diffusion-5-full 为 V5 完整版（标准尺寸如竖图单张消耗 5 点，2K/4K 分别消耗 15/25 点）。",
+        "options": [
+            "nai-diffusion-4-5-full",
+            "nai-diffusion-5-full"
+        ],
+        "labels": [
+            "nai-diffusion-4-5-full (V4.5 完整版)",
+            "nai-diffusion-5-full (V5 完整版)"
+        ]
     },
     "steps": {
         "type": "int",
@@ -236,6 +254,20 @@
         "description": "转译模型供应商",
         "hint": "从 AstrBot 已配置的 provider 中选一个。留空时使用 AstrBot 的默认 provider。建议选择便宜/快速的小模型。",
         "_special": "select_provider"
+    },
+    "interrogate_provider": {
+        "type": "string",
+        "default": "",
+        "description": "图片反推多模态模型",
+        "hint": "用于 /nai_interrogate（或 /反推）的视觉模型 Provider。留空时使用转译模型或当前默认 Provider；必须支持图片输入。",
+        "_special": "select_provider"
+    },
+    "interrogate_max_tokens": {
+        "type": "int",
+        "default": 700,
+        "description": "图片反推最大输出长度",
+        "min": 128,
+        "max": 4096
     },
     "enable_llm_tool": {
         "type": "bool",

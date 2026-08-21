@@ -145,6 +145,48 @@
     }
   }
 
+  // ===== 尺寸与点数消耗映射 =====
+  const SIZE_BASE_COSTS = [
+    { value: "竖图", baseCost: 1 },
+    { value: "横图", baseCost: 1 },
+    { value: "方图", baseCost: 1 },
+    { value: "2K竖图", baseCost: 15 },
+    { value: "2K横图", baseCost: 15 },
+    { value: "2K方图", baseCost: 15 },
+    { value: "4K竖图", baseCost: 25 },
+    { value: "4K横图", baseCost: 25 },
+    { value: "4K方图", baseCost: 25 },
+  ];
+
+  function getModelCostFloor(modelName) {
+    return modelName === "nai-diffusion-5-full" ? 5 : 1;
+  }
+
+  function getSingleImageCost(sizeValue, modelName) {
+    const item = SIZE_BASE_COSTS.find((opt) => opt.value === sizeValue);
+    const baseCost = item ? item.baseCost : 1;
+    return Math.max(baseCost, getModelCostFloor(modelName));
+  }
+
+  function updateSizeOptionsUI() {
+    const curSize = els.size.value;
+    const curModel = els.model.value;
+    els.size.innerHTML = "";
+    SIZE_BASE_COSTS.forEach((opt) => {
+      const cost = Math.max(opt.baseCost, getModelCostFloor(curModel));
+      const elOpt = document.createElement("option");
+      elOpt.value = opt.value;
+      elOpt.textContent = `${opt.value}(-${cost})`;
+      if (opt.value === curSize) {
+        elOpt.selected = true;
+      }
+      els.size.appendChild(elOpt);
+    });
+    if (!SIZE_BASE_COSTS.some((opt) => opt.value === curSize)) {
+      els.size.value = "竖图";
+    }
+  }
+
   // ===== 表单交互 =====
   function toggleCustomArtists() {
     if (els.style.value === "custom") {
@@ -345,8 +387,13 @@
     hide(els.errorState);
 
     const styleNames = {
-      vertical: "韩漫小清新", comicDoujin: "漫画同人", r18: "2.5D唯美",
-      lolita25d: "2.5D唯美(萝)", anime: "本子里番", galgame: "GalGame", custom: "自定义",
+      vertical: "韩漫小清新风",
+      comicDoujin: "漫画同人风",
+      r18: "2.5D唯美风",
+      lolita25d: "2.5D唯美风（萝）",
+      anime: "本子里番风",
+      galgame: "GalGame风",
+      custom: "自定义",
     };
     const sizeNames = {
       "竖图": "竖图", "横图": "横图", "方图": "方图",
@@ -432,6 +479,7 @@
     els.noiseSchedule.value = "karras";
     els.model.value = "nai-diffusion-4-5-full";
     els.style.value = "vertical";
+    updateSizeOptionsUI();
     els.size.value = "竖图";
     els.count.value = "1";
     els.negative.value = "";
@@ -564,6 +612,9 @@
 
   // ===== 事件绑定 =====
   function bindEvents() {
+    els.model.addEventListener("change", () => {
+      updateSizeOptionsUI();
+    });
     els.style.addEventListener("change", toggleCustomArtists);
     els.generateBtn.addEventListener("click", generate);
     els.trialBtn.addEventListener("click", trialGenerate);
@@ -601,6 +652,7 @@
     bindEvents();
     // 从后端恢复面板状态
     await loadCache();
+    updateSizeOptionsUI();
     toggleCustomArtists();
     // 仅加载 token 状态 badge（不填表单）
     await loadTokenStatus();
