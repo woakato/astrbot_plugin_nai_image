@@ -1,11 +1,11 @@
 /**
- * NAI 生图测试面板 - 前端逻辑 v2.0
+ * NAI 生图测试面板 - 前端逻辑 v4.2 (Endfield Protocol)
  *
- * 改版要点：
+ * 包含：
  *   - 双提示词框：NAI 风格 + 自然语言
- *   - 不再从 settings 加载表单数据，改用 localStorage 缓存
- *   - 生成时后端自动转译 NL + 合并 NAI → 完整 prompt
- *   - 展示合并步骤
+ *   - 终末地高可见度动态等高线拓扑地形引擎 (Multi-Peak Gaussian + Dense Marching Squares)
+ *   - 柔和战术圆角与亚克力毛玻璃材质交互
+ *   - 自动转译与生图流水线展示
  */
 
 (function () {
@@ -14,6 +14,7 @@
   // ===== DOM 引用 =====
   const $ = (id) => document.getElementById(id);
   const els = {
+    contourCanvas: $("contourCanvas"),
     naiPrompt: $("naiPrompt"),
     nlPrompt: $("nlPrompt"),
     sampler: $("sampler"),
@@ -53,10 +54,11 @@
   let lastRequestBody = null;
 
   // ===== 工具函数 =====
-  function show(el) { el.classList.remove("hidden"); }
-  function hide(el) { el.classList.add("hidden"); }
+  function show(el) { if (el) el.classList.remove("hidden"); }
+  function hide(el) { if (el) el.classList.add("hidden"); }
 
   function setBadge(el, text, type) {
+    if (!el) return;
     el.textContent = text;
     el.className = "badge " + (type || "badge-neutral");
   }
@@ -76,7 +78,226 @@
     return window.AstrBotPluginPage;
   }
 
-  // ===== 面板状态缓存（通过后端 API，因为 iframe sandbox 禁用 localStorage） =====
+  // =========================================================================
+  // ===== 终末地等高线拓扑地形引擎 (HIGH-VISIBILITY CONTOUR TOPOLOGY) =====
+  // =========================================================================
+  function initContourEngine() {
+    const canvas = els.contourCanvas;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let width = 0;
+    let height = 0;
+    let dpr = 1;
+
+    // 保持优雅大气的山脉尺度，调大高斯半径并恢复缓和悠远的流动速度
+    const NUM_SOURCES = 18;
+    const sources = [];
+
+    function initSources() {
+      sources.length = 0;
+      for (let i = 0; i < NUM_SOURCES; i++) {
+        const isPeak = i % 3 !== 0;
+        sources.push({
+          relX: 0.05 + Math.random() * 0.9,
+          relY: 0.05 + Math.random() * 0.9,
+          baseRadius: 160 + Math.random() * 180, // 调大山丘尺度 (160~340px)，舒展大气
+          amp: (isPeak ? 1.0 : -0.8) * (0.75 + Math.random() * 0.5),
+          speedX: (Math.random() - 0.5) * 0.00012,
+          speedY: (Math.random() - 0.5) * 0.00012,
+          freq: 0.00035 + Math.random() * 0.00055, // 回到舒缓沉稳的波动频率
+          phase: Math.random() * Math.PI * 2,
+          radiusOscFreq: 0.00025 + Math.random() * 0.00045,
+        });
+      }
+    }
+
+    function resize() {
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    window.addEventListener("resize", resize);
+    resize();
+    initSources();
+
+    // 16 层等高线切片，间隔适度自然
+    const NUM_LEVELS = 16;
+    const ISO_LEVELS = [];
+    for (let i = 0; i < NUM_LEVELS; i++) {
+      ISO_LEVELS.push(-1.35 + (2.7 / (NUM_LEVELS - 1)) * i);
+    }
+
+    // Marching Squares 网格步长
+    const STEP = 26;
+
+    // Marching squares 查找表
+    const MS_EDGES = [
+      [],
+      [[3, 2]],
+      [[2, 1]],
+      [[3, 1]],
+      [[0, 1]],
+      [[3, 0], [2, 1]],
+      [[0, 2]],
+      [[3, 0]],
+      [[0, 3]],
+      [[0, 2]],
+      [[0, 1], [3, 2]],
+      [[0, 1]],
+      [[1, 3]],
+      [[1, 2]],
+      [[2, 3]],
+      []
+    ];
+
+    function evaluateField(x, y, time) {
+      let val = 0;
+      for (let i = 0; i < NUM_SOURCES; i++) {
+        const s = sources[i];
+        const driftX = Math.sin(time * s.freq + s.phase) * 45;
+        const driftY = Math.cos(time * s.freq * 0.85 + s.phase) * 45;
+        const sx = s.relX * width + driftX;
+        const sy = s.relY * height + driftY;
+
+        const dx = x - sx;
+        const dy = y - sy;
+        const distSq = dx * dx + dy * dy;
+
+        const r = s.baseRadius + Math.sin(time * s.radiusOscFreq + s.phase) * 30;
+        const twoSigmaSq = 2 * r * r;
+
+        // 局部截断加速
+        if (distSq < 6.5 * r * r) {
+          val += s.amp * Math.exp(-distSq / twoSigmaSq);
+        }
+      }
+      return val;
+    }
+
+    function getEdgePoint(edgeIndex, x0, y0, step, vTL, vTR, vBR, vBL, iso) {
+      const interp = (vA, vB) => {
+        const d = vB - vA;
+        return Math.abs(d) < 1e-6 ? 0.5 : Math.max(0, Math.min(1, (iso - vA) / d));
+      };
+
+      switch (edgeIndex) {
+        case 0:
+          return { x: x0 + interp(vTL, vTR) * step, y: y0 };
+        case 1:
+          return { x: x0 + step, y: y0 + interp(vTR, vBR) * step };
+        case 2:
+          return { x: x0 + interp(vBL, vBR) * step, y: y0 + step };
+        case 3:
+          return { x: x0, y: y0 + interp(vTL, vBL) * step };
+        default:
+          return { x: x0, y: y0 };
+      }
+    }
+
+    // 绘制等高线：保持清晰可见度同时线条更雅致
+    function stitchAndRenderPolylines(segments, isoIndex, totalLevels) {
+      if (segments.length === 0) return;
+
+      const isKeyRidge = isoIndex === totalLevels - 2 || isoIndex === totalLevels - 5;
+      const isMajorLine = isoIndex % 3 === 0;
+
+      ctx.beginPath();
+      for (let s = 0; s < segments.length; s++) {
+        const seg = segments[s];
+        ctx.moveTo(seg[0].x, seg[0].y);
+        ctx.lineTo(seg[1].x, seg[1].y);
+      }
+
+      if (isKeyRidge) {
+        ctx.strokeStyle = "rgba(217, 199, 0, 0.38)"; // 终末地黄色山脊线
+        ctx.lineWidth = 1.4;
+      } else if (isMajorLine) {
+        ctx.strokeStyle = "rgba(16, 17, 16, 0.15)";  // 适度清晰的主等高线
+        ctx.lineWidth = 1.1;
+      } else {
+        ctx.strokeStyle = "rgba(16, 17, 16, 0.06)";  // 柔和优雅的细等高线
+        ctx.lineWidth = 0.8;
+      }
+      ctx.stroke();
+    }
+
+    let lastFrameTime = 0;
+    const TARGET_INTERVAL = 1000 / 30;
+
+    function render(timestamp) {
+      requestAnimationFrame(render);
+
+      if (document.hidden) return;
+      if (timestamp - lastFrameTime < TARGET_INTERVAL) return;
+      lastFrameTime = timestamp;
+
+      ctx.clearRect(0, 0, width, height);
+
+      const cols = Math.ceil(width / STEP) + 1;
+      const rows = Math.ceil(height / STEP) + 1;
+      const grid = new Float32Array(cols * rows);
+
+      for (let r = 0; r < rows; r++) {
+        const y = r * STEP;
+        const rowOffset = r * cols;
+        for (let c = 0; c < cols; c++) {
+          const x = c * STEP;
+          grid[rowOffset + c] = evaluateField(x, y, timestamp);
+        }
+      }
+
+      for (let l = 0; l < ISO_LEVELS.length; l++) {
+        const iso = ISO_LEVELS[l];
+        const segments = [];
+
+        for (let r = 0; r < rows - 1; r++) {
+          const y0 = r * STEP;
+          const r0 = r * cols;
+          const r1 = (r + 1) * cols;
+
+          for (let c = 0; c < cols - 1; c++) {
+            const x0 = c * STEP;
+            const vTL = grid[r0 + c];
+            const vTR = grid[r0 + c + 1];
+            const vBR = grid[r1 + c + 1];
+            const vBL = grid[r1 + c];
+
+            let cellIndex = 0;
+            if (vTL >= iso) cellIndex |= 8;
+            if (vTR >= iso) cellIndex |= 4;
+            if (vBR >= iso) cellIndex |= 2;
+            if (vBL >= iso) cellIndex |= 1;
+
+            if (cellIndex === 0 || cellIndex === 15) continue;
+
+            const edgePairs = MS_EDGES[cellIndex];
+            for (let p = 0; p < edgePairs.length; p++) {
+              const pA = getEdgePoint(edgePairs[p][0], x0, y0, STEP, vTL, vTR, vBR, vBL, iso);
+              const pB = getEdgePoint(edgePairs[p][1], x0, y0, STEP, vTL, vTR, vBR, vBL, iso);
+              segments.push([pA, pB]);
+            }
+          }
+        }
+
+        stitchAndRenderPolylines(segments, l, ISO_LEVELS.length);
+      }
+    }
+
+    requestAnimationFrame(render);
+  }
+
+  // =========================================================================
+  // ===== 面板状态缓存（通过后端 API） =====
+  // =========================================================================
   function getCachedFields() {
     return [
       "naiPrompt", "nlPrompt", "sampler", "size", "steps", "scale",
@@ -86,7 +307,6 @@
 
   let _saveCacheTimer = null;
   function saveCache() {
-    // 防抖：避免频繁请求
     if (_saveCacheTimer) clearTimeout(_saveCacheTimer);
     _saveCacheTimer = setTimeout(async () => {
       try {
@@ -125,10 +345,10 @@
   }
 
   function clearCache() {
-    saveCache(); // 保存当前数据即重置
+    saveCache();
   }
 
-  // ===== 加载 Token 状态（仅 badge，不填表单） =====
+  // ===== 加载 Token 状态 =====
   async function loadTokenStatus() {
     try {
       const bridge = await getBridge();
@@ -162,12 +382,6 @@
     return modelName === "nai-diffusion-5-full" ? 5 : 1;
   }
 
-  function getSingleImageCost(sizeValue, modelName) {
-    const item = SIZE_BASE_COSTS.find((opt) => opt.value === sizeValue);
-    const baseCost = item ? item.baseCost : 1;
-    return Math.max(baseCost, getModelCostFloor(modelName));
-  }
-
   function updateSizeOptionsUI() {
     const curSize = els.size.value;
     const curModel = els.model.value;
@@ -197,9 +411,6 @@
     saveCache();
   }
 
-  /**
-   * 构建生图请求体（双提示词版本）
-   */
   function buildRequestBody() {
     const safeInt = (v, d) => { const n = parseInt(v, 10); return Number.isNaN(n) ? d : n; };
     const safeFloat = (v, d) => { const n = parseFloat(v); return Number.isNaN(n) ? d : n; };
@@ -212,7 +423,6 @@
       sampler: els.sampler.value,
       steps: safeInt(els.steps.value, 24),
       scale: safeFloat(els.scale.value, 6),
-      // CFG Rescale 允许 0 和小数；仅在输入无法解析时回退为默认值 7。
       cfg: safeFloat(els.cfg.value, 7),
       noise_schedule: els.noiseSchedule.value,
       model: els.model.value,
@@ -265,12 +475,10 @@
       }
 
       if (!images || !Array.isArray(images) || images.length === 0) {
-        // 可能是错误响应
         const errMsg = (resp && resp.message) || (resp && resp.data && resp.data.message) || JSON.stringify(resp).slice(0, 200);
         throw new Error(errMsg);
       }
 
-      // 展示合并步骤
       if (mergeInfo) {
         displayMergeInfo(mergeInfo);
       }
@@ -292,17 +500,14 @@
 
     const steps = [];
 
-    // Step 1: NAI 提示词
     if (info.nai_prompt) {
       steps.push({ label: "NAI 风格提示词（原样保留）", value: info.nai_prompt });
     }
 
-    // Step 2: 自然语言提示词
     if (info.nl_prompt) {
       steps.push({ label: "自然语言提示词（待转译）", value: info.nl_prompt });
     }
 
-    // Step 3: 转译结果
     if (info.nl_prompt && info.translated_nl) {
       const same = info.translated_nl === info.nl_prompt;
       steps.push({
@@ -311,7 +516,6 @@
       });
     }
 
-    // Step 4: 合并结果
     steps.push({ label: "完整 Prompt（发送至生图站点）", value: info.full_prompt, highlight: true });
 
     steps.forEach((step, idx) => {
@@ -400,8 +604,8 @@
       "2K竖图": "2K竖图", "2K横图": "2K横图", "2K方图": "2K方图",
       "4K竖图": "4K竖图", "4K横图": "4K横图", "4K方图": "4K方图"
     };
-    const metaText = `${styleNames[requestBody.style] || requestBody.style} · ${sizeNames[requestBody.size] || requestBody.size} · ${images.length}张`;
-    setBadge(els.resultMeta, metaText, "badge-success");
+    const metaText = `${styleNames[requestBody.style] || requestBody.style} · ${sizeNames[requestBody.size] || requestBody.size} · ${images.length} UNIT`;
+    setBadge(els.resultMeta, metaText, "badge-tech-success");
     show(els.resultMeta);
 
     els.resultGrid.innerHTML = "";
@@ -649,6 +853,14 @@
 
   // ===== 初始化 =====
   async function init() {
+    console.log(
+      "%c ENDFIELD PROTOCOL %c NAI VISUAL SYNTHESIS SYSTEM 04 INITIALIZED ",
+      "background: #fff500; color: #101110; font-weight: bold; padding: 2px 4px; border-radius: 4px;",
+      "background: #e8e8e2; color: #101110; padding: 2px 4px; border-radius: 4px;"
+    );
+    // 启动高可见度等高线拓扑地形动画引擎
+    initContourEngine();
+
     bindEvents();
     // 从后端恢复面板状态
     await loadCache();

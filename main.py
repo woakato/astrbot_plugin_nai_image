@@ -900,7 +900,7 @@ class NAIGenerateImagePlugin(Star):
 
     def _resolve_artists(self, style: str) -> str:
         if style == "custom":
-            return self.custom_artists or DEFAULT_ARTISTS.get("vertical", "")
+            return self.custom_artists if self.custom_artists is not None else ""
         return DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
 
     # ==== Outfit 缓存池读写 ====
@@ -1032,13 +1032,13 @@ class NAIGenerateImagePlugin(Star):
             enable_translate if enable_translate is not None else self.translate_mode
         )
 
-        # artists 解析
+        # artists 解析：自定义风格允许空画师串（不强制回退预设）
         if style == "custom":
             _artists = (
                 custom_artists if custom_artists is not None else self.custom_artists
             )
-            if not _artists:
-                _artists = DEFAULT_ARTISTS.get("vertical", "")
+            if _artists is None:
+                _artists = ""
         else:
             _artists = DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
 
@@ -1283,7 +1283,7 @@ class NAIGenerateImagePlugin(Star):
 
         def _opt_str(key: str) -> str | None:
             val = body.get(key)
-            if val is None or val == "":
+            if val is None:
                 return None
             return str(val)
 
@@ -1463,7 +1463,7 @@ class NAIGenerateImagePlugin(Star):
 
         def _opt_str(key: str) -> str | None:
             val = body.get(key)
-            if val is None or val == "":
+            if val is None:
                 return None
             return str(val)
 
@@ -1910,13 +1910,13 @@ class NAIGenerateImagePlugin(Star):
             )
         full_prompt = normalize_prompt(full_prompt)
 
-        # 自定义风格允许单次覆盖画师串；空串仍按既有逻辑回退默认画师串。
+        # 自定义风格允许空画师串（不强制回退预设）
         if style == "custom":
             artists = (
                 custom_artists if custom_artists is not None else self.custom_artists
             )
-            if not artists:
-                artists = DEFAULT_ARTISTS.get("vertical", "")
+            if artists is None:
+                artists = ""
         else:
             artists = self._resolve_artists(style)
 

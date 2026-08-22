@@ -220,6 +220,63 @@ def test_generate_one_uses_overrides_in_request_and_history():
     }
 
 
+def test_generate_one_allows_empty_custom_artist_without_fallback():
+    class FakeResponse:
+        status = 200
+
+        async def read(self):
+            return b"generated-image"
+
+    class FakeRequestContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakeSession:
+        def __init__(self):
+            self.url = ""
+
+        def get(self, url, **kwargs):
+            self.url = url
+            return FakeRequestContext()
+
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.image_gen_key = "test-token"
+    plugin._session = FakeSession()
+    plugin.steps = 24
+    plugin.scale = 6
+    plugin.cfg_value = 0.0
+    plugin.sampler = "k_dpmpp_2m_sde"
+    plugin.noise_schedule = "karras"
+    plugin.negative = "default negative"
+    plugin.model = "default-model"
+    plugin.enable_template = False
+    plugin.translate_mode = "关闭"
+    plugin.character_preset = ""
+    plugin.custom_artists = "default artist"
+    plugin.default_outfit = ""
+    plugin.base_url = "https://example.invalid"
+    plugin._prepare_translated_prompt = AsyncMock(
+        return_value=("1girl, solo", "none", False, "nai")
+    )
+    plugin._archive_generated_image = AsyncMock()
+
+    result = asyncio.run(
+        plugin._generate_one(
+            "raw prompt",
+            "custom",
+            "竖图",
+            custom_artists="",
+        )
+    )
+
+    assert result == (b"generated-image", "ok")
+    query = parse_qs(urlparse(plugin._session.url).query, keep_blank_values=True)
+    assert query["artist"] == [""]
+
+
 def test_image_history_keeps_newest_managed_files(tmp_path):
     plugin = object.__new__(NAIGenerateImagePlugin)
     plugin.save_image_history = True

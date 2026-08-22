@@ -3,268 +3,426 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NAI 生图测试面板</title>
-  <link rel="stylesheet" href="./app.css?v=2.0.0" />
+  <title>NAI 生图控制终端 // ENDFIELD PROTOCOL</title>
+  <link rel="stylesheet" href="./app.css?v=4.1.0" />
 </head>
 <body>
+  <!-- 终末地等高线动态地形 Canvas + 底部工业网格 -->
+  <canvas id="contourCanvas" class="contour-canvas"></canvas>
+  <div class="bg-grid-overlay"></div>
+  <div class="bg-halo-accent"></div>
+
   <div id="app" class="app">
-    <!-- 顶部标题栏 -->
-    <header class="app-header">
+    <!-- 顶部工业战术标题栏 (亚克力毛玻璃 + 大圆角) -->
+    <header class="app-header acrylic-panel">
+      <div class="header-decor-strip"></div>
       <div class="header-left">
-        <div class="header-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-lg">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-            <circle cx="8.5" cy="8.5" r="1.5"/>
-            <path d="M21 15l-5-5L5 21"/>
-          </svg>
+        <div class="header-logo-box">
+          <div class="logo-rhombus">
+            <span class="logo-inner">EF</span>
+          </div>
         </div>
-        <div>
-          <h1 class="header-title">NAI 生图测试面板</h1>
-          <p class="header-subtitle">基于 nai.sta1n.cn · 在线调试生成参数</p>
+        <div class="header-title-group">
+          <div class="header-tag">
+            <span class="pulse-indicator"></span>
+            <span class="tag-text">ENDFIELD PROTOCOL // SYSTEM 04</span>
+          </div>
+          <h1 class="header-title">NAI 图像合成与测试终端</h1>
+          <p class="header-subtitle">
+            <span class="sub-lead">TALOS-II TOPOLOGY ENGINE</span>
+            <span class="sub-sep">/</span>
+            <span>NAI.STA1N.CN NEURAL INTERFACE</span>
+          </p>
         </div>
       </div>
       <div class="header-right">
-        <span id="tokenBadge" class="badge badge-neutral">Token: 加载中...</span>
-        <span id="baseUrlBadge" class="badge badge-info">--</span>
+        <div class="status-pill-group acrylic-sub">
+          <div class="tech-label">SYS.NET</div>
+          <span id="tokenBadge" class="badge badge-neutral">Token: 校验中...</span>
+          <span id="baseUrlBadge" class="badge badge-info">--</span>
+        </div>
       </div>
     </header>
 
     <!-- 主体内容 -->
     <main class="app-main">
-      <!-- 左侧：配置区 -->
+      <!-- 左侧：战术参数配置区 -->
       <section class="config-section">
-        <!-- 提示词（双框） -->
-        <div class="card">
-          <div class="card-header">
-            <span class="card-number">01</span>
-            <h2 class="card-title">描述画面</h2>
+        <!-- 提示词（双框：NAI 标签 + 自然语言） -->
+        <div class="card tactical-card acrylic-card">
+          <div class="card-header acrylic-header">
+            <div class="card-num-box">
+              <span class="card-number">01</span>
+              <span class="card-sec-tag">PRMT</span>
+            </div>
+            <div class="card-title-group">
+              <h2 class="card-title">视觉描述指令 // PROMPT SPEC</h2>
+              <span class="card-sub-code">DIRECTIVES_ENCODING</span>
+            </div>
           </div>
+
           <div class="card-body">
             <!-- NAI 风格提示词 -->
             <div class="field">
-              <label class="field-label">NAI 风格提示词</label>
-              <textarea
-                id="naiPrompt"
-                class="textarea"
-                rows="4"
-                placeholder="1girl, solo, long silver hair, blue eyes, masterpiece, best quality"
-              ></textarea>
+              <div class="field-header">
+                <label class="field-label" for="naiPrompt">
+                  <span class="label-bracket">[</span>NAI 风格标签词<span class="label-bracket">]</span>
+                </label>
+                <span class="field-tech-tag">RAW_TAGS</span>
+              </div>
+              <div class="input-wrap">
+                <textarea
+                  id="naiPrompt"
+                  class="textarea acrylic-input"
+                  rows="4"
+                  placeholder="1girl, solo, long silver hair, blue eyes, masterpiece, best quality, tactical jacket"
+                  spellcheck="false"
+                ></textarea>
+              </div>
               <div class="field-hint">
-                直接使用 NovelAI / SD 标签风格，英文逗号分隔。无需翻译，将原样发送。
+                <span class="hint-icon">◈</span>
+                <span>直接输入 SD / NovelAI 标签语法，英文逗号分隔，不经转译原样递送。</span>
               </div>
             </div>
+
             <!-- 自然语言提示词 -->
             <div class="field">
-              <label class="field-label">自然语言提示词</label>
-              <textarea
-                id="nlPrompt"
-                class="textarea"
-                rows="4"
-                placeholder="一个银发蓝眼的少女站在霓虹灯下的雨中街道，电影感构图"
-              ></textarea>
+              <div class="field-header">
+                <label class="field-label" for="nlPrompt">
+                  <span class="label-bracket">[</span>自然语言语义描述<span class="label-bracket">]</span>
+                </label>
+                <span class="field-tech-tag">NL_TRANSLATE</span>
+              </div>
+              <div class="input-wrap">
+                <textarea
+                  id="nlPrompt"
+                  class="textarea acrylic-input"
+                  rows="4"
+                  placeholder="银发少女佩戴战术护目镜，站在塔卫二暴风雪中的工业前哨站，电影质感光影"
+                  spellcheck="false"
+                ></textarea>
+              </div>
               <div class="field-hint">
-                用中文或英文自然语言描述画面。生成时会自动调用插件配置的转译模型，将其转为 NAI 标签后与上方合并。
+                <span class="hint-icon">◈</span>
+                <span>支持中/英文自然语言。系统将调用转译器转为高质量 NAI 标签后与上方合并。</span>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- 生成参数 -->
-        <div class="card">
-          <div class="card-header">
-            <span class="card-number">02</span>
-            <h2 class="card-title">生成参数</h2>
+        <!-- 图像生成参数 -->
+        <div class="card tactical-card acrylic-card">
+          <div class="card-header acrylic-header">
+            <div class="card-num-box">
+              <span class="card-number">02</span>
+              <span class="card-sec-tag">SPEC</span>
+            </div>
+            <div class="card-title-group">
+              <h2 class="card-title">生成矩阵配置 // SAMPLING MATRIX</h2>
+              <span class="card-sub-code">PARAM_COORDINATES</span>
+            </div>
           </div>
+
           <div class="card-body">
             <div class="grid-2">
+              <!-- 采样器 -->
               <div class="field">
-                <label class="field-label">采样器 (Sampler)</label>
-                <select id="sampler" class="select">
-                  <option value="k_dpmpp_2m_sde">DPM++ 2M SDE</option>
-                  <option value="k_dpmpp_2m">DPM++ 2M</option>
-                  <option value="k_dpmpp_sde">DPM++ SDE</option>
-                  <option value="k_dpmpp_2s_ancestral">DPM++ 2S Ancestral</option>
-                  <option value="k_euler_ancestral">Euler Ancestral</option>
-                  <option value="k_euler">Euler</option>
-                </select>
+                <label class="field-label" for="sampler">采样器 // SAMPLER</label>
+                <div class="select-wrap">
+                  <select id="sampler" class="select acrylic-input">
+                    <option value="k_dpmpp_2m_sde">DPM++ 2M SDE</option>
+                    <option value="k_dpmpp_2m">DPM++ 2M</option>
+                    <option value="k_dpmpp_sde">DPM++ SDE</option>
+                    <option value="k_dpmpp_2s_ancestral">DPM++ 2S Ancestral</option>
+                    <option value="k_euler_ancestral">Euler Ancestral</option>
+                    <option value="k_euler">Euler</option>
+                  </select>
+                </div>
               </div>
+
+              <!-- 画幅与分辨率 -->
               <div class="field">
-                <label class="field-label">画幅与分辨率</label>
-                <select id="size" class="select">
-                  <option value="竖图">竖图(-1)</option>
-                  <option value="横图">横图(-1)</option>
-                  <option value="方图">方图(-1)</option>
-                  <option value="2K竖图">2K竖图(-15)</option>
-                  <option value="2K横图">2K横图(-15)</option>
-                  <option value="2K方图">2K方图(-15)</option>
-                  <option value="4K竖图">4K竖图(-25)</option>
-                  <option value="4K横图">4K横图(-25)</option>
-                  <option value="4K方图">4K方图(-25)</option>
-                </select>
+                <label class="field-label" for="size">画幅比例 // RESOLUTION</label>
+                <div class="select-wrap">
+                  <select id="size" class="select acrylic-input">
+                    <option value="竖图">竖图(-1)</option>
+                    <option value="横图">横图(-1)</option>
+                    <option value="方图">方图(-1)</option>
+                    <option value="2K竖图">2K竖图(-15)</option>
+                    <option value="2K横图">2K横图(-15)</option>
+                    <option value="2K方图">2K方图(-15)</option>
+                    <option value="4K竖图">4K竖图(-25)</option>
+                    <option value="4K横图">4K横图(-25)</option>
+                    <option value="4K方图">4K方图(-25)</option>
+                  </select>
+                </div>
               </div>
+
+              <!-- 步数 -->
               <div class="field">
-                <label class="field-label">步数 (Steps)</label>
-                <input id="steps" type="number" class="input" min="1" max="100" value="24" />
+                <label class="field-label" for="steps">迭代步数 // STEPS</label>
+                <div class="input-wrap">
+                  <input id="steps" type="number" class="input acrylic-input" min="1" max="100" value="24" />
+                </div>
               </div>
+
+              <!-- Scale -->
               <div class="field">
-                <label class="field-label">Scale</label>
-                <input id="scale" type="number" class="input" min="0" max="20" step="0.5" value="6" />
+                <label class="field-label" for="scale">Prompt 引导 // SCALE</label>
+                <div class="input-wrap">
+                  <input id="scale" type="number" class="input acrylic-input" min="0" max="20" step="0.5" value="6" />
+                </div>
               </div>
+
+              <!-- CFG Rescale -->
               <div class="field">
-                <label class="field-label">CFG Rescale</label>
-                <input id="cfg" type="number" class="input" min="0" max="30" step="0.05" value="7" />
+                <label class="field-label" for="cfg">CFG Rescale 缩放</label>
+                <div class="input-wrap">
+                  <input id="cfg" type="number" class="input acrylic-input" min="0" max="30" step="0.05" value="7" />
+                </div>
               </div>
+
+              <!-- 噪声调度 -->
               <div class="field">
-                <label class="field-label">噪声调度</label>
-                <select id="noiseSchedule" class="select">
-                  <option value="karras">karras</option>
-                  <option value="native">native</option>
-                  <option value="exponential">exponential</option>
-                </select>
+                <label class="field-label" for="noiseSchedule">噪声调度 // SCHEDULE</label>
+                <div class="select-wrap">
+                  <select id="noiseSchedule" class="select acrylic-input">
+                    <option value="karras">karras</option>
+                    <option value="native">native</option>
+                    <option value="exponential">exponential</option>
+                  </select>
+                </div>
               </div>
+
+              <!-- 模型版本 -->
               <div class="field">
-                <label class="field-label">模型</label>
-                <select id="model" class="select">
-                  <option value="nai-diffusion-4-5-full">V4.5 完整版</option>
-                  <option value="nai-diffusion-5-full">V5 完整版</option>
-                </select>
+                <label class="field-label" for="model">核心模型 // MODEL</label>
+                <div class="select-wrap">
+                  <select id="model" class="select acrylic-input">
+                    <option value="nai-diffusion-4-5-full">V4.5 完整版 [4.5_FULL]</option>
+                    <option value="nai-diffusion-5-full">V5 完整版 [5.0_FULL]</option>
+                  </select>
+                </div>
               </div>
+
+              <!-- 生成张数 -->
               <div class="field">
-                <label class="field-label">生成数量</label>
-                <select id="count" class="select">
-                  <option value="1">1 张</option>
-                  <option value="2">2 张</option>
-                  <option value="4">4 张</option>
-                </select>
+                <label class="field-label" for="count">批量批次 // BATCH</label>
+                <div class="select-wrap">
+                  <select id="count" class="select acrylic-input">
+                    <option value="1">1 UNIT (单张)</option>
+                    <option value="2">2 UNITS (双联)</option>
+                    <option value="4">4 UNITS (四联)</option>
+                  </select>
+                </div>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- 风格控制 -->
-        <div class="card">
-          <div class="card-header">
-            <span class="card-number">03</span>
-            <h2 class="card-title">风格控制</h2>
+        <!-- 风格与负面限制 -->
+        <div class="card tactical-card acrylic-card">
+          <div class="card-header acrylic-header">
+            <div class="card-num-box">
+              <span class="card-number">03</span>
+              <span class="card-sec-tag">STYL</span>
+            </div>
+            <div class="card-title-group">
+              <h2 class="card-title">美学与负面过滤器 // FILTER & STYLE</h2>
+              <span class="card-sub-code">RESTRICTION_MASK</span>
+            </div>
           </div>
+
           <div class="card-body">
             <div class="field">
-              <label class="field-label">Artist / 质量前缀</label>
-              <select id="style" class="select">
-                <option value="vertical">韩漫小清新风</option>
-                <option value="comicDoujin">漫画同人风</option>
-                <option value="r18">2.5D唯美风</option>
-                <option value="lolita25d">2.5D唯美风（萝）</option>
-                <option value="anime">本子里番风</option>
-                <option value="galgame">GalGame风</option>
-                <option value="custom">自定义</option>
-              </select>
+              <label class="field-label" for="style">预置风格前缀 // ARTIST PRESET</label>
+              <div class="select-wrap">
+                <select id="style" class="select acrylic-input">
+                  <option value="vertical">韩漫小清新风 (Vertical Crisp)</option>
+                  <option value="comicDoujin">漫画同人风 (Comic / Doujin)</option>
+                  <option value="r18">2.5D 唯美风 (Aesthetic 2.5D)</option>
+                  <option value="lolita25d">2.5D 唯美风（萝）</option>
+                  <option value="anime">本子里番风 (Anime Focus)</option>
+                  <option value="galgame">GalGame 风 (Novel CG)</option>
+                  <option value="custom">自定义画师配置 [CUSTOM]</option>
+                </select>
+              </div>
             </div>
+
             <div id="customArtistsWrapper" class="field hidden">
-              <label class="field-label">自定义画师串</label>
-              <textarea id="customArtists" class="textarea" rows="3" placeholder="masterpiece, best quality, artist:xxx, ..."></textarea>
+              <label class="field-label" for="customArtists">自定义画师与画质串</label>
+              <div class="input-wrap">
+                <textarea
+                  id="customArtists"
+                  class="textarea acrylic-input"
+                  rows="3"
+                  placeholder="masterpiece, best quality, artist:xxx, intricate details..."
+                  spellcheck="false"
+                ></textarea>
+              </div>
             </div>
+
             <div class="field">
-              <label class="field-label">负面提示词 (Negative Prompt)</label>
-              <textarea id="negative" class="textarea" rows="4" placeholder="留空使用默认负面提示词"></textarea>
+              <div class="field-header">
+                <label class="field-label" for="negative">负面抑制词 // NEGATIVE PROMPT</label>
+                <button id="loadDefaultNegative" type="button" class="btn-link">
+                  <span class="link-icon">⚡</span> 载入战术预置负面
+                </button>
+              </div>
+              <div class="input-wrap">
+                <textarea
+                  id="negative"
+                  class="textarea acrylic-input"
+                  rows="3"
+                  placeholder="留空则调用系统默认抑制词集..."
+                  spellcheck="false"
+                ></textarea>
+              </div>
               <div class="field-hint">
-                <span id="negativeHint">点击"载入默认"使用内置负面词</span>
-                <button id="loadDefaultNegative" type="button" class="btn-link">载入默认</button>
+                <span id="negativeHint">填入需剔除的畸变特征与不良画质标签</span>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- 生成按钮 -->
-        <div class="action-bar">
-          <button id="generateBtn" type="button" class="btn-primary btn-lg">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm">
-              <path d="M5 3l14 9-14 9V3z"/>
-            </svg>
-            <span>生成图片</span>
-          </button>
-          <button id="trialBtn" type="button" class="btn-trial" disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm">
-              <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
-            </svg>
-            <span>试用生成</span>
-          </button>
-          <button id="resetBtn" type="button" class="btn-secondary">
-            重置参数
-          </button>
-        </div>
-        <!-- 试用状态 -->
-        <div id="trialStatus" class="trial-status-bar hidden">
-          <span id="trialStatusText" class="trial-status-text"></span>
-        </div>
-        <!-- 鸣谢 -->
-        <div class="trial-credit">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm">
-            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
-          </svg>
-          <span>感谢 @啊·羽绒服 的免费试用额度的密钥分享</span>
+        <!-- 战术执行控制条 -->
+        <div class="action-bar-container">
+          <div class="action-bar">
+            <button id="generateBtn" type="button" class="btn-primary btn-lg tactical-btn">
+              <div class="btn-icon-wrap">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="icon-sm">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+              </div>
+              <div class="btn-text-wrap">
+                <span class="btn-main-text">EXECUTE // 启动生图</span>
+                <span class="btn-sub-text">CTRL + ENTER</span>
+              </div>
+            </button>
+
+            <button id="trialBtn" type="button" class="btn-trial tactical-btn" disabled>
+              <div class="btn-icon-wrap">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm">
+                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+              </div>
+              <div class="btn-text-wrap">
+                <span class="btn-main-text">TRIAL // 试用生成</span>
+              </div>
+            </button>
+
+            <button id="resetBtn" type="button" class="btn-secondary tactical-btn">
+              <span class="btn-icon-symbol">↺</span>
+              <span>重置参数</span>
+            </button>
+          </div>
+
+          <!-- 试用状态提示条 -->
+          <div id="trialStatus" class="trial-status-bar acrylic-sub hidden">
+            <div class="status-led led-amber"></div>
+            <span id="trialStatusText" class="trial-status-text"></span>
+          </div>
+
+          <!-- 底部鸣谢 -->
+          <div class="trial-credit">
+            <div class="credit-badge">ACK</div>
+            <span>感谢 @啊·羽绒服 提供的免费试用额度密钥支持</span>
+          </div>
         </div>
       </section>
 
-      <!-- 右侧：结果展示区 -->
+      <!-- 右侧：输出与结果监控区 -->
       <section class="result-section">
-        <div class="card result-card">
-          <div class="card-header">
-            <h2 class="card-title">生成预览</h2>
-            <span id="resultMeta" class="badge badge-neutral hidden"></span>
+        <div class="card tactical-card result-card acrylic-card">
+          <div class="card-header result-card-header acrylic-header">
+            <div class="card-num-box">
+              <span class="card-number">04</span>
+              <span class="card-sec-tag">DISP</span>
+            </div>
+            <div class="card-title-group">
+              <h2 class="card-title">视觉合成监视器 // SYNTH MONITOR</h2>
+              <span class="card-sub-code">OUTPUT_FEED</span>
+            </div>
+            <div class="result-header-badge">
+              <span id="resultMeta" class="badge badge-tech-success hidden"></span>
+            </div>
           </div>
-          <div class="card-body result-body">
-            <!-- 空状态 -->
+
+          <div class="card-body result-body acrylic-inner">
+            <!-- 空状态：战术待命界面 -->
             <div id="emptyState" class="empty-state">
-              <div class="empty-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="icon-xl">
-                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-                  <circle cx="9" cy="9" r="2"/>
-                  <path d="M21 15l-5-5L5 21"/>
-                </svg>
+              <div class="tactical-hud-radar">
+                <div class="radar-circle-outer"></div>
+                <div class="radar-circle-inner"></div>
+                <div class="radar-cross-h"></div>
+                <div class="radar-cross-v"></div>
+                <div class="radar-scanner"></div>
+                <div class="radar-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-xl">
+                    <rect x="3" y="3" width="18" height="18" rx="4"/>
+                    <circle cx="8.5" cy="8.5" r="1.5"/>
+                    <path d="M21 15l-5-5L5 21"/>
+                  </svg>
+                </div>
               </div>
-              <h3 class="empty-title">暂无生成结果</h3>
-              <p class="empty-desc">填写提示词后，点击"生成图片"即可在此预览</p>
+              <div class="empty-text-wrap">
+                <div class="empty-badge">STANDBY // READY</div>
+                <h3 class="empty-title">图像合成链路待命中</h3>
+                <p class="empty-desc">配置左侧指令与矩阵参数，点击“启动生图”以激活神经渲染管道。</p>
+              </div>
             </div>
 
-            <!-- 加载状态 -->
+            <!-- 加载状态：终末地战术进度扫描 -->
             <div id="loadingState" class="loading-state hidden">
-              <div class="spinner-wrap">
-                <svg viewBox="0 0 24 24" fill="none" class="spinner">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity="0.25"/>
-                  <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" opacity="0.75"/>
-                </svg>
+              <div class="tactical-loader">
+                <div class="loader-hex-grid">
+                  <div class="hex-block b1"></div>
+                  <div class="hex-block b2"></div>
+                  <div class="hex-block b3"></div>
+                  <div class="hex-block b4"></div>
+                </div>
+                <div class="loader-ring"></div>
               </div>
-              <p class="loading-text" id="loadingText">正在生成图片...</p>
-              <p class="loading-hint">转译 + 生图通常需要 10-60 秒，请耐心等待</p>
+              <div class="loading-info">
+                <div class="loading-tag">PROCESSING // 运算中</div>
+                <p class="loading-text" id="loadingText">正在转译语义并生成图片...</p>
+                <div class="loading-bar-wrap">
+                  <div class="loading-bar-inner"></div>
+                </div>
+                <p class="loading-hint">NEURAL SYNTHESIS · 预计耗时 10-60 秒</p>
+              </div>
             </div>
 
-            <!-- 错误状态 -->
+            <!-- 错误状态：警报战术卡 -->
             <div id="errorState" class="error-state hidden">
-              <div class="error-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-lg">
-                  <circle cx="12" cy="12" r="10"/>
-                  <line x1="15" y1="9" x2="9" y2="15"/>
-                  <line x1="9" y1="9" x2="15" y2="15"/>
+              <div class="error-tactical-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="icon-lg">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                  <line x1="12" y1="9" x2="12" y2="13"/>
+                  <line x1="12" y1="17" x2="12.01" y2="17"/>
                 </svg>
               </div>
-              <h3 class="error-title">生成失败</h3>
+              <div class="error-tag">ALERT // 执行中断</div>
+              <h3 class="error-title">图像渲染管线响应异常</h3>
               <p id="errorMsg" class="error-msg"></p>
-              <button id="retryBtn" type="button" class="btn-secondary btn-sm">重试</button>
+              <button id="retryBtn" type="button" class="btn-primary btn-sm tactical-btn retry-btn">
+                <span>RETRY // 重试执行</span>
+              </button>
             </div>
 
-            <!-- 合并步骤展示 -->
-            <div id="mergeInfo" class="merge-info hidden">
-              <div class="merge-info-header">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                </svg>
-                <span>提示词合并步骤</span>
+            <!-- 合并步骤战术流 -->
+            <div id="mergeInfo" class="merge-info acrylic-card hidden">
+              <div class="merge-info-header acrylic-header">
+                <div class="merge-header-left">
+                  <span class="merge-dot"></span>
+                  <span class="merge-title-text">PROMPT TRANSFORMATION PIPELINE // 指令流转链路</span>
+                </div>
+                <span class="merge-tag">CHAIN.OK</span>
               </div>
               <div class="merge-steps" id="mergeSteps"></div>
             </div>
 
-            <!-- 图片结果 -->
+            <!-- 图片渲染结果网格 -->
             <div id="resultGrid" class="result-grid hidden"></div>
           </div>
         </div>
@@ -272,6 +430,6 @@
     </main>
   </div>
 
-  <script src="./app.js?v=2.0.0"></script>
+  <script src="./app.js?v=4.1.0"></script>
 </body>
 </html>
