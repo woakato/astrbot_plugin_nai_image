@@ -1,5 +1,73 @@
 # 更新日志
 
+## v2.4.0 (2026-08-26)
+
+### OpenAI 兼容接口全面对齐
+
+- **`/v1/images/generations` 与 `/v1/images/edits` 按接口文档对齐**：
+  - 高级参数（`steps`/`scale`/`sampler`/`noise_schedule`/`seed`/`negative_prompt`）统一放入 `parameters` 对象。
+  - 参考图支持三种模式：**Vibe 参考**（`reference_image_multiple` 数组，风格/角色参考）、**img2img 图生图**（`/v1/images/edits` 重绘）、**精准参考 director**（`director_reference_*` 五个等长数组按下标一一对应）。
+  - 新增「参考图使用模式」配置项（vibe / img2img / director），面板与聊天指令均可使用。
+  - 参考图统一以 Data URI 提交（§5），超限参考图（最长边 1920 / 面积 3686400）自动等比缩小。
+
+- **精准参考（director）完整实现与修复**：
+  - 按新接口文档 §8 实现：`director_reference_images`、`director_reference_strength_values`、`director_reference_secondary_strength_values`、`director_reference_information_extracted`、`director_reference_descriptions` 五个数组严格等长。
+  - **修复上游 400 参数校验失败**：`information_extracted` 必须为 `1.0`（实测 `0.7` 等值被上游拒绝），已固定为 `1.0`；次级强度固定 `0.5`，主强度默认 `1.0`（文档 §8.5 推荐保持角色用 0.9-1.0）。
+  - 描述对象补全为文档 §8.3 格式：含 `char_captions: []` 和 `legacy_uc: false`。
+  - `base_caption` 仅允许三个枚举值（`character` / `style` / `character&style`），非法值自动回落 `character&style`。
+  - 精准参考仅支持 `nai-diffusion-4-5-full` / `nai-diffusion-4-5-curated`（§8.1），非 4.5 模型自动切换为 `nai-diffusion-4-5-full`。
+
+- **多角色坐标控制（§7）**：
+  - 支持 `use_coords` / `characterPrompts` / `v4_prompt` 格式，最多 6 个角色，坐标 0-1。
+  - 聊天指令用可重复的 `--char="提示词|x|y"` 参数，面板可动态添加角色行。
+
+- **director-tools 图片处理**：
+  - 支持 `bg-removal`（抠图）、`lineart`（线稿）、`sketch`（草图）、`colorize`（上色）、`emotion`（情绪）、`declutter`（清理）六种动作。
+  - 动作指定时 `model` 强制为 `director-tools`，面板提供工具入口。
+
+### 新增配置项
+
+- **精准参考描述**（`openai_director_caption`）：`character&style` / `character` / `style` 三选一，面板可临时覆盖。
+- **精准参考兜底参考图**（`openai_director_fallback_images`，`type: file`）：支持 png/jpg/webp 上传，精准参考模式下请求未携带参考图（聊天指令、陪伴联动等场景）时自动使用第一张可用图片作为参考图；留空则照旧提示需要参考图。
+- **随机种子**（`openai_seed`）：`-1` 表示每次随机，非负整数固定种子复现画面。
+- **请求超时**（`openai_timeout`）：30-600 秒，默认 180 秒。
+- **失败重试次数**（`openai_max_retries`）：0-3 次，对 408/429/502/503/504 按 2/4/8 秒指数退避重试。
+
+### 超时与重试策略优化
+
+- **超时不再自动重试**：客户端超时后上游通常仍在继续生成并照常扣费，自动重试会导致一次需求被多次扣费。现在超时直接失败，提示文案改为"上游可能仍在生成（可能已扣费），请稍后手动重试"。
+- **aiohttp 连接改为 `force_close=True`**：每次请求新建连接，避免中转站把复用的 keep-alive 连接挂死（上游已出图但响应永不返回，直到超时）。生图频率低，握手开销可忽略。
+
+### 陪伴插件直连增强
+
+- **修复 OpenAI 模式下负向提示词丢失**：陪伴插件整理的负向要求（`negative`）现在会正确传递给 `_openai_generate`，不再被丢弃。
+- **参考图路由按全局模式**：陪伴传来的参考图按插件「参考图使用模式」路由（vibe / img2img / director），未带参考图且为 director 模式时使用设置里的兜底参考图。
+- **文档更新**：`generate_for_companion` 文档字符串更新为实际的三模式路由说明（旧版描述"有参考图走 img2img"已不准确）。
+
+### 测试面板重构
+
+- **Endfield 风格视觉重构**：采用《明日方舟：终末地》战术设计规范（谷地黄 + 工业纸灰 + 战术墨色），引入亚克力毛玻璃材质、光泽反射边缘及柔和阴影；内置动态等高线拓扑地形模拟引擎（Gaussian Scalar Field + Marching Squares）呈现 30fps 背景动效。
+- **新增精准参考相关字段**：精准参考描述输入框（仅 director 模式显示）、director-tools 工具入口。
+- **多角色坐标行管理**：动态添加/删除角色行（提示词 + x/y 坐标），最多 6 行。
+- **精准参考模式下隐藏重绘强度/附加噪声**：这两项是 img2img 参数，director 不适用，隐藏避免误导；同时修复隐藏后默认值仍会发送覆盖精准参考主强度的问题（后端按文档 §8.5 默认 1.0）。
+- **修复面板顶部 UI 被灰色遮罩覆盖**：未定义的 CSS 变量 `--text-main`/`--text-muted`（暗色主题回退值在浅色纸灰背景上不可见）改为 `--edge-ink-*` 系列，新增 `--edge-ink-subtle` 变量。
+
+### 聊天指令增强
+
+- **`/image` 指令支持 `--char` 多角色坐标**：可重复的 `--char="提示词|x|y"` 参数，坐标 0-1，最多 6 个角色；未指定坐标时默认居中（0.5, 0.5）。
+
+### 缺陷修复
+
+- **精准参考上游 400 参数校验失败**：根因是 `information_extracted` 必须为 `1.0`，旧代码写死 `0.7` 被上游拒绝。已通过逐组探针二分定位并修复。
+- **陪伴插件 OpenAI 模式负向提示词丢失**：已修复，负向要求现在随请求发送。
+- **兜底参考图路径解析错误**：设置页上传的文件存的是相对插件数据目录的路径，旧代码按进程工作目录解析找不到文件。现在相对路径会拼到插件数据目录下再读取。
+- **面板精准参考描述字段灰色不可见**：未定义的 CSS 变量导致浅色背景上文字不可见，已修复为 `--edge-ink-*` 系列。
+
+### 测试与质量
+
+- 92 个单元测试全部通过，ruff format/check 通过。
+- 新增精准参考 payload 断言、多角色坐标参数解析测试、陪伴插件负向提示词传递测试。
+
 ## v2.3.8 (2026-08-22)
 
 ### 界面与视觉重构
