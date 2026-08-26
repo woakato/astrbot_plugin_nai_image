@@ -43,6 +43,7 @@
   --edge-ink-secondary: #424640;
   --edge-ink-muted: #6e726b;
   --edge-ink-dim: #9aa097;
+  --edge-ink-subtle: rgba(154, 157, 152, 0.45); /* 次级描边墨色（切换按钮/状态条） */
 
   /* 全局现代柔和圆角规范 (Rounded System) */
   --radius-xs: 6px;
@@ -186,29 +187,21 @@ body::before {
 }
 
 .acrylic-header {
-  background: rgba(220, 221, 214, 0.4);
-  backdrop-filter: var(--acrylic-blur);
-  -webkit-backdrop-filter: var(--acrylic-blur);
+  background: rgba(220, 221, 214, 0.45);
   border-bottom: 1px solid var(--edge-border-glass);
 }
 
 .acrylic-inner {
-  background: rgba(232, 232, 226, 0.35);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(232, 232, 226, 0.4);
 }
 
 .acrylic-input {
   background: var(--edge-input) !important;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
   border: 1px solid var(--edge-border-glass) !important;
 }
 
 .acrylic-sub {
-  background: rgba(220, 221, 214, 0.5);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(220, 221, 214, 0.55);
 }
 
 /* ===== 顶部工业战术标题栏 (HEADER) ===== */
@@ -438,6 +431,10 @@ body::before {
   border-radius: var(--radius-lg);
   overflow: hidden;
   border: 1px solid var(--edge-border-glass);
+  /* 消除子像素抗锯齿与伪影黑条 */
+  isolation: isolate;
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
   transition: transform var(--trans-fast), box-shadow var(--trans-fast), border-color var(--trans-fast);
 }
 
@@ -452,8 +449,6 @@ body::before {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  border-top-left-radius: var(--radius-lg);
-  border-top-right-radius: var(--radius-lg);
 }
 
 .card-num-box {
@@ -877,8 +872,6 @@ body::before {
   display: flex;
   flex-direction: column;
   position: relative;
-  border-bottom-left-radius: var(--radius-lg);
-  border-bottom-right-radius: var(--radius-lg);
 }
 
 /* 空状态：战术 HUD 雷达待命界面 */
@@ -1404,6 +1397,143 @@ body::before {
   border-radius: var(--radius-md);
   border: 2px solid var(--edge-signal);
   box-shadow: 0 8px 48px rgba(0, 0, 0, 0.6);
+}
+
+/* ===== 调用格式分段切换（NAI 直连 / OpenAI 兼容） ===== */
+.format-toggle-group {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.format-toggle-btn {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--edge-ink-subtle);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--edge-ink-muted);
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.18s ease;
+}
+
+.format-toggle-btn:hover {
+  border-color: var(--edge-signal);
+  background: rgba(255, 245, 0, 0.04);
+}
+
+.format-toggle-btn.active {
+  border-color: var(--edge-signal);
+  background: rgba(255, 245, 0, 0.08);
+  box-shadow: 0 0 0 1px var(--edge-signal), 0 8px 32px rgba(255, 245, 0, 0.08);
+}
+
+.format-toggle-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--edge-ink-subtle);
+  transition: background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.format-toggle-btn.active .format-toggle-dot {
+  background: var(--edge-signal);
+  box-shadow: 0 0 8px rgba(255, 245, 0, 0.8);
+}
+
+.format-toggle-label {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--edge-ink-primary);
+  letter-spacing: 0.04em;
+}
+
+.format-toggle-sub {
+  font-size: 11px;
+  color: var(--edge-ink-muted);
+  letter-spacing: 0.06em;
+  opacity: 0.75;
+}
+
+.openai-config-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(16, 17, 16, 0.06);
+  border: 1px solid var(--edge-ink-subtle);
+  font-size: 12px;
+  color: var(--edge-ink-secondary);
+}
+
+.status-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.status-dot.ok {
+  background: #2ed573;
+  box-shadow: 0 0 8px rgba(46, 213, 115, 0.7);
+}
+
+.status-dot.error {
+  background: #ff5e57;
+  box-shadow: 0 0 8px rgba(255, 94, 87, 0.7);
+}
+
+/* ===== 参考图预览（OpenAI 兼容格式） ===== */
+.ref-preview-wrap {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.ref-preview {
+  max-width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--edge-ink-subtle);
+  background: rgba(0, 0, 0, 0.08);
+}
+
+/* ===== 多角色坐标行（OpenAI 兼容格式 §7） ===== */
+.char-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.char-row {
+  display: grid;
+  grid-template-columns: 1fr 76px 76px auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.char-row .char-prompt {
+  width: 100%;
+}
+
+.char-row .char-coord {
+  width: 76px;
+  text-align: center;
+}
+
+.char-row .char-remove {
+  padding: 3px 9px;
 }
 
 /* ===== 工具类 ===== */

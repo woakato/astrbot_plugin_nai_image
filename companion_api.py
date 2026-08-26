@@ -85,6 +85,7 @@ class NAIImageCompanionExtensionAPI:
             "default_size": plugin.image_size,
             "prompt_format": getattr(plugin, "companion_prompt_format", "")
             or "自然语言模式（en）",
+            "reference_supported": True,
             "proxy_enabled": bool(getattr(plugin, "enable_proxy", True)),
             "bypass_system_proxy": bool(getattr(plugin, "bypass_system_proxy", True)),
             "proxy_online": plugin.proxy_runner is not None,
@@ -186,9 +187,15 @@ class NAIImageCompanionExtensionAPI:
 
         对陪伴插件传过来的请求做本土化适配：``prompt_text`` 是需求正文，
         ``prompt_sections`` 是结构化背景信息（穿搭/场景/记忆/构图等，正负向
-        分开），两者会被合并成最终提示词直接提交给 NAI；``workflow_kind``
-        只用于元数据记录（上游为纯文生图），``size`` / ``ratio`` / ``style``
-        按 NAI 参数体系归一化，``reference_image_path`` 会被忽略。
+        分开），两者会被合并成最终提示词；``workflow_kind`` 用于元数据记录，
+        ``size`` / ``ratio`` / ``style`` 按 NAI 参数体系归一化。
+
+        后端路由由插件全局 ``call_mode`` 决定：``openai`` 时走 OpenAI 兼容
+        格式，参考图按插件「参考图使用模式」（vibe / img2img / director）
+        路由，未带参考图且为 director 模式时使用设置里的兜底参考图，
+        否则 ``/v1/images/generations`` 文生图；``direct`` 时走传统 GET
+        （nai.sta1n.cn 文生图，参考图降级为文生图）。``strength`` 为重绘
+        强度。
 
         Returns:
             与 image_companion 同构的 ``{handled, backend, image_path, note, metadata}``。
@@ -204,8 +211,13 @@ class NAIImageCompanionExtensionAPI:
         session_key = _first_text(req.get("session_key"), req.get("continuity_key"))[
             :340
         ]
-        if _first_text(req.get("reference_image_path")):
-            logger.info(f"{_LOG_TAG} 上游为纯文生图，忽略参考图 | kind={workflow_kind}")
+        reference_path = self._resolve_reference_path(req)
+        strength = self._coerce_strength(req.get("strength"))
+        if reference_path:
+            logger.info(
+                f"{_LOG_TAG} 本次直连请求携带参考图 | kind={workflow_kind} "
+                f"path={reference_path[:160]} strength={strength}"
+            )
 
         prompt_format = self._resolve_prompt_format(req)
         style = self._coerce_style(req.get("style"))
@@ -242,15 +254,31 @@ class NAIImageCompanionExtensionAPI:
             negative = section_negative or None
 
         try:
-            # 转译模式交由插件全局 enable_translate 配置决定：「关闭」时与
-            # 原直连行为一致（按模式处理完直接提交）；「开启/自动」时自然
-            # 语言会先经转译模型转成 NAI 标签再提交。
-            img_bytes, reason = await plugin._generate_one(
-                prepared_prompt,
-                style,
-                size,
-                negative=negative,
-            )
+            if plugin.call_mode == "openai":
+                # OpenAI 兼容模式：有参考图走图生图，否则文生图；画师串并入 prompt
+                if reference_path:
+                    logger.info(
+                        f"{_LOG_TAG} 调用模式 OpenAI，携带参考图走图生图 | "
+                        f"kind={workflow_kind} path={reference_path[:160]} strength={strength}"
+                    )
+                openai_prompt = plugin._openai_prompt(prepared_prompt, style)
+                images, reason = await plugin._openai_generate(
+                    openai_prompt,
+                    size,
+                    n=1,
+                    reference_image_path=reference_path or None,
+                    strength=strength,
+                    negative=negative,
+                )
+                img_bytes = images[0] if images else None
+            else:
+                # 传统 GET 模式：文生图（nai.sta1n.cn）
+                img_bytes, reason = await plugin._generate_one(
+                    prepared_prompt,
+                    style,
+                    size,
+                    negative=negative,
+                )
         except Exception as exc:
             logger.exception(
                 f"{_LOG_TAG} 直连生图执行失败 | error_type={type(exc).__name__}"
@@ -298,6 +326,7 @@ class NAIImageCompanionExtensionAPI:
             style=style,
             size=size,
             image_path=str(image_path),
+            reference_path=reference_path,
         )
         note = "生成完成"
         self._note_generation(
@@ -446,6 +475,30 @@ class NAIImageCompanionExtensionAPI:
             return _PROMPT_FORMAT_NAI
         return _PROMPT_FORMAT_NATURAL
 
+    def _resolve_reference_path(self, request: dict[str, Any]) -> str:
+        """从陪伴请求中解析参考图路径。
+
+        ``reference_image_path`` 优先；未传时取 ``reference_image_paths``
+        首项（多图职责组合时 NAI 侧先按单图处理）。
+        """
+        path = _first_text(request.get("reference_image_path"))
+        if not path:
+            paths = request.get("reference_image_paths")
+            if isinstance(paths, (list, tuple)) and paths:
+                path = _first_text(paths[0])
+        return path
+
+    @staticmethod
+    def _coerce_strength(value: Any) -> float | None:
+        """把陪伴请求里的重绘强度归一化到 (0,1]，无效返回 None。"""
+        if value in (None, ""):
+            return None
+        try:
+            strength = float(value)
+        except (TypeError, ValueError):
+            return None
+        return strength if 0 < strength <= 1 else None
+
     def _coerce_style(self, value: Any) -> str:
         """把陪伴风格值归一化为 NAI 风格键，未命中回退插件默认风格。"""
         plugin = self._plugin
@@ -519,6 +572,7 @@ class NAIImageCompanionExtensionAPI:
         style: str,
         size: str,
         image_path: str,
+        reference_path: str = "",
     ) -> dict[str, Any]:
         """构造陪伴侧可读的结果元数据（与 image_companion 常用字段对齐）。"""
         return {
@@ -533,6 +587,8 @@ class NAIImageCompanionExtensionAPI:
             "ts": time.time(),
             "trace": f"nai-{time.time_ns():x}"[:40],
             "generation_completed": True,
+            "reference_used": bool(reference_path),
+            "reference_path": reference_path[:1000] if reference_path else "",
         }
 
     def _note_generation(

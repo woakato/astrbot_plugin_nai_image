@@ -1,4 +1,5 @@
 """Smoke test for NAIImageCompanionExtensionAPI (no network, no AstrBot runtime)."""
+
 import asyncio
 import pathlib
 import sys
@@ -66,7 +67,10 @@ async def main() -> None:
 
     # prompt format resolution
     assert api._resolve_prompt_format({"prompt_format": "nai"}) == "nai"
-    assert api._resolve_prompt_format({"prompt_format": "natural_language"}) == "natural_language"
+    assert (
+        api._resolve_prompt_format({"prompt_format": "natural_language"})
+        == "natural_language"
+    )
     assert api._resolve_prompt_format({}) == "natural_language"
     FakePlugin.companion_prompt_format = "nai tag模式"
     assert api._resolve_prompt_format({}) == "nai"
@@ -74,7 +78,11 @@ async def main() -> None:
 
     # capability status
     status = api.capability_status(None)
-    assert status["installed"] and status["available"] and status["selected_backend"] == "nai", status
+    assert (
+        status["installed"]
+        and status["available"]
+        and status["selected_backend"] == "nai"
+    ), status
     assert status["backends"]["external"] is True
 
     # status snapshot
@@ -92,7 +100,11 @@ async def main() -> None:
             "prompt_format": "natural_language",
             "size": "1024x1024",
             "prompt_sections": [
-                {"source": "wardrobe_decision", "positive": "white sailor school uniform", "negative": "pajamas"},
+                {
+                    "source": "wardrobe_decision",
+                    "positive": "white sailor school uniform",
+                    "negative": "pajamas",
+                },
                 {"source": "scene_context", "positive": "cozy bedroom at night"},
                 {"source": "user_request", "positive": "duplicate requirement text"},
             ],
@@ -119,22 +131,31 @@ async def main() -> None:
             "prompt_format": "natural_language",
         },
     )
-    assert FakePlugin.last_prompt == "a girl sitting by the window soft morning light", FakePlugin.last_prompt
+    assert (
+        FakePlugin.last_prompt == "a girl sitting by the window soft morning light"
+    ), FakePlugin.last_prompt
 
     # nai tag mode: tags passthrough (newlines folded into commas)
-    await api.generate_for_companion(None, {"prompt_text": "1girl, red dress", "prompt_format": "nai"})
+    await api.generate_for_companion(
+        None, {"prompt_text": "1girl, red dress", "prompt_format": "nai"}
+    )
     assert FakePlugin.last_prompt == "1girl, red dress", FakePlugin.last_prompt
 
     # plain mapping sections shape: {"wardrobe": "...", "negative": "..."}
     await api.generate_for_companion(
         None,
-        {"prompt_text": "take a photo", "prompt_sections": {"wardrobe": "school uniform", "negative": "no rain"}},
+        {
+            "prompt_text": "take a photo",
+            "prompt_sections": {"wardrobe": "school uniform", "negative": "no rain"},
+        },
     )
     assert "school uniform" in FakePlugin.last_prompt, FakePlugin.last_prompt
     assert FakePlugin.last_negative == "no rain"
 
     # dataclass-like object sections shape
-    section = types.SimpleNamespace(source="scene_context", positive="park with flowers", negative="")
+    section = types.SimpleNamespace(
+        source="scene_context", positive="park with flowers", negative=""
+    )
     await api.generate_for_companion(
         None,
         {"prompt_text": "stand under a tree", "prompt_sections": [section]},
@@ -156,7 +177,10 @@ async def main() -> None:
     disabled = await api.generate_for_companion(None, {"prompt_text": "x"})
     assert disabled == {"handled": False, "reason": "disabled"}, disabled
     disabled_status = api.capability_status(None)
-    assert disabled_status["available"] is False and disabled_status["reason"] == "disabled"
+    assert (
+        disabled_status["available"] is False
+        and disabled_status["reason"] == "disabled"
+    )
 
     print("ALL SMOKE TESTS PASSED")
 

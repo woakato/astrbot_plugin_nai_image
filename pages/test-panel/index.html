@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NAI 生图控制终端 // ENDFIELD PROTOCOL</title>
-  <link rel="stylesheet" href="./app.css?v=4.1.0" />
+  <link rel="stylesheet" href="./app.css?v=4.6.2" />
 </head>
 <body>
   <!-- 终末地等高线动态地形 Canvas + 底部工业网格 -->
@@ -48,6 +48,196 @@
     <main class="app-main">
       <!-- 左侧：战术参数配置区 -->
       <section class="config-section">
+        <!-- 调用格式（NAI 直连 / OpenAI 兼容） -->
+        <div class="card tactical-card acrylic-card">
+          <div class="card-header acrylic-header">
+            <div class="card-num-box">
+              <span class="card-number">00</span>
+              <span class="card-sec-tag">FMT</span>
+            </div>
+            <div class="card-title-group">
+              <h2 class="card-title">调用格式 // CALL FORMAT</h2>
+              <span class="card-sub-code">TRANSPORT_SELECT</span>
+            </div>
+          </div>
+
+          <div class="card-body">
+            <!-- 分段式切换：传统 GET vs OpenAI 兼容 -->
+            <div class="format-toggle-group" id="callFormat">
+              <button type="button" class="format-toggle-btn active" data-format="direct">
+                <span class="format-toggle-dot"></span>
+                <span class="format-toggle-label">NAI 直连</span>
+                <span class="format-toggle-sub">传统 GET 接口</span>
+              </button>
+              <button type="button" class="format-toggle-btn" data-format="openai">
+                <span class="format-toggle-dot"></span>
+                <span class="format-toggle-label">OpenAI 兼容</span>
+                <span class="format-toggle-sub">/v1/images 端点</span>
+              </button>
+            </div>
+            <div class="field-hint" style="margin-top: 10px;">
+              <span class="hint-icon">◈</span>
+              <span id="callFormatHint">直连 nai.sta1n.cn 原生接口生成。</span>
+            </div>
+            <div id="openaiConfigStatus" class="openai-config-status hidden">
+              <span class="status-dot error"></span>
+              <span id="openaiConfigStatusText">未配置 OpenAI 接口</span>
+            </div>
+
+            <!-- 参考图上传（仅 OpenAI 兼容格式显示） -->
+            <div id="refUploadWrap" class="field hidden">
+              <div class="field-header">
+                <label class="field-label" for="refFile">参考图 // REFERENCE IMAGE</label>
+                <span class="field-tech-tag">LOCAL_UPLOAD</span>
+              </div>
+              <div class="input-wrap">
+                <input
+                  id="refFile"
+                  type="file"
+                  class="input acrylic-input"
+                  accept="image/png,image/jpeg,image/webp"
+                />
+              </div>
+              <div id="refPreviewWrap" class="ref-preview-wrap hidden">
+                <img id="refPreview" class="ref-preview" alt="参考图预览" />
+                <button id="refRemove" type="button" class="btn-link">
+                  <span class="link-icon">✕</span> 移除参考图
+                </button>
+              </div>
+              <div class="field-hint">
+                <span class="hint-icon">◈</span>
+                <span>从本地上传参考图，随 OpenAI 兼容格式请求提交；上游图生图参数接入后用于重绘 / 改图。</span>
+              </div>
+            </div>
+
+            <!-- 重绘强度（仅 OpenAI 兼容格式显示） -->
+            <div id="refStrengthWrap" class="field hidden">
+              <label class="field-label" for="refStrength">重绘强度 // STRENGTH</label>
+              <div class="input-wrap">
+                <input
+                  id="refStrength"
+                  type="number"
+                  class="input acrylic-input"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value="0.7"
+                />
+              </div>
+              <div class="field-hint">
+                <span class="hint-icon">◈</span>
+                <span>0-1。img2img 时越小越贴近原图；Vibe 参考时越大受参考图影响越深。</span>
+              </div>
+            </div>
+
+            <!-- 参考图使用模式（仅 OpenAI 兼容格式显示） -->
+            <div id="refModeWrap" class="field hidden">
+              <label class="field-label" for="refMode">参考图使用模式 // REF MODE</label>
+              <div class="select-wrap">
+                <select id="refMode" class="select acrylic-input">
+                  <option value="vibe">Vibe 参考（风格/角色参考）</option>
+                  <option value="img2img">img2img（图生图重绘）</option>
+                  <option value="director">精准参考（director）</option>
+                </select>
+              </div>
+              <div class="field-hint">
+                <span class="hint-icon">◈</span>
+                <span>vibe：reference_* 风格/角色参考；img2img：/v1/images/edits 重绘；director：精准参考（§6，建议 nai-diffusion-4-5 系列）。未上传参考图时本项无效。</span>
+              </div>
+            </div>
+
+            <!-- 精准参考描述（仅 OpenAI 兼容格式 + director 模式显示） -->
+            <div id="directorCaptionWrap" class="field hidden">
+              <label class="field-label" for="directorCaption">精准参考描述 // CAPTION</label>
+              <div class="input-wrap">
+                <input
+                  id="directorCaption"
+                  type="text"
+                  class="input acrylic-input"
+                  value="character&style"
+                  placeholder="character&style"
+                />
+              </div>
+              <div class="field-hint">
+                <span class="hint-icon">◈</span>
+                <span>精准参考的 base_caption，决定保留参考图的哪些信息：character&style / character / style。</span>
+              </div>
+            </div>
+
+            <!-- img2img 附加噪声（仅 OpenAI 兼容格式显示） -->
+            <div id="refNoiseWrap" class="field hidden">
+              <label class="field-label" for="refNoise">附加噪声 // NOISE</label>
+              <div class="input-wrap">
+                <input
+                  id="refNoise"
+                  type="number"
+                  class="input acrylic-input"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value="0.7"
+                />
+              </div>
+              <div class="field-hint">
+                <span class="hint-icon">◈</span>
+                <span>img2img 附加噪声强度 (0-1)，随 strength 一并写入 parameters。</span>
+              </div>
+            </div>
+
+            <!-- 随机种子（仅 OpenAI 兼容格式显示） -->
+            <div id="openaiSeedWrap" class="field hidden">
+              <label class="field-label" for="openaiSeed">随机种子 // SEED</label>
+              <div class="input-wrap">
+                <input
+                  id="openaiSeed"
+                  type="number"
+                  class="input acrylic-input"
+                  min="-1"
+                  step="1"
+                  value="-1"
+                />
+              </div>
+              <div class="field-hint">
+                <span class="hint-icon">◈</span>
+                <span>-1 表示每次随机；填入非负整数可固定种子复现画面。</span>
+              </div>
+            </div>
+
+            <!-- director-tools 图片处理动作（仅 OpenAI 兼容格式显示） -->
+            <div id="directorActionWrap" class="field hidden">
+              <label class="field-label" for="directorAction">图片处理动作 // DIRECTOR TOOLS</label>
+              <div class="select-wrap">
+                <select id="directorAction" class="select acrylic-input">
+                  <option value="">关闭（常规生图）</option>
+                  <option value="bg-removal">去除背景</option>
+                  <option value="lineart">提取线稿</option>
+                  <option value="sketch">生成草图</option>
+                  <option value="colorize">线稿上色</option>
+                  <option value="emotion">调整人物表情</option>
+                  <option value="declutter">清理画面元素</option>
+                </select>
+              </div>
+              <div class="field-hint">
+                <span class="hint-icon">◈</span>
+                <span>启用后改用 director-tools 模型处理上传的源图片；提示词可留空，但必须上传一张源图。</span>
+              </div>
+            </div>
+
+            <!-- 多角色坐标控制（仅 OpenAI 兼容格式显示，§7） -->
+            <div id="charListWrap" class="field hidden">
+              <label class="field-label">多角色坐标 // CHARACTERS</label>
+              <div id="charList" class="char-list"></div>
+              <button id="charAdd" type="button" class="btn-link">
+                <span class="link-icon">＋</span> 添加角色
+              </button>
+              <div class="field-hint">
+                <span class="hint-icon">◈</span>
+                <span>为每个角色单独写提示词并指定位置（坐标 0-1，x 从左到右、y 从上到下），最多 6 个；建议搭配横向尺寸。留空则不使用坐标控制。</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- 提示词（双框：NAI 标签 + 自然语言） -->
         <div class="card tactical-card acrylic-card">
           <div class="card-header acrylic-header">
@@ -136,6 +326,7 @@
                     <option value="k_dpmpp_2s_ancestral">DPM++ 2S Ancestral</option>
                     <option value="k_euler_ancestral">Euler Ancestral</option>
                     <option value="k_euler">Euler</option>
+                    <option value="ddim">DDIM (仅 NAI 3)</option>
                   </select>
                 </div>
               </div>
@@ -190,6 +381,7 @@
                     <option value="karras">karras</option>
                     <option value="native">native</option>
                     <option value="exponential">exponential</option>
+                    <option value="polyexponential">polyexponential</option>
                   </select>
                 </div>
               </div>
@@ -430,6 +622,6 @@
     </main>
   </div>
 
-  <script src="./app.js?v=4.1.0"></script>
+  <script src="./app.js?v=4.6.2"></script>
 </body>
 </html>

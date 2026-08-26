@@ -3,9 +3,9 @@ from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import yaml
-from astrbot.api.message_components import Image, Plain
 
-from main import NAIGenerateImagePlugin
+from astrbot.api.message_components import Image, Plain
+from main import NAIGenerateImagePlugin, _format_generate_error
 
 
 async def collect_results(generator):
@@ -28,6 +28,7 @@ class FakeCommandEvent:
 
 def make_command_plugin(reply_mode: str, generate_result):
     plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.call_mode = "direct"
     plugin.bot_reply_mode = reply_mode
     plugin.image_gen_key = "test-token"
     plugin.image_count = 1
@@ -84,10 +85,10 @@ def test_image_only_mode_keeps_generation_errors():
 def test_image_command_passes_all_generation_overrides():
     plugin = make_command_plugin("仅图片", (b"test-image-bytes", "ok"))
     event = FakeCommandEvent(
-        'image 1girl, solo --style=自定义 --size=landscape --steps=28 '
-        '--scale=6.5 --cfg=0.3 --sampler=k_euler_ancestral '
-        '--noise=exponential --translate=auto --template=off '
-        '--model=nai-diffusion-4-5-full '
+        "image 1girl, solo --style=自定义 --size=landscape --steps=28 "
+        "--scale=6.5 --cfg=0.3 --sampler=k_euler_ancestral "
+        "--noise=exponential --translate=auto --template=off "
+        "--model=nai-diffusion-4-5-full "
         '--artist="best quality, artist:foo" '
         '--negative="bad anatomy, blurry"'
     )
@@ -120,6 +121,55 @@ def test_image_command_rejects_unknown_argument_without_generating():
 
     assert results == [("plain", "参数错误：未知参数: --unknown。")]
     plugin._generate_one.assert_not_awaited()
+
+
+def test_image_command_rejects_char_argument_outside_openai_mode():
+    plugin = make_command_plugin("完整", (b"test-image-bytes", "ok"))
+    event = FakeCommandEvent('2girls --char="1girl|0.3|0.5"')
+
+    results = asyncio.run(collect_results(plugin.image(event)))
+
+    assert len(results) == 1
+    assert results[0][0] == "plain"
+    assert "--char" in results[0][1]
+    plugin._generate_one.assert_not_awaited()
+
+
+def test_image_command_passes_characters_to_openai_generate():
+    plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.call_mode = "openai"
+    plugin.bot_reply_mode = "仅图片"
+    plugin.openai_api_base_url = "https://example.invalid/v1"
+    plugin.openai_api_key = "test-key"
+    plugin.image_count = 1
+    plugin.image_style = "custom"
+    plugin.image_size = "竖图"
+    plugin.steps = 24
+    plugin.scale = 6
+    plugin.cfg_value = 7.0
+    plugin.sampler = "k_dpmpp_2m_sde"
+    plugin.noise_schedule = "karras"
+    plugin.negative = ""
+    plugin.model = "nai-diffusion-4-5-full"
+    plugin.translate_mode = "关闭"
+    plugin.enable_template = False
+    plugin.custom_artists = ""
+    plugin._openai_generate = AsyncMock(return_value=([b"test-image-bytes"], "ok"))
+    event = FakeCommandEvent(
+        '2girls --char="1girl, red dress|0.3|0.5" --char="1boy|0.7|0.5"'
+    )
+
+    results = asyncio.run(collect_results(plugin.image(event)))
+
+    assert len(results) == 1
+    result_type, chain = results[0]
+    assert result_type == "chain"
+    assert isinstance(chain[0], Image)
+    plugin._openai_generate.assert_awaited_once()
+    assert plugin._openai_generate.await_args.kwargs["characters"] == (
+        ("1girl, red dress", 0.3, 0.5),
+        ("1boy", 0.7, 0.5),
+    )
 
 
 def test_generate_one_uses_overrides_in_request_and_history():
@@ -479,7 +529,9 @@ def test_outfit_cache_switch_on_writes_and_reuses_cache():
     assert source == "prompt"
     assert plugin.outfit_cache_text and "红色连衣裙" in plugin.outfit_cache_text
 
-    cached_ctx, source, use_default = plugin._resolve_outfit("a girl standing in the rain")
+    cached_ctx, source, use_default = plugin._resolve_outfit(
+        "a girl standing in the rain"
+    )
     assert cached_ctx == plugin.outfit_cache_text
     assert source == "cache"
     assert use_default is False
@@ -610,3 +662,24 @@ def test_quota_command_requires_token():
     results = asyncio.run(collect_results(plugin.quota(event)))
 
     assert results == [("plain", "未配置 image_gen_key。")]
+
+
+def test_format_error_director_ref_rejected_gives_targeted_guidance():
+    msg = _format_generate_error("director_ref_rejected")
+
+    assert "精准参考" in msg
+    assert "未开通" in msg or "不兼容" in msg
+    assert "vibe" in msg
+
+    msg_with_detail = _format_generate_error(
+        "director_ref_rejected | 模型 nai-diffusion-4-5-full：参数校验失败"
+    )
+    assert "详情: 模型 nai-diffusion-4-5-full：参数校验失败" in msg_with_detail
+
+
+def test_format_error_generic_http_400_keeps_parameter_hint():
+    msg = _format_generate_error("http_400 | invalid image size")
+
+    assert "HTTP 400" in msg
+    assert "参数错误" in msg
+    assert "详情: invalid image size" in msg

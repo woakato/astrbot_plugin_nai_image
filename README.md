@@ -1,9 +1,19 @@
 # astrbot-plugin-nai-image
 
 基于(NovelAI) 的 AstrBot 生图插件。
-### 注意本插件暂时不支持参考图
+### 调用模式
 
-> 🆕 **v2.3.0 直连联动**：陪伴插件「我会永远陪着你」的生图后端可直接选择 **「只用 NAI 生图插件（直连）」**，进程内调用本插件扩展接口、无需本地代理，支持英文自然语言直接生图（不转译）。详见下方「联动插件」一节；旧的 8765 本地代理方式仍可用。
+> 插件设置第一项 **「调用模式」** 决定聊天调用（`/image` 指令、陪伴联动）走哪套后端，二选一：
+> - **传统 GET（nai.sta1n.cn）**：显示「生图 Token」「生图服务地址」等字段，文生图走 `GET /generate`；
+> - **OpenAI 兼容（/v1/images）**：显示「OpenAI 兼容生图接口地址」「密钥」「模型名」等字段，文生图走 `POST /v1/images/generations`。有参考图时按「参考图模式」（`openai_reference_mode`）三选一：**Vibe 参考**（风格/角色参考，`reference_image_multiple`）、**img2img**（`POST /v1/images/edits` 图生图重绘）、**精准参考 director**（`director_reference_*`，建议搭配 nai-diffusion-4-5 系列模型；描述词 `openai_director_caption` 可选 `character&style` / `character` / `style`）。
+>
+> 面板里的「调用格式」是独立测试入口，可临时切换两种格式；OpenAI 兼容格式支持本地上传参考图。陪伴联动传参考图时按全局调用模式路由。
+
+> 🆕 **v2.3.0 直连联动**：陪伴插件「我会永远陪着你」的生图后端可直接选择 **「只用 NAI 生图插件（直连）」**，进程内调用本插件扩展接口、无需本地代理，支持英文自然语言直接生图（不转译）。详见下方「联动插件」一节；旧的 8765 本地代理方式仍可用。v2.3.4 起直连模式已支持接收陪伴插件传来的参考图并路由到 OpenAI 兼容格式图生图。
+
+> 🆕 **v2.4.0 OpenAI 兼容接口全面对齐**：`/v1/images/generations` 与 `/v1/images/edits` 按接口文档对齐——高级参数（`steps`/`scale`/`sampler`/`noise_schedule`/`seed`/`negative_prompt`）统一放入 `parameters` 对象；参考图支持 **Vibe 参考**（`reference_image_multiple` 数组）、**img2img 图生图** 与 **精准参考 director**（`director_reference_*`，§6）三种模式（配置项「参考图模式」+「精准参考描述」）；新增 **多角色坐标控制**（`use_coords`/`characterPrompts`/`v4_prompt`，§7），聊天指令用可重复的 `--char="提示词|x|y"`，面板可动态添加角色行；超限参考图自动等比缩小（最长边 1920 / 面积 3686400 内），参考图统一以 Data URI 提交；新增「随机种子」「请求超时」「失败重试次数」配置；仅对 408/429/502/503/504、超时及上游"服务繁忙"类瞬时错误按 2/4/8 秒退避重试。本地代理的 `/v1/images/edits` 同时支持 JSON 与 multipart 请求。测试面板新增参考图模式、精准参考描述、噪声强度、种子、多角色坐标与 **director-tools 工具**（抠图/线稿/草图/上色/情绪/清理）入口。
+
+> ⚠️ **精准参考使用说明**：精准参考（director）仅支持 `nai-diffusion-4-5-full` / `nai-diffusion-4-5-curated`（插件在其他模型下会自动切换到 4-5-full）；`director_reference_information_extracted` 必须为 `1.0`，其他取值会被上游参数校验拒绝（HTTP 400），插件已按此固定。
 
 ## 指令
 
@@ -35,6 +45,12 @@
 /image 1girl, solo --style=custom --artist="best quality, artist:foo" --negative="bad anatomy, blurry, text"
 ```
 
+多角色坐标控制（仅 OpenAI 兼容调用模式，`--char` 可重复，坐标 0-1，x 从左到右、y 从上到下，最多 6 个，建议搭配横图）：
+
+```text
+/image 2girls, school uniform --char="1girl, red dress|0.3|0.5" --char="1boy, blue suit|0.7|0.5"
+```
+
 | 参数 | 取值 | 说明 |
 | --- | --- | --- |
 | `--n` | `1-6` | 生成数量 |
@@ -44,14 +60,15 @@
 | `--scale` | `0-20` 数字 | 提示词引导强度 |
 | `--cfg` | `0-30` 数字 | CFG Rescale，支持小数和 `0` |
 | `--sampler` | 固定采样器名 | 与配置面板可选值一致 |
-| `--noise` | `karras` / `native` / `exponential` | `--noise_schedule` 是等价别名 |
+| `--noise` | `karras` / `native` / `exponential` / `polyexponential` | `--noise_schedule` 是等价别名 |
 | `--translate` | `关闭/off` / `开启/on` / `自动/auto` | 单次覆盖转译模式 |
 | `--template` | `关闭/off` / `开启/on` | 单次决定是否拼接角色预设 |
 | `--model` | 模型名 | 仅允许字母、数字、点、下划线和连字符 |
 | `--artist` | 画师串 | 仅在有效风格为 `custom` / `自定义` 时可用 |
 | `--negative` | 反向提示词 | 可使用 `--negative=""` 清空当次反向提示词 |
+| `--char` | `提示词\|x\|y`，可重复 | 多角色坐标控制（仅 OpenAI 兼容调用模式）；坐标 0-1，最多 6 个 |
 
-采样器可选：`k_dpmpp_2m_sde` / `k_dpmpp_2m` / `k_dpmpp_sde` / `k_dpmpp_2s_ancestral` / `k_euler_ancestral` / `k_euler`。未知参数、重复参数、超出范围或未闭合引号会直接报错，不会发起生图请求。
+采样器可选：`k_dpmpp_2m_sde` / `k_dpmpp_2m` / `k_dpmpp_sde` / `k_dpmpp_2s_ancestral` / `k_euler_ancestral` / `k_euler` / `ddim`。未知参数、重复参数、超出范围或未闭合引号会直接报错，不会发起生图请求。
 
 `bot_reply_mode` 控制 `/image` 指令的回复内容：
 
@@ -171,7 +188,7 @@ graph TD
 **行为说明**
 
 - 生成图片保存到 `data/plugin_data/astrbot_plugin_nai_image/companion_images/`，并按 `companion_image_retention_days` 自动清理（0 表示不清理）；
-- 直连是纯文生图：陪伴侧传过来的参考图会被忽略；`size` / `ratio` / `style` 未传或无法识别时使用本插件的默认尺寸与风格，常见的 `1024x1024`、`9:16` 等写法会自动归一化；
+- 直连已支持参考图：陪伴侧传过来的 `reference_image_path`（或 `reference_image_paths` 首项）会被接收；若插件配置了 OpenAI 兼容格式站点（`openai_api_base_url`），则自动路由到该站点的图生图接口（`/v1/images/edits`），否则回退 NAI 直连文生图；`size` / `ratio` / `style` 未传或无法识别时使用本插件的默认尺寸与风格，常见的 `1024x1024`、`9:16` 等写法会自动归一化；
 - 陪伴面板里仅对"我会画给你看"/本地后端生效的配置（参考图一致性、生图风格、负面提示词等）在选择直连后会自动隐藏，统一在本插件里配置；
 - 能力查询只做本地就绪判断（token 与会话），不再在线探测上游，因此响应即时；上游真实失败会在生图结果里明确返回，不会假装出图；
 - 直连不依赖本地代理：本地代理由「启用本地 OpenAI 兼容代理」独立控制（默认开启；仅影响下方"方式二"）；

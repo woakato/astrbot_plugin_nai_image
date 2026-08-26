@@ -1,15 +1,143 @@
 {
+    "call_mode": {
+        "type": "string",
+        "default": "direct",
+        "description": "调用模式",
+        "hint": "决定聊天调用（指令 / 陪伴联动）走哪套生图后端。",
+        "options": [
+            "direct",
+            "openai"
+        ],
+        "labels": [
+            "传统 GET（nai.sta1n.cn）",
+            "OpenAI 兼容（/v1/images）"
+        ],
+        "obvious": true
+    },
+    "openai_api_base_url": {
+        "type": "string",
+        "default": "",
+        "description": "OpenAI 兼容生图接口地址",
+        "hint": "例如 https://api1.syuan.org。聊天调用 / 陪伴联动 / 面板「OpenAI 兼容」格式使用此地址。",
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_api_key": {
+        "type": "string",
+        "default": "",
+        "description": "OpenAI 兼容接口密钥",
+        "hint": "OpenAI 兼容格式的 Bearer Token。",
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_api_model": {
+        "type": "string",
+        "default": "nai-diffusion-5-full",
+        "description": "OpenAI 兼容接口模型名",
+        "hint": "接口必填字段。nai-diffusion-5-full 为文档推荐的通用动漫插画模型；需要精准参考等 4.5 能力时选 nai-diffusion-4-5-full。director-tools（图片处理）由面板动作自动选用，无需在此配置。",
+        "options": [
+            "nai-diffusion-5-full",
+            "nai-diffusion-5-curated",
+            "nai-diffusion-4-5-full",
+            "nai-diffusion-4-5-curated",
+            "nai-diffusion-4-full",
+            "nai-diffusion-4-curated-preview",
+            "nai-diffusion-3",
+            "nai-diffusion-furry-3"
+        ],
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_reference_mode": {
+        "type": "string",
+        "default": "vibe",
+        "description": "参考图使用模式",
+        "hint": "vibe：参考图走 generations 的 reference_image_multiple 做风格/角色参考（§5）；img2img：参考图走 /v1/images/edits 做图生图重绘（§4）；director：精准参考，走 generations 的 director_reference_* 参数（§6，建议配合 nai-diffusion-4-5 系列模型）。本地代理的 edits 端点始终按 img2img 处理。",
+        "options": [
+            "vibe",
+            "img2img",
+            "director"
+        ],
+        "labels": [
+            "Vibe 参考（风格/角色参考）",
+            "img2img（图生图重绘）",
+            "精准参考（director）"
+        ],
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_director_caption": {
+        "type": "string",
+        "default": "character&style",
+        "description": "精准参考描述",
+        "hint": "精准参考（director 模式）的 base_caption（§6），决定从参考图保留哪些信息，常见取值：character&style、character、style。面板可临时覆盖。",
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_director_fallback_images": {
+        "type": "file",
+        "default": [],
+        "description": "精准参考兜底参考图",
+        "hint": "参考图使用模式为「精准参考」时，若请求没有携带参考图（聊天指令、陪伴插件联动等场景），自动使用这里的第一张图作为精准参考图；留空则照旧提示需要参考图。支持 png/jpg/webp。",
+        "file_types": ["png", "jpg", "jpeg", "webp"],
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_seed": {
+        "type": "int",
+        "default": -1,
+        "description": "随机种子",
+        "hint": "-1 表示每次随机（不发送 seed 字段）；填入非负整数可固定种子复现画面。面板可临时覆盖。",
+        "min": -1,
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_timeout": {
+        "type": "int",
+        "default": 180,
+        "description": "请求超时（秒）",
+        "hint": "OpenAI 兼容生图单次请求的超时时间，范围 30-600 秒。大尺寸或上游繁忙时可调大。",
+        "min": 30,
+        "max": 600,
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_max_retries": {
+        "type": "int",
+        "default": 2,
+        "description": "失败重试次数",
+        "hint": "对 408/429/502/503/504 与超时按 2/4/8 秒指数退避重试；400/401/403 不重试。设为 0 不重试。",
+        "min": 0,
+        "max": 3,
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
     "image_gen_key": {
         "type": "string",
         "default": "",
         "description": "生图 Token",
         "hint": "必填。在 nai.sta1n.cn 申请到的 toUserId。",
-        "obvious": true
+        "obvious": true,
+        "condition": {
+            "call_mode": "direct"
+        }
     },
     "base_url": {
         "type": "string",
         "default": "https://nai.sta1n.cn",
-        "description": "生图服务地址"
+        "description": "生图服务地址",
+        "condition": {
+            "call_mode": "direct"
+        }
     },
     "image_style": {
         "type": "string",
@@ -148,12 +276,14 @@
     "steps": {
         "type": "int",
         "default": 24,
-        "description": "采样步数"
+        "description": "采样步数",
+        "hint": "OpenAI 兼容模式按接口文档限制在 1-50，超出部分自动收敛。"
     },
     "scale": {
         "type": "int",
         "default": 6,
-        "description": "scale"
+        "description": "scale",
+        "hint": "提示词引导强度。OpenAI 兼容模式按接口文档限制在 0-10，超出部分自动收敛。"
     },
     "cfg": {
         "type": "float",
@@ -167,19 +297,28 @@
         "type": "string",
         "default": "k_dpmpp_2m_sde",
         "description": "采样器",
+        "hint": "ddim 仅适用于 nai-diffusion-3 模型。",
         "options": [
             "k_dpmpp_2m_sde",
             "k_dpmpp_2m",
             "k_dpmpp_sde",
             "k_dpmpp_2s_ancestral",
             "k_euler_ancestral",
-            "k_euler"
+            "k_euler",
+            "ddim"
         ]
     },
     "noise_schedule": {
         "type": "string",
         "default": "karras",
-        "description": "噪声调度"
+        "description": "噪声调度",
+        "hint": "native 仅适用于 nai-diffusion-3 模型。",
+        "options": [
+            "karras",
+            "exponential",
+            "polyexponential",
+            "native"
+        ]
     },
     "negative": {
         "type": "string",

@@ -15,8 +15,9 @@ SAMPLERS = {
     "k_dpmpp_2s_ancestral",
     "k_euler_ancestral",
     "k_euler",
+    "ddim",
 }
-NOISE_SCHEDULES = {"karras", "native", "exponential"}
+NOISE_SCHEDULES = {"karras", "native", "exponential", "polyexponential"}
 
 _ARGUMENT_NAMES = {
     "n",
@@ -33,6 +34,7 @@ _ARGUMENT_NAMES = {
     "model",
     "artist",
     "template",
+    "char",
 }
 _ARGUMENT_NAME_ALIASES = {"noise_schedule": "noise"}
 _STYLE_ALIASES = {
@@ -158,6 +160,9 @@ class ImageCommandArguments:
     model: str | None = None
     artist: str | None = None
     enable_template: bool | None = None
+    # 多角色坐标（--char，§7）：(提示词, x, y) 元组序列，坐标 0-1；
+    # 仅 OpenAI 兼容模式可用，因此不进入传统 GET 的 generation_overrides。
+    characters: tuple[tuple[str, float, float], ...] | None = None
 
     def generation_overrides(self) -> dict[str, object]:
         """转换为 `_generate_one` 可直接接收的单次覆盖参数。
@@ -222,14 +227,15 @@ def _read_quoted_value(text: str, start: int, name: str) -> tuple[str, int]:
     raise ImageCommandArgumentError(f"参数 --{name} 的引号未闭合。")
 
 
-def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
+def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str], list[str]]:
     """从指令文本中抽取 ``--名称=值``，其余内容作为提示词返回。
 
     扫描器只识别位于空白边界、且不在提示词引号内的参数。参数先在这里
     完成词法解析，具体类型、范围和枚举值由 :func:`parse_image_command`
-    统一校验。
+    统一校验。``--char``（多角色）允许重复指定，单独收集为列表返回。
     """
     values: dict[str, str] = {}
+    char_values: list[str] = []
     prompt_parts: list[str] = []
     copy_from = 0
     index = 0
@@ -285,7 +291,7 @@ def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
             )
 
         canonical_name = _ARGUMENT_NAME_ALIASES.get(name, name)
-        if canonical_name in values:
+        if canonical_name != "char" and canonical_name in values:
             raise ImageCommandArgumentError(f"参数 --{canonical_name} 不能重复指定。")
 
         value_start = name_end + 1
@@ -301,11 +307,14 @@ def _extract_raw_arguments(text: str) -> tuple[str, dict[str, str]]:
         prompt_parts.append(text[copy_from:index])
         prompt_parts.append(" ")
         copy_from = argument_end
-        values[canonical_name] = value
+        if canonical_name == "char":
+            char_values.append(value)
+        else:
+            values[canonical_name] = value
         index = argument_end
 
     prompt_parts.append(text[copy_from:])
-    return normalize_prompt("".join(prompt_parts)), values
+    return normalize_prompt("".join(prompt_parts)), values, char_values
 
 
 def _parse_int(
@@ -357,7 +366,40 @@ def parse_image_command(
     做语义校验。``default_style`` 仅用于判断未显式指定风格时，画师串是否
     允许覆盖自定义风格。
     """
-    prompt, values = _extract_raw_arguments(text)
+    prompt, values, char_values = _extract_raw_arguments(text)
+
+    characters = None
+    if char_values:
+        if len(char_values) > 6:
+            raise ImageCommandArgumentError("参数 --char 最多指定 6 个角色。")
+        parsed_chars: list[tuple[str, float, float]] = []
+        for idx, raw in enumerate(char_values, start=1):
+            # 提示词内可能出现 "|"，因此从右侧切出最后两段坐标。
+            parts = raw.rsplit("|", 2)
+            if len(parts) != 3:
+                raise ImageCommandArgumentError(
+                    f"参数 --char 第 {idx} 项格式应为 提示词|x|y（坐标 0-1）。"
+                )
+            char_prompt = normalize_prompt(parts[0])
+            if not char_prompt:
+                raise ImageCommandArgumentError(
+                    f"参数 --char 第 {idx} 项的提示词不能为空。"
+                )
+            coords: list[float] = []
+            for label, part in (("x", parts[1]), ("y", parts[2])):
+                try:
+                    coord = float(part.strip())
+                except ValueError as exc:
+                    raise ImageCommandArgumentError(
+                        f"参数 --char 第 {idx} 项的坐标 {label} 必须是数字。"
+                    ) from exc
+                if not math.isfinite(coord) or not 0 <= coord <= 1:
+                    raise ImageCommandArgumentError(
+                        f"参数 --char 第 {idx} 项的坐标 {label} 取值范围为 0-1。"
+                    )
+                coords.append(coord)
+            parsed_chars.append((char_prompt, coords[0], coords[1]))
+        characters = tuple(parsed_chars)
 
     style = None
     if "style" in values:
@@ -388,7 +430,7 @@ def parse_image_command(
         noise_schedule = values["noise"].strip().casefold()
         if noise_schedule not in NOISE_SCHEDULES:
             raise ImageCommandArgumentError(
-                "参数 --noise 无效，可选: karras, native, exponential。"
+                f"参数 --noise 无效，可选: {', '.join(sorted(NOISE_SCHEDULES))}。"
             )
 
     translate_mode = None
@@ -445,4 +487,5 @@ def parse_image_command(
         model=model,
         artist=artist,
         enable_template=enable_template,
+        characters=characters,
     )

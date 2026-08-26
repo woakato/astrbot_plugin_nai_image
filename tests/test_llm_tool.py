@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import mcp
+
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Image, Plain
 from astrbot.core.agent.hooks import BaseAgentRunHooks
@@ -12,7 +13,6 @@ from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest, TokenUsage
 from astrbot.core.provider.provider import Provider
-
 from main import NAIGenerateImagePlugin
 
 
@@ -36,6 +36,7 @@ class FakeEvent:
 
 def make_plugin(generate_result):
     plugin = object.__new__(NAIGenerateImagePlugin)
+    plugin.call_mode = "direct"
     plugin.enable_llm_tool = True
     plugin.image_gen_key = "test-token"
     plugin._generate_one = AsyncMock(return_value=generate_result)
@@ -136,9 +137,7 @@ def test_llm_tool_passes_supported_sizes_to_api_unchanged():
         event = FakeEvent()
 
         results = asyncio.run(
-            collect_results(
-                plugin.NAI_Generate_Image(event, "1girl", "anime", size_cn)
-            )
+            collect_results(plugin.NAI_Generate_Image(event, "1girl", "anime", size_cn))
         )
 
         assert results == ["图片已生成并发送给用户，请根据本次请求继续回复。"]
@@ -199,9 +198,7 @@ def test_llm_tool_blocks_concurrent_generation_in_same_event():
 
     async def run_calls():
         first_task = asyncio.create_task(
-            collect_results(
-                plugin.NAI_Generate_Image(event, "1girl", "anime", "方图")
-            )
+            collect_results(plugin.NAI_Generate_Image(event, "1girl", "anime", "方图"))
         )
         await started.wait()
         second_results = await collect_results(

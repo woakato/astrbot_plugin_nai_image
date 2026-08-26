@@ -1,5 +1,4 @@
 import pytest
-
 from command_args import (
     ImageCommandArgumentError,
     parse_image_command,
@@ -24,10 +23,10 @@ def test_strip_image_command_prefix_only_removes_leading_command(text, expected)
 
 def test_parse_all_generation_overrides_with_quoted_values():
     parsed = parse_image_command(
-        '1girl, solo --n=2 --style=custom --size=portrait --cfg=0.3 '
-        '--scale=6.5 --steps=28 --sampler=k_euler_ancestral '
-        '--noise=karras --translate=auto --template=off '
-        '--model=nai-diffusion-4-5-full '
+        "1girl, solo --n=2 --style=custom --size=portrait --cfg=0.3 "
+        "--scale=6.5 --steps=28 --sampler=k_euler_ancestral "
+        "--noise=karras --translate=auto --template=off "
+        "--model=nai-diffusion-4-5-full "
         '--artist="best quality, artist:foo" '
         '--negative="bad anatomy, blurry, text"',
         default_style="vertical",
@@ -62,7 +61,13 @@ def test_parse_all_generation_overrides_with_quoted_values():
 
 
 @pytest.mark.parametrize(
-    ("text", "expected_style", "expected_size", "expected_translate", "expected_template"),
+    (
+        "text",
+        "expected_style",
+        "expected_size",
+        "expected_translate",
+        "expected_template",
+    ),
     [
         (
             "1girl --style=自定义 --size=2K横图 --translate=自动 --template=关闭",
@@ -164,3 +169,56 @@ def test_artist_is_allowed_when_config_default_style_is_custom():
     )
 
     assert parsed.artist == "best quality, artist:foo"
+
+
+def test_char_argument_parses_multiple_characters_with_coordinates():
+    parsed = parse_image_command(
+        '2girls --char="1girl, red dress|0.3|0.5" --char="1boy, blue suit |0.7|0.5"',
+        default_style="vertical",
+    )
+
+    assert parsed.prompt == "2girls"
+    assert parsed.characters == (
+        ("1girl, red dress", 0.3, 0.5),
+        ("1boy, blue suit", 0.7, 0.5),
+    )
+    # 坐标控制仅 OpenAI 兼容模式可用，不进入传统直连的覆盖参数
+    assert "characters" not in parsed.generation_overrides()
+
+
+def test_char_argument_is_allowed_unquoted_and_keeps_inner_pipes():
+    parsed = parse_image_command(
+        "1girl --char=a|b|0.2|0.8",
+        default_style="vertical",
+    )
+
+    assert parsed.characters == (("a|b", 0.2, 0.8),)
+
+
+def test_char_argument_without_any_char_leaves_characters_none():
+    parsed = parse_image_command("1girl --steps=28", default_style="vertical")
+
+    assert parsed.characters is None
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("1girl --char=only_prompt", "提示词\\|x\\|y"),
+        ("1girl --char=a|b", "提示词\\|x\\|y"),
+        ("1girl --char=a|x|0.5", "坐标 x 必须是数字"),
+        ("1girl --char=a|0.5|y", "坐标 y 必须是数字"),
+        ("1girl --char=a|1.5|0.5", "取值范围为 0-1"),
+        ("1girl --char=a|0.5|-0.1", "取值范围为 0-1"),
+        ("1girl --char=a|nan|0.5", "取值范围为 0-1"),
+        ('1girl --char="|0.5|0.5"', "提示词不能为空"),
+        (
+            "1girl --char=a|0|0 --char=b|0|0 --char=c|0|0 --char=d|0|0 "
+            "--char=e|0|0 --char=f|0|0 --char=g|0|0",
+            "最多指定 6 个",
+        ),
+    ],
+)
+def test_invalid_char_arguments_are_rejected(text, message):
+    with pytest.raises(ImageCommandArgumentError, match=message):
+        parse_image_command(text, default_style="vertical")

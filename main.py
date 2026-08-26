@@ -3,7 +3,7 @@ import base64
 import mimetypes
 import re
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
@@ -232,6 +232,59 @@ IMAGE_SIZES = {
     "4K方图": "4k_square",
 }
 
+# OpenAI 兼容接口的模型列表（对齐接口文档 §9）。
+OPENAI_COMPATIBLE_MODELS = [
+    "nai-diffusion-5-full",
+    "nai-diffusion-5-curated",
+    "nai-diffusion-4-5-full",
+    "nai-diffusion-4-5-curated",
+    "nai-diffusion-4-full",
+    "nai-diffusion-4-curated-preview",
+    "nai-diffusion-3",
+    "nai-diffusion-furry-3",
+]
+
+# director-tools 图片处理动作（对齐接口文档 §8）。
+OPENAI_DIRECTOR_ACTIONS = {
+    "bg-removal": "去除背景",
+    "lineart": "提取线稿",
+    "sketch": "生成草图",
+    "colorize": "线稿上色",
+    "emotion": "调整人物表情",
+    "declutter": "清理画面元素",
+}
+
+# 支持精准参考（director_reference_*）的 NAI 4.5 模型集合（新文档 §8.1）。
+# 其他模型携带精准参考字段会被服务端直接 400 拒绝。
+OPENAI_DIRECTOR_MODELS = {
+    "nai-diffusion-4-5-full",
+    "nai-diffusion-4-5-curated",
+    "nai45",
+    "nai45-curated",
+}
+
+# 精准参考 base_caption 仅允许的枚举值（新文档 §8.4）。
+OPENAI_DIRECTOR_CAPTIONS = ("character", "style", "character&style")
+
+# OpenAI 兼容生图允许自动重试的状态码（对齐接口文档 §14）；
+# 400/401/403 一律不重试，重试间隔为 2/4/8 秒指数退避。
+OPENAI_RETRYABLE_STATUS = {408, 429, 502, 503, 504}
+OPENAI_RETRY_DELAYS = (2.0, 4.0, 8.0)
+
+# 中转网关会把 NovelAI 上游的瞬时故障（如 vibe 编码"服务繁忙"）包装成
+# HTTP 400（type=bad_response_status_code），错误文案本身提示"请稍后重试"；
+# 错误信息命中下列任一关键词时，即便状态码不可重试也按可重试处理。
+OPENAI_TRANSIENT_MARKERS = (
+    "服务繁忙",
+    "请稍后重试",
+    "稍后再试",
+    "try again later",
+    "service busy",
+    "temporarily unavailable",
+    "too many requests",
+    "overloaded",
+)
+
 DEFAULT_ARTISTS = {
     "vertical": "[[[artist:dishwasher1910]]], {{yd_(orange_maru)}}, [artist:ciloranko], [artist:sho_(sho_lwlw)], [ningen mame], year 2024,",
     "comicDoujin": (
@@ -294,28 +347,68 @@ DEFAULT_NEGATIVE = (
 
 
 def _format_generate_error(reason: str) -> str:
-    """把 _generate_one 返回的 reason 翻译成给用户的中文报错。"""
+    """把生图方法返回的 reason 翻译成给用户的中文报错。"""
     _map = {
         "no_token": "❌ 插件未配置 image_gen_key，请先在插件管理面板填入 token。",
         "no_session": "❌ 插件 session 未初始化，请重载插件。",
-        "timeout": "⏱ 生图超时（超过 180 秒）。可能原因：nai.sta1n.cn 服务繁忙、提示词过长、或网络不稳。",
+        "openai_not_configured": (
+            "❌ 未配置 OpenAI 兼容生图接口地址（openai_api_base_url），"
+            "请先在插件设置中填写。"
+        ),
+        "timeout": "⏱ 生图超时。上游可能仍在生成（可能已扣费），请稍后手动重试；若频繁超时可在设置中调大「请求超时」。",
         "empty_response": "📭 上游返回 200 但内容为空，可能是接口限流或临时异常。",
+        "invalid_response": "📭 上游响应不是有效 JSON，请检查接口地址是否正确或查看日志。",
+        "no_reference_image": "🖼 该操作需要输入一张源图片（参考图/待处理图），请先提供图片。",
         "exception": "💥 生图过程发生未捕获异常，请查看 AstrBot 日志获取详情。",
     }
     # 精确匹配
     if reason in _map:
         return _map[reason]
-    # 前缀匹配（reason 可能带详细错误信息，如 "http_4xx (HTTP 400): ..."）
+    # 精准参考（§6）被上游拒绝：参数已按文档格式提交，多为能力未开通
+    if reason.startswith("director_ref_rejected"):
+        detail = reason.split(" | ", 1)[1] if " | " in reason else ""
+        msg = (
+            "🚫 精准参考（director）被上游拒绝：参数已按接口文档 §6 格式提交，"
+            "中转/上游仍判定参数校验失败。这通常表示当前 Key 未开通精准参考能力，"
+            "或该中转站的 director 转换暂不兼容（文档 §6：若模型不支持该能力，"
+            "服务会返回参数错误或模型能力错误）。建议联系服务方确认是否已开通"
+            "精准参考；在此之前可改用 vibe 参考或 img2img 模式。"
+        )
+        if detail:
+            msg += f"\n详情: {detail}"
+        return msg
+    # OpenAI 兼容模式的具体状态码（形如 "http_400 | invalid image size"）
+    _status_match = re.match(r"http_(\d{3})", reason)
+    if _status_match:
+        status = int(_status_match.group(1))
+        detail = reason.split(" | ", 1)[1] if " | " in reason else ""
+        _status_hints = {
+            400: "参数错误（JSON / 模型 / 尺寸 / 步数 / 图片参数），请按提示修正字段",
+            401: "API Key 无效、缺失或过期，请检查 openai_api_key",
+            403: "当前 Key 没有使用权限，请联系服务管理员",
+            408: "请求超时",
+            429: "请求过于频繁或余额不足，请稍后重试或充值",
+            500: "服务内部处理失败",
+            502: "暂时无法完成生成，请稍后重试",
+            503: "暂时无法完成生成，请稍后重试",
+            504: "请求超时",
+        }
+        hint = _status_hints.get(
+            status,
+            "4xx 参数或鉴权错误" if status < 500 else "5xx 服务端异常",
+        )
+        suffix = f"\n详情: {detail}" if detail else ""
+        return f"🚫 上游返回 HTTP {status}：{hint}。{suffix}"
+    # 前缀匹配（传统直连模式 reason，如 "http_4xx (HTTP 400): ..."）
     if reason.startswith("http_4xx"):
         return (
-            "🚫 上游返回 4xx。常见原因：token 无效、提示词含敏感词、或参数不合法。\n"
+            "🚫 上游返回 4xx。常见原因：密钥无效、提示词含敏感词、或参数不合法。\n"
             + reason
         )
     if reason.startswith("http_5xx"):
-        return "🔥 上游返回 5xx。nai.sta1n.cn 服务器内部错误，请稍后重试。\n" + reason
+        return "🔥 上游返回 5xx（服务端异常/繁忙）。\n" + reason
     if reason.startswith("http_other"):
         return "⚠️ 上游返回非预期状态码。\n" + reason
-    return "❓ 生图失败（原因: " + reason + "）"
     return f"❓ 生图失败（原因: {reason}）"
 
 
@@ -504,6 +597,62 @@ class NAIGenerateImagePlugin(Star):
         self.negative: str = neg if neg else DEFAULT_NEGATIVE
         self.enable_template: bool = bool(config.get("enable_template", True))
         self.character_preset: str = (config.get("character_preset") or "").strip()
+        # 调用模式：direct（传统 GET nai.sta1n.cn）/ openai（OpenAI 兼容站点）
+        self.call_mode: str = (config.get("call_mode") or "direct").strip()
+        if self.call_mode not in ("direct", "openai"):
+            self.call_mode = "direct"
+        # OpenAI 兼容格式（可配置的第三方 OpenAI 兼容生图站点）
+        self.openai_api_base_url: str = (
+            (config.get("openai_api_base_url") or "").strip().rstrip("/")
+        )
+        self.openai_api_key: str = (config.get("openai_api_key") or "").strip()
+        # model 为接口必填字段，留空时回退文档推荐的 nai-diffusion-5-full。
+        self.openai_api_model: str = (
+            config.get("openai_api_model") or "nai-diffusion-5-full"
+        ).strip() or "nai-diffusion-5-full"
+        # 参考图模式：vibe（风格参考，走 generations 的 reference_* 参数）、
+        # img2img（图生图，走 /v1/images/edits）或 director（精准参考，走
+        # generations 的 director_reference_* 参数，§6）。
+        self.openai_reference_mode: str = (
+            (config.get("openai_reference_mode") or "vibe").strip().casefold()
+        )
+        if self.openai_reference_mode not in ("img2img", "vibe", "director"):
+            self.openai_reference_mode = "vibe"
+        # 精准参考描述（新文档 §8.4 的 base_caption），仅三个枚举值合法
+        self.openai_director_caption: str = str(
+            config.get("openai_director_caption") or "character&style"
+        ).strip()
+        if self.openai_director_caption not in OPENAI_DIRECTOR_CAPTIONS:
+            self.openai_director_caption = "character&style"
+        # 精准参考兜底参考图：director 模式下请求未携带参考图（聊天指令/陪伴
+        # 联动等场景）时，取此处第一个存在的文件。配置值为文件路径列表。
+        _fb_cfg = config.get("openai_director_fallback_images") or []
+        if isinstance(_fb_cfg, str):
+            _fb_cfg = [_fb_cfg]
+        self.openai_director_fallback_images: list[str] = [
+            str(p).strip() for p in _fb_cfg if str(p or "").strip()
+        ]
+        # 随机种子：-1 表示每次随机（不发送 seed 字段）。
+        try:
+            _seed_cfg = config.get("openai_seed")
+            self.openai_seed: int = (
+                int(_seed_cfg) if _seed_cfg not in (None, "") else -1
+            )
+        except (TypeError, ValueError):
+            self.openai_seed = -1
+        try:
+            self.openai_timeout: int = max(
+                30, min(600, int(config.get("openai_timeout") or 180))
+            )
+        except (TypeError, ValueError):
+            self.openai_timeout = 180
+        try:
+            _retries_cfg = config.get("openai_max_retries")
+            self.openai_max_retries: int = max(
+                0, min(3, int(_retries_cfg) if _retries_cfg not in (None, "") else 2)
+            )
+        except (TypeError, ValueError):
+            self.openai_max_retries = 2
         self._session: aiohttp.ClientSession | None = None
         self.proxy_runner: web.AppRunner | None = None
         self.proxy_port: int = int(config.get("proxy_port") or PROXY_PORT)
@@ -600,7 +749,13 @@ class NAIGenerateImagePlugin(Star):
             f"companion_retention={self.companion_image_retention_days}d | "
             f"proxy={'ON' if self.enable_proxy else 'OFF'} "
             f"bypass_system_proxy={'ON' if self.bypass_system_proxy else 'OFF'} "
-            f"proxy_port={self.proxy_port}"
+            f"proxy_port={self.proxy_port} | "
+            f"call_mode={self.call_mode} "
+            f"openai: url={self.openai_api_base_url or '(未配置)'} "
+            f"key={'已配置' if self.openai_api_key else '未配置'} "
+            f"model={self.openai_api_model} "
+            f"ref_mode={self.openai_reference_mode} seed={self.openai_seed} "
+            f"timeout={self.openai_timeout}s retries={self.openai_max_retries}"
         )
 
     def _build_full_prompt(
@@ -783,6 +938,10 @@ class NAIGenerateImagePlugin(Star):
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=180),
                 trust_env=not self.bypass_system_proxy,
+                # force_close：每次请求新建连接。实测中转站偶发把复用的
+                # keep-alive 连接挂死（上游已出图但响应永不返回，直到
+                # 180s 超时），生图频率低，放弃连接复用换取稳定性。
+                connector=aiohttp.TCPConnector(force_close=True),
             )
             logger.info(
                 f"{LOG_TAG} [initialize] aiohttp session 创建成功 (timeout=180s, "
@@ -836,6 +995,12 @@ class NAIGenerateImagePlugin(Star):
                 self._test_panel_generate,
                 ["POST"],
                 "NAI 测试面板：生图测试",
+            )
+            self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/generate_openai",
+                self._test_panel_generate_openai,
+                ["POST"],
+                "NAI 测试面板：OpenAI 兼容格式生图（支持本地上传参考图）",
             )
             self.context.register_web_api(
                 f"{PAGE_API_PREFIX}/trial_status",
@@ -983,6 +1148,613 @@ class NAIGenerateImagePlugin(Star):
             return "", "none", True
 
         return "", "none", False
+
+    # ==== NAI 尺寸键 → OpenAI 兼容像素尺寸映射 ====
+    _OPENAI_SIZE_MAP = {
+        "方图": "1024x1024",
+        "竖图": "832x1216",
+        "横图": "1216x832",
+        "2K方图": "1472x1472",
+        "2K竖图": "1088x1920",
+        "2K横图": "1920x1088",
+        # OpenAI 兼容上游一般限制最大边 ≤1920、总面积 ≤3686400，
+        # 4K 键降级为 2K 上限尺寸，避免被接口以 invalid size 拒绝。
+        "4K方图": "1472x1472",
+        "4K竖图": "1088x1920",
+        "4K横图": "1920x1088",
+    }
+    _OPENAI_MAX_SIDE = 1920
+    _OPENAI_MAX_AREA = 3686400
+
+    def _openai_size(self, nai_size: str) -> str:
+        """把 NAI 尺寸键（竖图/方图/...）映射为 OpenAI 兼容的像素尺寸。
+
+        未映射的原始尺寸直接透传（如 "1024x1024" 或 "832x1216"）。
+        4K 键因上游边长限制降级为 2K 上限尺寸。
+        """
+        if str(nai_size).startswith("4K"):
+            logger.info(
+                f"{LOG_TAG} [openai_generate] OpenAI 兼容接口不支持 4K 尺寸，"
+                f"'{nai_size}' 已降级为 2K 上限尺寸"
+            )
+        return self._OPENAI_SIZE_MAP.get(nai_size, nai_size)
+
+    def _normalize_openai_size(self, size: str) -> str:
+        """把尺寸校正为满足接口契约的 ``WxH``。
+
+        契约（对齐接口文档 §10）：宽高为 64 的倍数，最大边不超过 1920，
+        总面积不超过 3686400。越界值按最近合法值收缩，无法识别的格式
+        回退 1024x1024。
+
+        Args:
+            size: 形如 "1024x1536" 的像素尺寸字符串。
+
+        Returns:
+            校正后的 "WxH" 字符串。
+        """
+        match = re.match(
+            r"^\s*(\d{1,5})\s*[x×]\s*(\d{1,5})\s*$", str(size), re.IGNORECASE
+        )
+        if not match:
+            logger.warning(
+                f"{LOG_TAG} [openai_generate] 无法识别的尺寸 '{size}'，回退 1024x1024"
+            )
+            return "1024x1024"
+        width = max(64, (int(match.group(1)) + 32) // 64 * 64)
+        height = max(64, (int(match.group(2)) + 32) // 64 * 64)
+        while max(width, height) > self._OPENAI_MAX_SIDE and min(width, height) > 64:
+            if width >= height:
+                width -= 64
+            else:
+                height -= 64
+        while width * height > self._OPENAI_MAX_AREA and min(width, height) > 64:
+            if width >= height:
+                width -= 64
+            else:
+                height -= 64
+        normalized = f"{width}x{height}"
+        if normalized != str(size).strip():
+            logger.info(f"{LOG_TAG} [openai_generate] 尺寸校正: {size} -> {normalized}")
+        return normalized
+
+    def _openai_endpoint(self, target: str) -> str:
+        """拼接 OpenAI 兼容端点，兼容 base_url 是否带 ``/v1``。
+
+        Args:
+            target: "generations" 或 "edits"。
+
+        Returns:
+            完整端点 URL，例如 ``https://api1.syuan.org/v1/images/edits``。
+        """
+        base = self.openai_api_base_url.rstrip("/")
+        target = "edits" if target == "edits" else "generations"
+        if base.endswith(f"/images/{target}"):
+            return base
+        if re.search(r"/images/(?:generations|edits)$", base):
+            return re.sub(r"/images/(?:generations|edits)$", f"/images/{target}", base)
+        if re.search(r"/v1/?$", base) or "/v1/" in base:
+            return f"{base}/images/{target}"
+        return f"{base}/v1/images/{target}"
+
+    def _openai_prompt(
+        self,
+        prompt: str,
+        style: str,
+        custom_artists: str | None = None,
+    ) -> str:
+        """把画师串作为风格前缀拼进 OpenAI 兼容格式的 prompt。
+
+        OpenAI 兼容格式没有独立的 artist 参数，画师串需要并入 prompt 文本。
+        ``custom`` 风格可用 ``custom_artists`` 覆盖（面板独立字段），否则用
+        插件配置的 ``self.custom_artists``；其余风格回退到对应预设。
+
+        Args:
+            prompt: 已转译/合并后的主体提示词。
+            style: NAI 风格键（vertical / custom / ...）。
+            custom_artists: 自定义画师串覆盖（面板传入），可选。
+
+        Returns:
+            拼接了画师串的最终 prompt 文本。
+        """
+        if style == "custom":
+            artists = (
+                custom_artists if custom_artists is not None else self.custom_artists
+            )
+            artists = normalize_prompt(artists or "")
+        else:
+            artists = normalize_prompt(
+                DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
+            )
+        if not artists:
+            return normalize_prompt(prompt)
+        return normalize_prompt(f"{artists}, {prompt}")
+
+    async def _openai_generate(
+        self,
+        prompt: str,
+        size: str,
+        *,
+        n: int = 1,
+        reference_image_path: str | None = None,
+        reference_image_bytes: bytes | None = None,
+        strength: float | None = None,
+        noise: float | None = None,
+        steps: int | None = None,
+        scale: float | None = None,
+        sampler: str | None = None,
+        noise_schedule: str | None = None,
+        seed: int | None = None,
+        negative: str | None = None,
+        model: str | None = None,
+        reference_mode: str | None = None,
+        director_action: str | None = None,
+        director_caption: str | None = None,
+        characters: Sequence[tuple[str, float, float]] | None = None,
+    ) -> tuple[list[bytes], str]:
+        """OpenAI 兼容格式生图（文生图 / 图生图 / 参考图 / 图片处理）。
+
+        对齐接口文档：高级参数统一放入 ``parameters`` 对象（§3.2/§10.2）；
+        带参考图时按 ``reference_mode`` 选择 ``vibe``（generations 的
+        ``reference_image_multiple``，§5）、``img2img``（``/v1/images/edits``
+        的 JSON ``image`` 字段，§4）或 ``director``（generations 的
+        ``director_reference_*`` 精准参考，§6）；``director_action`` 对应
+        director-tools 图片处理（§8）；``characters`` 非空时附加多角色坐标
+        控制（§7）。对 408/429/502/503/504 按 2/4/8 秒指数退避选择性重试；
+        超时不自动重试（上游可能仍在生成并扣费）；400/401/403 默认不重
+        试，但错误文案提示"稍后重试"的瞬时故障除外。
+
+        Args:
+            prompt: 主体提示词（已合并画师串）。
+            size: NAI 尺寸键（竖图/方图/...）或像素尺寸 "WxH"。
+            n: 生成张数。
+            reference_image_path: 参考图本地路径（与 bytes 二选一）。
+            reference_image_bytes: 参考图字节内容（优先于路径）。
+            strength: img2img 重绘强度、vibe/精准参考强度，0-1；精准参考
+                默认 1.0，次级强度与信息提取量按文档 §8 固定为 0.5/1.0。
+            noise: img2img 附加噪声强度，0-1。
+            steps / scale / sampler / noise_schedule / seed / negative:
+                高级参数，留 None 时使用插件全局配置。
+            model: 模型覆盖，默认 self.openai_api_model。
+            reference_mode: "vibe" / "img2img" / "director"，默认
+                self.openai_reference_mode。
+            director_action: director-tools 动作（bg-removal/lineart/sketch/
+                colorize/emotion/declutter），指定时 model 强制 director-tools。
+            director_caption: 精准参考描述（新文档 §8.4 的 base_caption），仅
+                允许 character / style / character&style，默认
+                self.openai_director_caption。精准参考仅支持 NAI 4.5 模型，
+                非 4.5 模型会自动切换为 nai-diffusion-4-5-full。
+            characters: 多角色坐标列表 (提示词, x, y)，坐标 0-1（§7），
+                最多取前 6 个；仅对 generations 类请求生效。
+
+        Returns:
+            (images_bytes, reason) — reason 为 "ok" 或错误码。
+        """
+        import json
+
+        import aiohttp
+
+        base = self.openai_api_base_url
+        if not base:
+            return [], "openai_not_configured"
+        if not self._session:
+            return [], "no_session"
+
+        # 尺寸规范化：NAI 键 → 像素尺寸 → 64 倍数/边长/面积契约（§10）
+        size = self._normalize_openai_size(self._openai_size(size))
+        try:
+            target_w, target_h = (int(v) for v in size.split("x", 1))
+        except ValueError:
+            target_w, target_h = 1024, 1024
+
+        # director-tools 图片处理：model / action 由动作唯一决定（§8）
+        is_director = director_action in OPENAI_DIRECTOR_ACTIONS
+        model = (
+            "director-tools"
+            if is_director
+            else (model or self.openai_api_model or "").strip()
+        )
+        api_key = self.openai_api_key
+        timeout = aiohttp.ClientTimeout(total=self.openai_timeout)
+
+        # 参考图：bytes 优先，其次从路径读取；统一编码为 Data URI（§5 示例/§11）
+        image_bytes: bytes | None = None
+        if reference_image_bytes:
+            image_bytes = reference_image_bytes
+        elif reference_image_path:
+            try:
+                ref_path = Path(reference_image_path)
+                if ref_path.is_file():
+                    image_bytes = await asyncio.to_thread(ref_path.read_bytes)
+            except Exception as exc:
+                logger.warning(
+                    f"{LOG_TAG} [openai_generate] 读取参考图失败: {type(exc).__name__}: {exc}"
+                )
+
+        ref_mode = (reference_mode or self.openai_reference_mode or "vibe").casefold()
+        if ref_mode not in ("img2img", "vibe", "director"):
+            ref_mode = "vibe"
+        is_edit = bool(image_bytes) and ref_mode == "img2img" and not is_director
+        if (is_director or ref_mode == "director") and not image_bytes:
+            # 兜底参考图：director 模式且请求未带图时（聊天指令/陪伴联动），
+            # 使用设置里的第一个可用文件；director-tools 仍需显式提供待处理图
+            if not is_director:
+                # 设置页上传的文件存的是相对插件数据目录的路径，绝对路径
+                # （用户手填）则原样使用
+                _data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+                for _fb_path in self.openai_director_fallback_images:
+                    try:
+                        _fb_file = Path(_fb_path)
+                        if not _fb_file.is_absolute():
+                            _fb_file = _data_dir / _fb_file
+                        if _fb_file.is_file():
+                            image_bytes = await asyncio.to_thread(_fb_file.read_bytes)
+                            logger.info(
+                                f"{LOG_TAG} [openai_generate] 精准参考使用兜底参考图: "
+                                f"{_fb_file}"
+                            )
+                            break
+                    except Exception:
+                        continue
+            if not image_bytes:
+                return [], "no_reference_image"
+
+        # img2img 要求源图与目标尺寸严格一致，否则上游直接拒绝；
+        # vibe / director 不强制比例，但上游适配器同样按 §10 契约校验参考图
+        # （最大边 1920、面积 3686400），超限会报 "image dimensions exceed the
+        # maximum allowed size"，因此超限图片先等比缩小（不放大、不重编码合规图）。
+        if image_bytes:
+            try:
+                import io
+
+                from PIL import Image, ImageOps
+
+                def _fit_ref_image(raw_bytes: bytes) -> bytes:
+                    with Image.open(io.BytesIO(raw_bytes)) as img:
+                        w, h = img.size
+                        if is_edit:
+                            if (w, h) == (target_w, target_h):
+                                return raw_bytes
+                            img = ImageOps.fit(
+                                img, (target_w, target_h), Image.Resampling.LANCZOS
+                            )
+                        else:
+                            ratio = min(
+                                1.0,
+                                self._OPENAI_MAX_SIDE / max(w, h),
+                                (self._OPENAI_MAX_AREA / max(1, w * h)) ** 0.5,
+                            )
+                            if ratio >= 1.0:
+                                return raw_bytes
+                            img = img.resize(
+                                (max(1, int(w * ratio)), max(1, int(h * ratio))),
+                                Image.Resampling.LANCZOS,
+                            )
+                            logger.info(
+                                f"{LOG_TAG} [openai_generate] 参考图超限，等比缩小: "
+                                f"{w}x{h} -> {img.size[0]}x{img.size[1]}"
+                            )
+                        img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+                        out_buf = io.BytesIO()
+                        img.save(out_buf, format="PNG")
+                        return out_buf.getvalue()
+
+                image_bytes = await asyncio.to_thread(_fit_ref_image, image_bytes)
+            except Exception as exc:
+                logger.warning(f"{LOG_TAG} [openai_generate] 参考图尺寸适配失败: {exc}")
+        image_b64 = ""
+        if image_bytes:
+            # Data URI 格式（与文档 §5 参考图示例一致）；MIME 按文件魔数判断，
+            # 尺寸适配后的字节固定为 PNG，未适配的原图保持自身格式。
+            if image_bytes.startswith(b"\xff\xd8\xff"):
+                _mime = "image/jpeg"
+            elif image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+                _mime = "image/webp"
+            elif image_bytes.startswith(b"GIF8"):
+                _mime = "image/gif"
+            else:
+                _mime = "image/png"
+            image_b64 = f"data:{_mime};base64," + base64.b64encode(image_bytes).decode()
+
+        # ==== 高级参数组装（§3.2/§10.2），留 None 的项回退插件全局配置 ====
+        try:
+            _steps = max(1, min(50, int(steps if steps is not None else self.steps)))
+        except (TypeError, ValueError):
+            _steps = 28
+        try:
+            _scale = max(
+                0.0, min(10.0, float(scale if scale is not None else self.scale))
+            )
+        except (TypeError, ValueError):
+            _scale = 5.0
+        _sampler = (sampler if sampler is not None else self.sampler or "").strip()
+        _noise_schedule = (
+            noise_schedule if noise_schedule is not None else self.noise_schedule or ""
+        ).strip()
+        _negative = negative if negative is not None else self.negative
+        try:
+            _seed = int(seed if seed is not None else self.openai_seed)
+        except (TypeError, ValueError):
+            _seed = -1
+
+        parameters: dict[str, Any] = {"steps": _steps, "scale": _scale}
+        if _sampler:
+            parameters["sampler"] = _sampler
+        if _noise_schedule:
+            parameters["noise_schedule"] = _noise_schedule
+        if _seed >= 0:
+            parameters["seed"] = _seed
+        if _negative and str(_negative).strip():
+            parameters["negative_prompt"] = str(_negative).strip()
+
+        # ==== 多角色坐标控制（§7）：仅对 generations 类请求生效 ====
+        char_entries: list[tuple[str, float, float]] = []
+        if characters:
+            for entry in characters:
+                try:
+                    c_prompt, c_x, c_y = entry
+                    c_prompt = str(c_prompt or "").strip()
+                    if not c_prompt:
+                        continue
+                    char_entries.append(
+                        (
+                            c_prompt,
+                            max(0.0, min(1.0, float(c_x))),
+                            max(0.0, min(1.0, float(c_y))),
+                        )
+                    )
+                except (TypeError, ValueError):
+                    continue
+            char_entries = char_entries[:6]
+        if char_entries and (is_edit or is_director):
+            logger.info(
+                f"{LOG_TAG} [openai_generate] img2img/director-tools 不支持多角色坐标，"
+                "已忽略本次 characters 参数"
+            )
+            char_entries = []
+
+        # ==== 请求体组装：文生图 / img2img / vibe / 精准参考 / director-tools ====
+        payload: dict[str, Any] = {
+            "prompt": prompt,
+            "size": size,
+            "n": max(1, int(n)),
+        }
+        if model:
+            payload["model"] = model
+
+        if is_director:
+            payload["action"] = director_action
+            parameters = {"image": image_b64, "width": target_w, "height": target_h}
+        elif is_edit:
+            payload["action"] = "img2img"
+            payload["image"] = image_b64
+            if strength is not None:
+                parameters["strength"] = max(0.0, min(1.0, float(strength)))
+            if noise is not None:
+                parameters["noise"] = max(0.0, min(1.0, float(noise)))
+        elif ref_mode == "director" and image_bytes:
+            # 精准参考（新文档 §8）：五个 director_reference_* 数组严格等长、
+            # 按下标一一对应；参考图由服务端自动规范化（§8.6），客户端无需
+            # 预处理。
+            payload["action"] = "generate"
+            # 精准参考仅支持 NAI 4.5 两个模型（§8.1），其余模型会被直接 400；
+            # 当前模型不满足时自动切换到 4-5-full 以保证能力可用。
+            if (model or "").strip().casefold() not in OPENAI_DIRECTOR_MODELS:
+                logger.info(
+                    f"{LOG_TAG} [openai_generate] 精准参考仅支持 NAI 4.5 模型，"
+                    f"自动由 {model or '(none)'} 切换为 nai-diffusion-4-5-full"
+                )
+                model = "nai-diffusion-4-5-full"
+                payload["model"] = model
+            _primary = (
+                max(0.0, min(1.0, float(strength))) if strength is not None else 1.0
+            )
+            # base_caption 仅允许三个枚举值（§8.4），非法值会被 400 拒绝
+            _caption = (director_caption or self.openai_director_caption or "").strip()
+            if _caption not in OPENAI_DIRECTOR_CAPTIONS:
+                _caption = "character&style"
+            parameters["director_reference_images"] = [image_b64]
+            parameters["director_reference_strength_values"] = [round(_primary, 2)]
+            # 次级特征强度（§8.5 推荐 0.35-0.7），取中间值
+            parameters["director_reference_secondary_strength_values"] = [0.5]
+            # information_extracted 固定 1.0：实测其他取值（如 0.7）会被上游
+            # 参数校验拒绝（HTTP 400），与 §8 各示例保持一致
+            parameters["director_reference_information_extracted"] = [1.0]
+            parameters["director_reference_descriptions"] = [
+                {
+                    "caption": {
+                        "base_caption": _caption,
+                        "char_captions": [],
+                    },
+                    "legacy_uc": False,
+                }
+            ]
+        elif image_bytes:
+            # vibe 参考：数组按下标一一对应（§5）
+            payload["action"] = "generate"
+            parameters["reference_image_multiple"] = [image_b64]
+            parameters["reference_strength_multiple"] = [
+                max(0.0, min(1.0, float(strength))) if strength is not None else 0.6
+            ]
+            parameters["reference_information_extracted_multiple"] = [0.7]
+        else:
+            payload["action"] = "generate"
+
+        if char_entries:
+            parameters["use_coords"] = True
+            parameters["characterPrompts"] = [
+                {"prompt": c_prompt, "center": {"x": c_x, "y": c_y}}
+                for c_prompt, c_x, c_y in char_entries
+            ]
+            parameters["v4_prompt"] = {
+                "caption": {
+                    "base_caption": prompt,
+                    "char_captions": [
+                        {
+                            "char_caption": c_prompt,
+                            "centers": [{"x": c_x, "y": c_y}],
+                        }
+                        for c_prompt, c_x, c_y in char_entries
+                    ],
+                },
+                "use_coords": True,
+                "use_order": True,
+            }
+        payload["parameters"] = parameters
+
+        endpoint = self._openai_endpoint("edits" if is_edit else "generations")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        if is_director:
+            mode_desc = f"director/{director_action}"
+        elif is_edit:
+            mode_desc = "img2img"
+        elif image_bytes and ref_mode == "director":
+            mode_desc = "director_ref"
+        elif image_bytes:
+            mode_desc = "vibe"
+        else:
+            mode_desc = "t2i"
+        logger.info(
+            f"{LOG_TAG} [openai_generate] endpoint={endpoint} model={model or '(none)'} "
+            f"mode={mode_desc} size={size} n={payload['n']} steps={_steps} scale={_scale} "
+            f"seed={_seed if _seed >= 0 else 'random'} chars={len(char_entries)} "
+            f"ref_bytes={len(image_bytes) if image_bytes else 0}"
+        )
+
+        # ==== 发送请求：可重试状态码按 2/4/8 秒指数退避（§14）；超时不重试 ====
+        status = 0
+        text = ""
+        max_attempts = self.openai_max_retries + 1
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                delay = OPENAI_RETRY_DELAYS[
+                    min(attempt - 2, len(OPENAI_RETRY_DELAYS) - 1)
+                ]
+                logger.info(
+                    f"{LOG_TAG} [openai_generate] 第 {attempt - 1}/{self.openai_max_retries} "
+                    f"次重试，等待 {delay:g}s（last_status={status or 'timeout'}）"
+                )
+                await asyncio.sleep(delay)
+            try:
+                async with self._session.post(
+                    endpoint, json=payload, headers=headers, timeout=timeout
+                ) as resp:
+                    text = await resp.text()
+                    status = resp.status
+            except asyncio.TimeoutError:
+                # 超时不自动重试：生图请求超时后上游通常仍在继续生成并照常
+                # 扣费，自动重试会导致一次需求被多次扣费。直接失败并提示
+                # 用户稍后手动重试。
+                status, text = 0, ""
+                logger.warning(
+                    f"{LOG_TAG} [openai_generate] 请求超时（第 {attempt}/{max_attempts} 次），"
+                    "上游可能仍在生成（可能已扣费），不再自动重试"
+                )
+                break
+            except Exception as exc:
+                logger.warning(
+                    f"{LOG_TAG} [openai_generate] 异常: {type(exc).__name__}: {exc}"
+                )
+                return [], "exception"
+            if status < 400:
+                break
+            retryable = status in OPENAI_RETRYABLE_STATUS
+            if not retryable:
+                # 网关会把上游瞬时故障包装成 400（bad_response_status_code），
+                # 错误文案明确提示"请稍后重试"时同样按可重试处理。
+                _low = text.casefold()
+                retryable = any(marker in _low for marker in OPENAI_TRANSIENT_MARKERS)
+                if retryable:
+                    logger.info(
+                        f"{LOG_TAG} [openai_generate] HTTP {status} 错误文案提示稍后重试，"
+                        "按可重试处理"
+                    )
+            if not retryable:
+                break
+            logger.warning(
+                f"{LOG_TAG} [openai_generate] HTTP {status}（第 {attempt}/{max_attempts} 次）| "
+                f"body={text[:300]}"
+            )
+
+        if status == 0:
+            return [], "timeout"
+        if status >= 400:
+            # 尽量提取上游 error.message，透传给用户（如"降低尺寸、步数"建议）
+            err_msg = ""
+            try:
+                _err = json.loads(text)
+                if isinstance(_err, dict):
+                    _err_item = _err.get("error")
+                    if isinstance(_err_item, dict):
+                        err_msg = str(_err_item.get("message") or "").strip()
+                    elif isinstance(_err_item, str):
+                        err_msg = _err_item.strip()
+            except Exception:
+                pass
+            reason = f"http_{status}"
+            if err_msg:
+                reason += f" | {err_msg[:200]}"
+            # 精准参考（§6）按文档格式提交仍被上游 400 拒绝：通常是该 Key/中转
+            # 未开通精准参考能力，单独标记以便给出针对性提示。
+            if (
+                status == 400
+                and image_bytes
+                and ref_mode == "director"
+                and not director_action
+            ):
+                reason = "director_ref_rejected"
+                if err_msg:
+                    reason += f" | {err_msg[:200]}"
+            logger.warning(
+                f"{LOG_TAG} [openai_generate] HTTP {status} | body={text[:300]}"
+            )
+            return [], reason
+
+        # 手动解析 JSON：上游异常时可能返回 text/html 页面，resp.json()
+        # 会因 mimetype 不匹配抛 ContentTypeError，这里改为读取文本解析。
+        try:
+            _data = json.loads(text)
+        except Exception:
+            logger.warning(
+                f"{LOG_TAG} [openai_generate] 响应非 JSON（status={status}） | "
+                f"body={text[:300]}"
+            )
+            return [], "invalid_response"
+
+        items = _data.get("data") if isinstance(_data, dict) else []
+        if not isinstance(items, list) or not items:
+            return [], "empty_response"
+
+        images: list[bytes] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            b64 = str(item.get("b64_json") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if b64:
+                # b64_json 不带 data:image/...;base64, 前缀（§12）
+                try:
+                    images.append(base64.b64decode(b64))
+                except Exception as exc:
+                    logger.warning(
+                        f"{LOG_TAG} [openai_generate] b64_json 解码失败: {type(exc).__name__}"
+                    )
+            elif url:
+                try:
+                    async with self._session.get(
+                        url, timeout=aiohttp.ClientTimeout(total=60)
+                    ) as dl_resp:
+                        if dl_resp.status == 200:
+                            images.append(await dl_resp.read())
+                except Exception as exc:
+                    logger.warning(
+                        f"{LOG_TAG} [openai_generate] 下载 url 失败: {type(exc).__name__}"
+                    )
+        if images:
+            return images, "ok"
+        return [], "empty_response"
 
     async def _generate_one_custom(
         self,
@@ -1424,6 +2196,19 @@ class NAIGenerateImagePlugin(Star):
                 "image_styles_options": IMAGE_STYLES,
                 "image_size_options": IMAGE_SIZES,
                 "default_negative": DEFAULT_NEGATIVE,
+                "openai_api_base_url": self.openai_api_base_url or "未配置",
+                "openai_api_model": self.openai_api_model or "未配置",
+                "openai_available": bool(
+                    self.openai_api_base_url and self.openai_api_key
+                ),
+                "openai_reference_mode": self.openai_reference_mode,
+                "openai_director_caption": self.openai_director_caption,
+                "openai_seed": self.openai_seed,
+                "openai_timeout": self.openai_timeout,
+                "openai_max_retries": self.openai_max_retries,
+                "openai_models": OPENAI_COMPATIBLE_MODELS,
+                "openai_director_actions": OPENAI_DIRECTOR_ACTIONS,
+                "call_mode": self.call_mode,
             }
         )
 
@@ -1540,6 +2325,233 @@ class NAIGenerateImagePlugin(Star):
                 "data": [{"b64_json": b64} for b64 in images_b64],
                 "merge_info": merge_info,
                 "elapsed_info": f"{len(images_b64)} 张",
+            }
+        )
+
+    async def _test_panel_generate_openai(self) -> Any:
+        """Web API: OpenAI 兼容格式生图（支持本地上传参考图）。
+
+        面板切换「OpenAI 兼容」后走此接口，请求体与 ``test_panel/generate``
+        一致（双提示词 + 生成参数），额外支持 ``reference_image_b64``（data
+        URL 或裸 base64）与 ``strength``。实际生图由 ``_openai_generate`` 完成，
+        接口地址/密钥/模型由插件配置项 openai_api_* 决定。
+        """
+        try:
+            body = await web_request.json(default={})
+        except Exception:
+            return error_response("请求体解析失败", status_code=400)
+
+        nai_prompt = normalize_prompt(body.get("nai_prompt") or "")
+        nl_prompt = normalize_prompt(body.get("nl_prompt") or "")
+
+        # director-tools 图片处理动作（§8）：指定时强制使用 director-tools 模型，
+        # 提示词可为空，但必须附带一张源图片。
+        director_action = str(body.get("director_action") or "").strip()
+        if director_action and director_action not in OPENAI_DIRECTOR_ACTIONS:
+            return error_response(
+                f"不支持的处理动作: {director_action}", status_code=400
+            )
+
+        if not nai_prompt and not nl_prompt and not director_action:
+            return error_response("请至少填写一个提示词框", status_code=400)
+
+        if not self.openai_api_base_url:
+            return error_response(
+                "未配置 OpenAI 兼容格式地址（openai_api_base_url），请在插件设置中填写。",
+                status_code=400,
+            )
+
+        size = body.get("size") or "方图"
+        try:
+            n = max(1, min(4, int(body.get("n") or 1)))
+        except (TypeError, ValueError):
+            n = 1
+
+        # 本地上传参考图：data URL 或裸 base64
+        reference_image_bytes: bytes | None = None
+        raw_ref = str(body.get("reference_image_b64") or "").strip()
+        if raw_ref:
+            try:
+                if raw_ref.startswith("data:"):
+                    raw_ref = raw_ref.split(",", 1)[1]
+                reference_image_bytes = base64.b64decode(raw_ref)
+            except Exception as exc:
+                logger.warning(
+                    f"{LOG_TAG} [test_panel:generate_openai] 参考图 base64 解析失败: {exc!r}"
+                )
+                return error_response("参考图数据解析失败，请重新上传", status_code=400)
+            if not reference_image_bytes:
+                return error_response("参考图数据为空，请重新上传", status_code=400)
+        if director_action and not reference_image_bytes:
+            return error_response("图片处理动作需要上传一张源图片", status_code=400)
+
+        strength: float | None = None
+        raw_strength = body.get("strength")
+        if raw_strength not in (None, ""):
+            try:
+                strength = float(raw_strength)
+                if not (0 < strength <= 1):
+                    strength = None
+            except (TypeError, ValueError):
+                strength = None
+
+        noise: float | None = None
+        raw_noise = body.get("noise")
+        if raw_noise not in (None, ""):
+            try:
+                noise = float(raw_noise)
+                if not (0 <= noise <= 1):
+                    noise = None
+            except (TypeError, ValueError):
+                noise = None
+
+        # 参考图使用模式：面板可覆盖插件配置（vibe / img2img / director 精准参考）
+        reference_mode = str(body.get("reference_mode") or "").strip().casefold()
+        if reference_mode not in ("vibe", "img2img", "director"):
+            reference_mode = None
+        if reference_mode == "director" and not reference_image_bytes:
+            return error_response(
+                "精准参考（director）需要上传一张参考图", status_code=400
+            )
+
+        # 解析可选覆盖参数
+        def _opt_int(key: str) -> int | None:
+            val = body.get(key)
+            if val is None or val == "":
+                return None
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
+        def _opt_str(key: str) -> str | None:
+            val = body.get(key)
+            if val is None:
+                return None
+            return str(val)
+
+        steps = _opt_int("steps")
+        seed = _opt_int("seed")
+        negative = _opt_str("negative")
+        sampler = _opt_str("sampler")
+        noise_schedule = _opt_str("noise_schedule")
+        raw_scale = body.get("scale")
+        try:
+            scale = float(raw_scale) if raw_scale not in (None, "") else None
+        except (TypeError, ValueError):
+            scale = None
+        style = body.get("style") or self.image_style
+        custom_artists = _opt_str("custom_artists")
+        model = _opt_str("model")
+        director_caption = _opt_str("director_caption")
+
+        # 多角色坐标（§7）：面板传 [{prompt, x, y}, ...]，坐标 0-1，最多 6 个
+        characters: list[tuple[str, float, float]] | None = None
+        raw_chars = body.get("characters")
+        if isinstance(raw_chars, list) and raw_chars:
+            characters = []
+            for idx, item in enumerate(raw_chars[:6], start=1):
+                if not isinstance(item, dict):
+                    continue
+                c_prompt = normalize_prompt(item.get("prompt"))
+                if not c_prompt:
+                    continue
+                try:
+                    c_x = float(item.get("x", 0.5))
+                    c_y = float(item.get("y", 0.5))
+                except (TypeError, ValueError):
+                    return error_response(
+                        f"第 {idx} 个角色的坐标必须是数字", status_code=400
+                    )
+                if not (0 <= c_x <= 1 and 0 <= c_y <= 1):
+                    return error_response(
+                        f"第 {idx} 个角色的坐标必须在 0-1 之间", status_code=400
+                    )
+                characters.append((c_prompt, c_x, c_y))
+            characters = characters or None
+
+        # ==== 转译 + 合并 ====
+        translated_nl = ""
+        if nl_prompt:
+            translated = await self._translate_prompt(nl_prompt)
+            translated_nl = translated if translated else nl_prompt
+
+        base_prompt = normalize_prompt(
+            ", ".join([p for p in [nai_prompt, translated_nl] if p])
+        )
+        # 画师串作为风格前缀拼进 OpenAI 兼容格式的 prompt
+        full_prompt = self._openai_prompt(base_prompt, style, custom_artists)
+
+        merge_info = {
+            "nai_prompt": nai_prompt,
+            "nl_prompt": nl_prompt,
+            "translated_nl": translated_nl,
+            "style": style,
+            "model": model,
+            "full_prompt": full_prompt,
+        }
+
+        # NAI 尺寸键 → OpenAI 兼容像素尺寸
+        pixel_size = self._openai_size(size)
+
+        logger.info(
+            f"{LOG_TAG} [test_panel:generate_openai] "
+            f"prompt='{full_prompt[:60]}' size={size}→{pixel_size} n={n} "
+            f"reference={'yes' if reference_image_bytes else 'no'} strength={strength} "
+            f"steps={steps} seed={seed} model={model} style={style} "
+            f"ref_mode={reference_mode or self.openai_reference_mode} "
+            f"director={director_action or '-'} chars={len(characters or [])}"
+        )
+
+        # ==== 调用 OpenAI 兼容格式（一次调用生成 n 张） ====
+        try:
+            images, reason = await self._openai_generate(
+                full_prompt,
+                pixel_size,
+                n=n,
+                reference_image_bytes=reference_image_bytes,
+                strength=strength,
+                noise=noise,
+                steps=steps,
+                scale=scale,
+                sampler=sampler,
+                noise_schedule=noise_schedule,
+                seed=seed,
+                negative=negative,
+                model=model,
+                reference_mode=reference_mode,
+                director_action=director_action or None,
+                director_caption=director_caption,
+                characters=characters,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"{LOG_TAG} [test_panel:generate_openai] _openai_generate 异常: {exc!r}"
+            )
+            return json_response(
+                {"status": "error", "message": f"生成异常: {exc!r}"},
+                status_code=500,
+            )
+
+        if not images:
+            return json_response(
+                {
+                    "status": "error",
+                    "message": _format_generate_error(reason or "unknown"),
+                    "reason": reason,
+                },
+                status_code=502,
+            )
+
+        images_b64 = [base64.b64encode(img).decode() for img in images]
+        return json_response(
+            {
+                "status": "ok",
+                "data": [{"b64_json": b64} for b64 in images_b64],
+                "merge_info": merge_info,
+                "elapsed_info": f"{len(images_b64)} 张",
+                "call_format": "openai",
+                "reference_used": bool(reference_image_bytes),
             }
         )
 
@@ -2059,12 +3071,20 @@ class NAIGenerateImagePlugin(Star):
         logger.info(
             f"{LOG_TAG} [proxy:gen] 收到 POST {request.path} from {request.remote}"
         )
-        if not self.image_gen_key or not self._session:
-            logger.warning(f"{LOG_TAG} [proxy:gen] 拒绝：token 或 session 缺失")
+        # 按调用模式校验所需凭据
+        missing = ""
+        if self.call_mode == "openai":
+            if not self.openai_api_base_url:
+                missing = "openai_api_base_url"
+        else:
+            if not self.image_gen_key:
+                missing = "image_gen_key"
+        if missing or not self._session:
+            logger.warning(f"{LOG_TAG} [proxy:gen] 拒绝：缺少 {missing or 'session'}")
             return web.json_response(
                 {
                     "error": {
-                        "message": "NAI 插件未配置 image_gen_key",
+                        "message": f"NAI 插件未配置 {missing or '会话'}",
                         "type": "invalid_request_error",
                     }
                 },
@@ -2101,14 +3121,44 @@ class NAIGenerateImagePlugin(Star):
             n = max(1, min(4, int(body.get("n") or 1)))
         except (TypeError, ValueError):
             n = 1
+        # 高级参数：接口文档允许放在 parameters 对象或请求顶层（§3.2），
+        # parameters 优先；_openai_generate 内部再做类型/范围归一化。
+        _params = body.get("parameters")
+        if not isinstance(_params, dict):
+            _params = {}
+        client_overrides = {
+            "steps": _params.get("steps", body.get("steps")),
+            "scale": _params.get("scale", body.get("scale")),
+            "seed": _params.get("seed", body.get("seed")),
+            "sampler": _params.get("sampler", body.get("sampler")),
+            "noise_schedule": _params.get("noise_schedule", body.get("noise_schedule")),
+            "negative": _params.get("negative_prompt", body.get("negative_prompt")),
+        }
         logger.info(
             f"{LOG_TAG} [proxy:gen] 参数 | prompt='{prompt[:80]}' size={size} n={n}"
         )
 
         try:
-            img_bytes, reason = await self._generate_one(prompt, self.image_style, size)
+            if self.call_mode == "openai":
+                images, reason = await self._openai_generate(
+                    prompt,
+                    size,
+                    n=n,
+                    steps=client_overrides["steps"],
+                    scale=client_overrides["scale"],
+                    seed=client_overrides["seed"],
+                    sampler=client_overrides["sampler"],
+                    noise_schedule=client_overrides["noise_schedule"],
+                    negative=client_overrides["negative"],
+                )
+                img_list = images
+            else:
+                img_bytes, reason = await self._generate_one(
+                    prompt, self.image_style, size
+                )
+                img_list = [img_bytes] if img_bytes else []
         except Exception as e:
-            logger.warning(f"{LOG_TAG} [proxy:gen] _generate_one 异常: {e!r}")
+            logger.warning(f"{LOG_TAG} [proxy:gen] 生成异常: {e!r}")
             return web.json_response(
                 {
                     "error": {
@@ -2119,7 +3169,7 @@ class NAIGenerateImagePlugin(Star):
                 status=500,
             )
 
-        if not img_bytes:
+        if not img_list:
             logger.warning(f"{LOG_TAG} [proxy:gen] 生图失败 | reason={reason}")
             user_msg = _format_generate_error(reason)
             status = 504 if reason == "timeout" else 502
@@ -2134,15 +3184,15 @@ class NAIGenerateImagePlugin(Star):
                 status=status,
             )
 
-        b64 = base64.b64encode(img_bytes).decode()
+        b64_list = [base64.b64encode(img).decode() for img in img_list]
         logger.info(
-            f"{LOG_TAG} [proxy:gen] 响应 | img_bytes={len(img_bytes)} "
-            f"b64_chars={len(b64)} n={n}"
+            f"{LOG_TAG} [proxy:gen] 响应 | images={len(b64_list)} "
+            f"total_bytes={sum(len(b) for b in img_list)} n={n}"
         )
         return web.json_response(
             {
                 "created": int(time.time()),
-                "data": [{"b64_json": b64} for _ in range(n)],
+                "data": [{"b64_json": b64} for b64 in b64_list],
             }
         )
 
@@ -2150,12 +3200,20 @@ class NAIGenerateImagePlugin(Star):
         logger.info(
             f"{LOG_TAG} [proxy:edit] 收到 POST {request.path} from {request.remote}"
         )
-        if not self.image_gen_key or not self._session:
-            logger.warning(f"{LOG_TAG} [proxy:edit] 拒绝：token 或 session 缺失")
+        # 按调用模式校验所需凭据
+        missing = ""
+        if self.call_mode == "openai":
+            if not self.openai_api_base_url:
+                missing = "openai_api_base_url"
+        else:
+            if not self.image_gen_key:
+                missing = "image_gen_key"
+        if missing or not self._session:
+            logger.warning(f"{LOG_TAG} [proxy:edit] 拒绝：缺少 {missing or 'session'}")
             return web.json_response(
                 {
                     "error": {
-                        "message": "NAI 插件未配置 image_gen_key",
+                        "message": f"NAI 插件未配置 {missing or '会话'}",
                         "type": "invalid_request_error",
                     }
                 },
@@ -2164,38 +3222,113 @@ class NAIGenerateImagePlugin(Star):
         prompt = ""
         size = "1024x1024"
         n = 1
-        parts_seen: list[str] = []
-        try:
-            reader = await request.multipart()
-            async for part in reader:
-                if part.name is None:
-                    continue
-                parts_seen.append(part.name)
-                if part.name == "prompt":
-                    prompt = normalize_prompt(await part.text())
-                elif part.name == "size":
-                    raw_size = (await part.text() or "").strip()
-                    if raw_size:
-                        size = raw_size
-                elif part.name == "n":
-                    try:
-                        n = max(1, min(4, int((await part.text() or "").strip())))
-                    except Exception:
-                        n = 1
-                elif part.name in ("image", "mask", "image[]", "mask[]"):
-                    await part.read()
-            logger.debug(f"{LOG_TAG} [proxy:edit] multipart parts: {parts_seen}")
-        except Exception as e:
-            logger.warning(f"{LOG_TAG} [proxy:edit] multipart 解析失败: {e!r}")
-            return web.json_response(
-                {
-                    "error": {
-                        "message": f"invalid multipart: {e!r}",
-                        "type": "invalid_request_error",
-                    }
-                },
-                status=400,
-            )
+        strength: float | None = None
+        noise: float | None = None
+        image_bytes: bytes | None = None
+        content_type = (request.content_type or "").casefold()
+
+        if content_type == "application/json":
+            # JSON 图生图（接口文档 §4）：image 支持 URL / Data URI / 纯 Base64。
+            try:
+                body = await request.json()
+            except Exception as e:
+                logger.warning(f"{LOG_TAG} [proxy:edit] JSON 解析失败: {e!r}")
+                return web.json_response(
+                    {
+                        "error": {
+                            "message": f"invalid json: {e!r}",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                    status=400,
+                )
+            prompt = normalize_prompt(body.get("prompt") or "")
+            size = str(body.get("size") or size).strip() or size
+            try:
+                n = max(1, min(4, int(body.get("n") or 1)))
+            except (TypeError, ValueError):
+                n = 1
+            _params = body.get("parameters")
+            if not isinstance(_params, dict):
+                _params = {}
+            try:
+                strength = float(_params.get("strength", body.get("strength")))
+                if not 0 <= strength <= 1:
+                    strength = None
+            except (TypeError, ValueError):
+                strength = None
+            try:
+                noise = float(_params.get("noise", body.get("noise")))
+                if not 0 <= noise <= 1:
+                    noise = None
+            except (TypeError, ValueError):
+                noise = None
+            raw_image = str(_params.get("image", body.get("image")) or "").strip()
+            if raw_image.startswith(("http://", "https://")):
+                try:
+                    async with self._session.get(
+                        raw_image, timeout=aiohttp.ClientTimeout(total=60)
+                    ) as dl_resp:
+                        if dl_resp.status == 200:
+                            image_bytes = await dl_resp.read()
+                except Exception as exc:
+                    logger.warning(
+                        f"{LOG_TAG} [proxy:edit] 下载 image URL 失败: {type(exc).__name__}"
+                    )
+            elif raw_image:
+                b64_part = (
+                    raw_image.split(",", 1)[1]
+                    if raw_image.startswith("data:")
+                    else raw_image
+                )
+                try:
+                    image_bytes = base64.b64decode(b64_part)
+                except Exception:
+                    logger.warning(f"{LOG_TAG} [proxy:edit] image Base64 解码失败")
+            logger.debug(f"{LOG_TAG} [proxy:edit] JSON body keys: {list(body.keys())}")
+        else:
+            parts_seen: list[str] = []
+            try:
+                reader = await request.multipart()
+                async for part in reader:
+                    if part.name is None:
+                        continue
+                    parts_seen.append(part.name)
+                    if part.name == "prompt":
+                        prompt = normalize_prompt(await part.text())
+                    elif part.name == "size":
+                        raw_size = (await part.text() or "").strip()
+                        if raw_size:
+                            size = raw_size
+                    elif part.name == "n":
+                        try:
+                            n = max(1, min(4, int((await part.text() or "").strip())))
+                        except Exception:
+                            n = 1
+                    elif part.name == "strength":
+                        try:
+                            strength = float((await part.text() or "").strip())
+                            if not (0 < strength <= 1):
+                                strength = None
+                        except Exception:
+                            strength = None
+                    elif part.name in ("image", "image[]"):
+                        # 参考图：保留字节，交给 _generate_one 落盘托管。
+                        image_bytes = await part.read()
+                    elif part.name in ("mask", "mask[]"):
+                        await part.read()
+                logger.debug(f"{LOG_TAG} [proxy:edit] multipart parts: {parts_seen}")
+            except Exception as e:
+                logger.warning(f"{LOG_TAG} [proxy:edit] multipart 解析失败: {e!r}")
+                return web.json_response(
+                    {
+                        "error": {
+                            "message": f"invalid multipart: {e!r}",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                    status=400,
+                )
         if not prompt:
             logger.warning(f"{LOG_TAG} [proxy:edit] prompt 为空")
             return web.json_response(
@@ -2207,25 +3340,64 @@ class NAIGenerateImagePlugin(Star):
                 },
                 status=400,
             )
-        logger.info(
-            f"{LOG_TAG} [proxy:edit] 降级到纯文生图 | prompt='{prompt[:80]}' "
-            f"size={size} n={n} (参考图已丢弃)"
-        )
-
-        try:
-            img_bytes, reason = await self._generate_one(prompt, self.image_style, size)
-        except Exception as e:
-            logger.warning(f"{LOG_TAG} [proxy:edit] _generate_one 异常: {e!r}")
-            return web.json_response(
-                {
-                    "error": {
-                        "message": f"generate exception: {e!r}",
-                        "type": "internal_error",
-                    }
-                },
-                status=500,
+        if self.call_mode == "openai":
+            # OpenAI 兼容模式：有参考图走图生图，否则文生图
+            logger.info(
+                f"{LOG_TAG} [proxy:edit] OpenAI 模式 | prompt='{prompt[:80]}' "
+                f"size={size} n={n} strength={strength} "
+                f"image_bytes={len(image_bytes) if image_bytes else 0}"
             )
-        if not img_bytes:
+            try:
+                images, reason = await self._openai_generate(
+                    prompt,
+                    size,
+                    n=n,
+                    reference_image_bytes=image_bytes,
+                    strength=strength,
+                    noise=noise,
+                    reference_mode="img2img",
+                )
+            except Exception as e:
+                logger.warning(f"{LOG_TAG} [proxy:edit] _openai_generate 异常: {e!r}")
+                return web.json_response(
+                    {
+                        "error": {
+                            "message": f"generate exception: {e!r}",
+                            "type": "internal_error",
+                        }
+                    },
+                    status=500,
+                )
+        else:
+            # 传统 GET 模式：文生图（参考图降级忽略）
+            if image_bytes:
+                logger.info(
+                    f"{LOG_TAG} [proxy:edit] 传统 GET 模式，忽略参考图按文生图 | "
+                    f"prompt='{prompt[:80]}' size={size} n={n}"
+                )
+            else:
+                logger.info(
+                    f"{LOG_TAG} [proxy:edit] 传统 GET 文生图 | prompt='{prompt[:80]}' "
+                    f"size={size} n={n}"
+                )
+            try:
+                img_bytes, reason = await self._generate_one(
+                    prompt, self.image_style, size
+                )
+            except Exception as e:
+                logger.warning(f"{LOG_TAG} [proxy:edit] _generate_one 异常: {e!r}")
+                return web.json_response(
+                    {
+                        "error": {
+                            "message": f"generate exception: {e!r}",
+                            "type": "internal_error",
+                        }
+                    },
+                    status=500,
+                )
+            images = [img_bytes] if img_bytes else []
+
+        if not images:
             logger.warning(f"{LOG_TAG} [proxy:edit] 生图失败 | reason={reason}")
             user_msg = _format_generate_error(reason)
             status = 504 if reason == "timeout" else 502
@@ -2240,15 +3412,15 @@ class NAIGenerateImagePlugin(Star):
                 status=status,
             )
 
-        b64 = base64.b64encode(img_bytes).decode()
+        b64_list = [base64.b64encode(img).decode() for img in images]
         logger.info(
-            f"{LOG_TAG} [proxy:edit] 响应 | img_bytes={len(img_bytes)} "
-            f"b64_chars={len(b64)} n={n}"
+            f"{LOG_TAG} [proxy:edit] 响应 | images={len(b64_list)} "
+            f"total_bytes={sum(len(b) for b in images)}"
         )
         return web.json_response(
             {
                 "created": int(time.time()),
-                "data": [{"b64_json": b64} for _ in range(n)],
+                "data": [{"b64_json": b64} for b64 in b64_list],
             }
         )
 
@@ -2272,9 +3444,10 @@ class NAIGenerateImagePlugin(Star):
                 "用法: /image <提示词> [--参数=值]\n"
                 "基础: --n=1-6 --style=... --size=...\n"
                 "生成: --steps=1-100 --scale=0-20 --cfg=0-30 "
-                "--sampler=... --noise=karras|native|exponential\n"
+                "--sampler=... --noise=karras|native|exponential|polyexponential\n"
                 "覆盖: --translate=关闭|开启|自动 --template=关闭|开启 "
                 '--model=... --artist="..." --negative="..."\n'
+                '多角色(仅OpenAI兼容): --char="提示词|x|y"（可重复，坐标0-1）\n'
                 "style/size/translate/template 的值均支持中英文。"
             )
             return
@@ -2293,12 +3466,29 @@ class NAIGenerateImagePlugin(Star):
             yield event.plain_result("请提供提示词。")
             return
 
-        if not self.image_gen_key:
-            logger.warning(f"{LOG_TAG} [cmd:image] token 未配置")
+        if args.characters and self.call_mode != "openai":
+            logger.info(f"{LOG_TAG} [cmd:image] --char 需要 OpenAI 兼容模式")
             yield event.plain_result(
-                "未配置 image_gen_key，请先在插件配置中填写 token。"
+                "参数 --char（多角色坐标）仅在调用模式为「OpenAI 兼容」时可用，"
+                "请先在插件设置中切换 call_mode。"
             )
             return
+
+        # 按调用模式校验凭据
+        if self.call_mode == "openai":
+            if not self.openai_api_base_url:
+                logger.warning(f"{LOG_TAG} [cmd:image] OpenAI 接口未配置")
+                yield event.plain_result(
+                    "未配置 OpenAI 兼容生图接口（openai_api_base_url），请先在插件配置中填写。"
+                )
+                return
+        else:
+            if not self.image_gen_key:
+                logger.warning(f"{LOG_TAG} [cmd:image] token 未配置")
+                yield event.plain_result(
+                    "未配置 image_gen_key，请先在插件配置中填写 token。"
+                )
+                return
 
         n = args.n if args.n is not None else self.image_count
         style = args.style or self.image_style
@@ -2363,38 +3553,77 @@ class NAIGenerateImagePlugin(Star):
 
         success = 0
         first_reason: str | None = None
-        # 每张图都是独立请求；单张失败不会中止后续图片的生成。
-        for i in range(n):
-            logger.info(f"{LOG_TAG} [cmd:image] 生成第 {i + 1}/{n} 张")
-            img_bytes, reason = await self._generate_one(
-                prompt,
-                style,
-                size,
-                **generation_overrides,
+
+        if self.call_mode == "openai":
+            # OpenAI 兼容模式：一次请求返回 n 张；画师串并入 prompt
+            openai_prompt = self._openai_prompt(prompt, style)
+            logger.info(
+                f"{LOG_TAG} [cmd:image] OpenAI 兼容模式，一次生成 {n} 张 "
+                f"model={effective_model}"
             )
-            if img_bytes:
-                success += 1
-                logger.info(
-                    f"{LOG_TAG} [cmd:image] 第 {i + 1}/{n} 张发送 | bytes={len(img_bytes)}"
+            try:
+                images, reason = await self._openai_generate(
+                    openai_prompt,
+                    size,
+                    n=n,
+                    steps=effective_steps,
+                    scale=args.scale,
+                    sampler=args.sampler,
+                    noise_schedule=args.noise_schedule,
+                    negative=args.negative
+                    if args.negative is not None
+                    else self.negative,
+                    model=effective_model,
+                    characters=args.characters,
                 )
-                if self.bot_reply_mode == "仅图片":
-                    yield event.chain_result([Img.fromBytes(img_bytes)])
-                else:
-                    yield event.chain_result(
-                        [
-                            Plain(f"[{i + 1}/{n}]"),
-                            Img.fromBytes(img_bytes),
-                        ]
+            except Exception as exc:
+                logger.warning(f"{LOG_TAG} [cmd:image] _openai_generate 异常: {exc!r}")
+                images, reason = [], "exception"
+            if images:
+                for idx, img_bytes in enumerate(images, start=1):
+                    success += 1
+                    logger.info(
+                        f"{LOG_TAG} [cmd:image] 第 {idx}/{n} 张发送 | bytes={len(img_bytes)}"
                     )
+                    if self.bot_reply_mode == "仅图片":
+                        yield event.chain_result([Img.fromBytes(img_bytes)])
+                    else:
+                        yield event.chain_result(
+                            [Plain(f"[{idx}/{n}]"), Img.fromBytes(img_bytes)]
+                        )
             else:
-                if first_reason is None:
-                    first_reason = reason
-                logger.warning(
-                    f"{LOG_TAG} [cmd:image] 第 {i + 1}/{n} 张失败 | reason={reason}"
+                first_reason = reason
+                yield event.plain_result(f"生成失败：{_format_generate_error(reason)}")
+        else:
+            # 传统 GET 模式：每张图独立请求，单张失败不中止后续
+            for i in range(n):
+                logger.info(f"{LOG_TAG} [cmd:image] 生成第 {i + 1}/{n} 张")
+                img_bytes, reason = await self._generate_one(
+                    prompt,
+                    style,
+                    size,
+                    **generation_overrides,
                 )
-                yield event.plain_result(
-                    f"第 {i + 1}/{n} 张生成失败：{_format_generate_error(reason)}"
-                )
+                if img_bytes:
+                    success += 1
+                    logger.info(
+                        f"{LOG_TAG} [cmd:image] 第 {i + 1}/{n} 张发送 | bytes={len(img_bytes)}"
+                    )
+                    if self.bot_reply_mode == "仅图片":
+                        yield event.chain_result([Img.fromBytes(img_bytes)])
+                    else:
+                        yield event.chain_result(
+                            [Plain(f"[{i + 1}/{n}]"), Img.fromBytes(img_bytes)]
+                        )
+                else:
+                    if first_reason is None:
+                        first_reason = reason
+                    logger.warning(
+                        f"{LOG_TAG} [cmd:image] 第 {i + 1}/{n} 张失败 | reason={reason}"
+                    )
+                    yield event.plain_result(
+                        f"第 {i + 1}/{n} 张生成失败：{_format_generate_error(reason)}"
+                    )
 
         if success == 0:
             logger.error(
@@ -2616,10 +3845,17 @@ class NAIGenerateImagePlugin(Star):
             yield "生成失败，提示词不应为空"
             return
 
-        if not self.image_gen_key:
-            logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] token 未配置")
-            yield "生成失败，未配置 image_gen_key，请告知用户先在插件配置中填写 token。"
-            return
+        # 按调用模式校验凭据
+        if self.call_mode == "openai":
+            if not self.openai_api_base_url:
+                logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] OpenAI 接口未配置")
+                yield "生成失败，未配置 OpenAI 兼容生图接口，请告知用户先在插件配置中填写 openai_api_base_url。"
+                return
+        else:
+            if not self.image_gen_key:
+                logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] token 未配置")
+                yield "生成失败，未配置 image_gen_key，请告知用户先在插件配置中填写 token。"
+                return
 
         if style not in IMAGE_STYLES and style != "custom":
             logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 未知风格: {style}")
@@ -2660,7 +3896,16 @@ class NAIGenerateImagePlugin(Star):
 
         logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生成第 1/1 张")
         try:
-            img_bytes, reason = await self._generate_one(prompt, style, size)
+            if self.call_mode == "openai":
+                openai_prompt = self._openai_prompt(prompt, style)
+                images, reason = await self._openai_generate(
+                    openai_prompt,
+                    size,
+                    n=1,
+                )
+                img_bytes = images[0] if images else None
+            else:
+                img_bytes, reason = await self._generate_one(prompt, style, size)
         finally:
             if hasattr(event, "set_extra"):
                 event.set_extra("_nai_image_generation_state", "finished")

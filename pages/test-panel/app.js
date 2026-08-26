@@ -1,8 +1,11 @@
 /**
- * NAI 生图测试面板 - 前端逻辑 v4.2 (Endfield Protocol)
+ * NAI 生图测试面板 - 前端逻辑 v4.6 (Endfield Protocol)
  *
  * 包含：
  *   - 双提示词框：NAI 风格 + 自然语言
+ *   - OpenAI 兼容格式：参考图（vibe / img2img / director 精准参考）、噪声、
+ *     种子、director-tools 图片处理动作、多角色坐标控制与完整模型列表
+ *     （对齐接口文档 §4-§9）
  *   - 终末地高可见度动态等高线拓扑地形引擎 (Multi-Peak Gaussian + Dense Marching Squares)
  *   - 柔和战术圆角与亚克力毛玻璃材质交互
  *   - 自动转译与生图流水线展示
@@ -47,11 +50,57 @@
     resultGrid: $("resultGrid"),
     mergeInfo: $("mergeInfo"),
     mergeSteps: $("mergeSteps"),
+    callFormat: $("callFormat"),
+    callFormatHint: $("callFormatHint"),
+    openaiConfigStatus: $("openaiConfigStatus"),
+    openaiConfigStatusText: $("openaiConfigStatusText"),
+    refUploadWrap: $("refUploadWrap"),
+    refFile: $("refFile"),
+    refPreviewWrap: $("refPreviewWrap"),
+    refPreview: $("refPreview"),
+    refRemove: $("refRemove"),
+    refStrengthWrap: $("refStrengthWrap"),
+    refStrength: $("refStrength"),
+    refModeWrap: $("refModeWrap"),
+    refMode: $("refMode"),
+    refNoiseWrap: $("refNoiseWrap"),
+    refNoise: $("refNoise"),
+    openaiSeedWrap: $("openaiSeedWrap"),
+    openaiSeed: $("openaiSeed"),
+    directorActionWrap: $("directorActionWrap"),
+    directorAction: $("directorAction"),
+    directorCaptionWrap: $("directorCaptionWrap"),
+    directorCaption: $("directorCaption"),
+    charListWrap: $("charListWrap"),
+    charList: $("charList"),
+    charAdd: $("charAdd"),
   };
 
   // ===== 状态 =====
   let isGenerating = false;
   let lastRequestBody = null;
+  // 本地上传参考图的裸 base64（不含 data: 前缀），仅 OpenAI 兼容格式使用
+  let referenceImageB64 = "";
+  // 当前调用格式："direct" | "openai"
+  let currentCallFormat = "direct";
+  // 分段切换按钮引用
+  let formatToggleBtns = [];
+  // OpenAI 兼容模型列表（后端配置接口下发，用于切换格式时替换模型下拉项）
+  let openaiModels = [
+    "nai-diffusion-5-full",
+    "nai-diffusion-5-curated",
+    "nai-diffusion-4-5-full",
+    "nai-diffusion-4-5-curated",
+    "nai-diffusion-4-full",
+    "nai-diffusion-4-curated-preview",
+    "nai-diffusion-3",
+    "nai-diffusion-furry-3",
+  ];
+  // NAI 直连模式可用的模型下拉项
+  const DIRECT_MODEL_OPTIONS = [
+    { value: "nai-diffusion-4-5-full", label: "V4.5 完整版 [4.5_FULL]" },
+    { value: "nai-diffusion-5-full", label: "V5 完整版 [5.0_FULL]" },
+  ];
 
   // ===== 工具函数 =====
   function show(el) { if (el) el.classList.remove("hidden"); }
@@ -301,7 +350,9 @@
   function getCachedFields() {
     return [
       "naiPrompt", "nlPrompt", "sampler", "size", "steps", "scale",
-      "cfg", "noiseSchedule", "model", "count", "style", "customArtists", "negative"
+      "cfg", "noiseSchedule", "model", "count", "style", "customArtists", "negative",
+      "refStrength", "refMode", "refNoise", "openaiSeed", "directorAction",
+      "directorCaption"
     ];
   }
 
@@ -315,6 +366,9 @@
           const el = els[key];
           if (el) data[key] = el.value;
         });
+        data.callFormat = currentCallFormat;
+        const chars = collectCharRows();
+        if (chars.length) data.characters = chars;
         const bridge = await getBridge();
         await bridge.apiPost("test_panel/save_cache", data);
       } catch (e) {
@@ -337,6 +391,19 @@
           restored = true;
         }
       });
+      if (data.callFormat === "openai" || data.callFormat === "direct") {
+        currentCallFormat = data.callFormat;
+        setCallFormat(currentCallFormat);
+        restored = true;
+      }
+      if (Array.isArray(data.characters) && data.characters.length) {
+        clearCharRows();
+        data.characters.slice(0, MAX_CHAR_ROWS).forEach((item) => {
+          if (!item || typeof item.prompt !== "string" || !item.prompt.trim()) return;
+          addCharRow(item.prompt, Number(item.x) || 0.5, Number(item.y) || 0.5);
+        });
+        restored = true;
+      }
       return restored;
     } catch (e) {
       console.warn("[NAI Panel] 缓存加载失败:", e);
@@ -360,6 +427,32 @@
         setBadge(els.tokenBadge, "Token: 未配置", "badge-error");
       }
       setBadge(els.baseUrlBadge, config.base_url || "--", "badge-info");
+      // 后端下发的 OpenAI 兼容模型列表（对齐接口文档 §9）
+      if (Array.isArray(config.openai_models) && config.openai_models.length) {
+        openaiModels = config.openai_models;
+        if (currentCallFormat === "openai") updateModelOptionsUI();
+      }
+      // 精准参考描述：后端配置下发默认值（不覆盖已缓存的输入）
+      if (els.directorCaption && !els.directorCaption.value.trim() && config.openai_director_caption) {
+        els.directorCaption.value = config.openai_director_caption;
+      }
+      // OpenAI 兼容格式配置状态（仅在 OpenAI 模式下展示）
+      if (els.openaiConfigStatus && currentCallFormat === "openai") {
+        show(els.openaiConfigStatus);
+        if (config.openai_available) {
+          els.openaiConfigStatusText.textContent =
+            "OpenAI 接口已配置：" + (config.openai_api_base_url || "");
+          els.openaiConfigStatus.querySelector(".status-dot").className =
+            "status-dot ok";
+        } else {
+          els.openaiConfigStatusText.textContent =
+            "OpenAI 接口未配置：请在插件设置填写 openai_api_base_url 与 openai_api_key";
+          els.openaiConfigStatus.querySelector(".status-dot").className =
+            "status-dot error";
+        }
+      } else if (els.openaiConfigStatus) {
+        hide(els.openaiConfigStatus);
+      }
     } catch (err) {
       setBadge(els.tokenBadge, "配置加载失败", "badge-error");
     }
@@ -401,6 +494,31 @@
     }
   }
 
+  // 按当前调用格式替换模型下拉项：直连只有 V4.5/V5 完整版，
+  // OpenAI 兼容格式展示接口文档 §9 的完整模型列表。
+  function updateModelOptionsUI() {
+    const curModel = els.model.value;
+    els.model.innerHTML = "";
+    if (currentCallFormat === "openai") {
+      openaiModels.forEach((name) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        els.model.appendChild(opt);
+      });
+    } else {
+      DIRECT_MODEL_OPTIONS.forEach((item) => {
+        const opt = document.createElement("option");
+        opt.value = item.value;
+        opt.textContent = item.label;
+        els.model.appendChild(opt);
+      });
+    }
+    if (Array.from(els.model.options).some((o) => o.value === curModel)) {
+      els.model.value = curModel;
+    }
+  }
+
   // ===== 表单交互 =====
   function toggleCustomArtists() {
     if (els.style.value === "custom") {
@@ -427,6 +545,7 @@
       noise_schedule: els.noiseSchedule.value,
       model: els.model.value,
       n: safeInt(els.count.value, 1),
+      call_format: currentCallFormat,
     };
 
     const neg = els.negative.value.trim();
@@ -436,7 +555,147 @@
       body.custom_artists = els.customArtists.value.trim();
     }
 
+    // OpenAI 兼容格式：附带本地上传参考图、重绘强度、噪声、种子、
+    // 参考图使用模式与 director-tools 动作（对齐接口文档 §4-§8）
+    if (body.call_format === "openai") {
+      if (referenceImageB64) {
+        body.reference_image_b64 = referenceImageB64;
+      }
+      // director 模式下这两项是 img2img 参数、不适用，跳过以免默认值
+      // 覆盖精准参考的主强度（后端按文档 §8.5 默认 1.0）
+      const isDirector = els.refMode && els.refMode.value === "director";
+      if (!isDirector && els.refStrength) {
+        const strength = parseFloat(els.refStrength.value);
+        if (!Number.isNaN(strength) && strength > 0 && strength <= 1) {
+          body.strength = strength;
+        }
+      }
+      if (!isDirector && els.refNoise) {
+        const noise = parseFloat(els.refNoise.value);
+        if (!Number.isNaN(noise) && noise >= 0 && noise <= 1) {
+          body.noise = noise;
+        }
+      }
+      if (els.openaiSeed && els.openaiSeed.value !== "") {
+        const seed = parseInt(els.openaiSeed.value, 10);
+        if (!Number.isNaN(seed) && seed >= -1) {
+          body.seed = seed;
+        }
+      }
+      if (els.refMode) {
+        body.reference_mode = els.refMode.value;
+      }
+      if (els.directorAction && els.directorAction.value) {
+        body.director_action = els.directorAction.value;
+      }
+      // 精准参考（§6）：director 模式下附带 base_caption
+      if (els.refMode && els.refMode.value === "director" && els.directorCaption) {
+        const caption = els.directorCaption.value.trim();
+        if (caption) {
+          body.director_caption = caption;
+        }
+      }
+      // 多角色坐标控制（§7）：收集角色行，空提示词的行跳过
+      const chars = collectCharRows();
+      if (chars.length) {
+        body.characters = chars;
+      }
+    }
+
     return body;
+  }
+
+  // ===== 多角色坐标行管理（§7） =====
+  const MAX_CHAR_ROWS = 6;
+
+  function addCharRow(prompt = "", x = 0.5, y = 0.5) {
+    if (!els.charList || els.charList.children.length >= MAX_CHAR_ROWS) return;
+
+    const row = document.createElement("div");
+    row.className = "char-row";
+
+    const promptInput = document.createElement("input");
+    promptInput.type = "text";
+    promptInput.className = "input acrylic-input char-prompt";
+    promptInput.placeholder = "角色提示词，如 1girl, red dress";
+    promptInput.value = prompt;
+
+    const xInput = document.createElement("input");
+    xInput.type = "number";
+    xInput.className = "input acrylic-input char-coord";
+    xInput.min = "0";
+    xInput.max = "1";
+    xInput.step = "0.05";
+    xInput.value = String(x);
+    xInput.title = "x 坐标（0-1，从左到右）";
+
+    const yInput = document.createElement("input");
+    yInput.type = "number";
+    yInput.className = "input acrylic-input char-coord";
+    yInput.min = "0";
+    yInput.max = "1";
+    yInput.step = "0.05";
+    yInput.value = String(y);
+    yInput.title = "y 坐标（0-1，从上到下）";
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "btn-link char-remove";
+    removeBtn.title = "移除该角色";
+    removeBtn.innerHTML = '<span class="link-icon">✕</span>';
+    removeBtn.addEventListener("click", () => {
+      row.remove();
+      saveCache();
+    });
+
+    row.appendChild(promptInput);
+    row.appendChild(xInput);
+    row.appendChild(yInput);
+    row.appendChild(removeBtn);
+    els.charList.appendChild(row);
+
+    promptInput.addEventListener("input", saveCache);
+  }
+
+  function clearCharRows() {
+    if (els.charList) els.charList.innerHTML = "";
+  }
+
+  function collectCharRows() {
+    if (!els.charList) return [];
+    const chars = [];
+    Array.from(els.charList.children).forEach((row) => {
+      const inputs = row.querySelectorAll("input");
+      if (inputs.length < 3) return;
+      const prompt = String(inputs[0].value || "").trim();
+      if (!prompt) return;
+      let x = parseFloat(inputs[1].value);
+      let y = parseFloat(inputs[2].value);
+      if (Number.isNaN(x)) x = 0.5;
+      if (Number.isNaN(y)) y = 0.5;
+      x = Math.min(1, Math.max(0, x));
+      y = Math.min(1, Math.max(0, y));
+      chars.push({ prompt, x, y });
+    });
+    return chars;
+  }
+
+  // 精准参考描述输入框仅在 director 模式下可见
+  function toggleDirectorCaption() {
+    const openai = currentCallFormat === "openai";
+    const director = els.refMode && els.refMode.value === "director";
+    if (openai && director) {
+      show(els.directorCaptionWrap);
+      // 精准参考不需要重绘强度/附加噪声（那是 img2img 参数），隐藏避免误导
+      hide(els.refStrengthWrap);
+      hide(els.refNoiseWrap);
+    } else {
+      hide(els.directorCaptionWrap);
+      if (openai) {
+        show(els.refStrengthWrap);
+        show(els.refNoiseWrap);
+      }
+    }
   }
 
   // ===== 生成图片 =====
@@ -444,13 +703,26 @@
     if (isGenerating) return;
 
     const body = buildRequestBody();
-    if (!body.nai_prompt && !body.nl_prompt) {
+    if (!body.nai_prompt && !body.nl_prompt && !body.director_action) {
       showError("请至少填写一个提示词框（NAI 风格或自然语言）。");
+      return;
+    }
+    if (body.director_action && !body.reference_image_b64) {
+      showError("图片处理动作需要先在「调用格式」卡片上传一张源图片。");
+      return;
+    }
+    if (body.reference_mode === "director" && !body.reference_image_b64) {
+      showError("精准参考（director）需要先在「调用格式」卡片上传一张参考图。");
       return;
     }
 
     lastRequestBody = body;
     isGenerating = true;
+    els.loadingText.textContent = body.director_action
+      ? "正在以 director-tools 处理图片..."
+      : body.call_format === "openai"
+        ? "正在以 OpenAI 兼容格式生成（参考图已随请求提交）..."
+        : "正在转译 + 生成图片...";
     setLoading(true);
     hideError();
     hideResults();
@@ -458,7 +730,11 @@
 
     try {
       const bridge = await getBridge();
-      const resp = await bridge.apiPost("test_panel/generate", body);
+      const endpoint =
+        body.call_format === "openai"
+          ? "test_panel/generate_openai"
+          : "test_panel/generate";
+      const resp = await bridge.apiPost(endpoint, body);
 
       let images, mergeInfo;
       if (Array.isArray(resp)) {
@@ -604,7 +880,8 @@
       "2K竖图": "2K竖图", "2K横图": "2K横图", "2K方图": "2K方图",
       "4K竖图": "4K竖图", "4K横图": "4K横图", "4K方图": "4K方图"
     };
-    const metaText = `${styleNames[requestBody.style] || requestBody.style} · ${sizeNames[requestBody.size] || requestBody.size} · ${images.length} UNIT`;
+    const formatLabel = requestBody.call_format === "openai" ? "OpenAI" : "NAI直连";
+    const metaText = `${styleNames[requestBody.style] || requestBody.style} · ${sizeNames[requestBody.size] || requestBody.size} · ${images.length} UNIT · ${formatLabel}`;
     setBadge(els.resultMeta, metaText, "badge-tech-success");
     show(els.resultMeta);
 
@@ -688,7 +965,99 @@
     els.count.value = "1";
     els.negative.value = "";
     els.customArtists.value = "";
+    clearReferenceImage();
+    els.refStrength.value = "0.7";
+    els.refMode.value = "vibe";
+    els.refNoise.value = "0.7";
+    els.openaiSeed.value = "-1";
+    els.directorAction.value = "";
+    els.directorCaption.value = "character&style";
+    clearCharRows();
     toggleCustomArtists();
+    setCallFormat("direct");
+    saveCache();
+  }
+
+  // ===== 调用格式切换（NAI 直连 / OpenAI 兼容） =====
+  function initFormatToggle() {
+    formatToggleBtns = Array.from(
+      els.callFormat.querySelectorAll(".format-toggle-btn")
+    );
+    formatToggleBtns.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var fmt = btn.getAttribute("data-format");
+        if (fmt === currentCallFormat) return;
+        setCallFormat(fmt);
+        saveCache();
+      });
+    });
+  }
+
+  function setCallFormat(fmt) {
+    currentCallFormat = fmt;
+    formatToggleBtns.forEach(function (btn) {
+      var active = btn.getAttribute("data-format") === fmt;
+      btn.classList.toggle("active", active);
+    });
+    var openai = fmt === "openai";
+    if (openai) {
+      show(els.refUploadWrap);
+      show(els.refStrengthWrap);
+      show(els.refModeWrap);
+      show(els.refNoiseWrap);
+      show(els.openaiSeedWrap);
+      show(els.directorActionWrap);
+      show(els.charListWrap);
+      if (els.openaiConfigStatus) show(els.openaiConfigStatus);
+      els.callFormatHint.textContent =
+        "请求按 OpenAI 兼容格式发往配置的 /v1/images 端点，支持参考图、种子与图片处理动作。";
+      els.trialBtn.disabled = true;
+      els.trialBtn.title = "试用生成仅支持 NAI 直连格式";
+    } else {
+      hide(els.refUploadWrap);
+      hide(els.refStrengthWrap);
+      hide(els.refModeWrap);
+      hide(els.refNoiseWrap);
+      hide(els.openaiSeedWrap);
+      hide(els.directorActionWrap);
+      hide(els.charListWrap);
+      if (els.openaiConfigStatus) hide(els.openaiConfigStatus);
+      els.callFormatHint.textContent =
+        "直连 nai.sta1n.cn 原生接口生成。";
+      els.trialBtn.disabled = false;
+      els.trialBtn.title = "";
+      loadTrialStatus();
+    }
+    toggleDirectorCaption();
+    updateModelOptionsUI();
+  }
+
+  function clearReferenceImage() {
+    referenceImageB64 = "";
+    if (els.refFile) els.refFile.value = "";
+    hide(els.refPreviewWrap);
+    if (els.refPreview) els.refPreview.removeAttribute("src");
+  }
+
+  function handleReferenceFileChange() {
+    const file = els.refFile && els.refFile.files && els.refFile.files[0];
+    if (!file) {
+      clearReferenceImage();
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = String(e.target.result || "");
+      const comma = dataUrl.indexOf(",");
+      referenceImageB64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+      els.refPreview.src = dataUrl;
+      show(els.refPreviewWrap);
+    };
+    reader.onerror = () => {
+      clearReferenceImage();
+      showError("参考图读取失败，请重新选择图片文件。");
+    };
+    reader.readAsDataURL(file);
   }
 
   // ===== 载入默认负面词 =====
@@ -820,6 +1189,18 @@
       updateSizeOptionsUI();
     });
     els.style.addEventListener("change", toggleCustomArtists);
+    initFormatToggle();
+    els.refFile.addEventListener("change", handleReferenceFileChange);
+    els.refRemove.addEventListener("click", clearReferenceImage);
+    if (els.refMode) {
+      els.refMode.addEventListener("change", toggleDirectorCaption);
+    }
+    if (els.charAdd) {
+      els.charAdd.addEventListener("click", () => {
+        addCharRow();
+        saveCache();
+      });
+    }
     els.generateBtn.addEventListener("click", generate);
     els.trialBtn.addEventListener("click", trialGenerate);
     els.resetBtn.addEventListener("click", resetParams);
@@ -866,6 +1247,7 @@
     await loadCache();
     updateSizeOptionsUI();
     toggleCustomArtists();
+    setCallFormat(currentCallFormat);
     // 仅加载 token 状态 badge（不填表单）
     await loadTokenStatus();
     // 加载试用状态
