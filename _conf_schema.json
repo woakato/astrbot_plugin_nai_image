@@ -36,7 +36,7 @@
         "type": "string",
         "default": "nai-diffusion-5-full",
         "description": "OpenAI 兼容接口模型名",
-        "hint": "接口必填字段。nai-diffusion-5-full 为文档推荐的通用动漫插画模型；需要精准参考等 4.5 能力时选 nai-diffusion-4-5-full。director-tools（图片处理）由面板动作自动选用，无需在此配置。",
+        "hint": "接口必填字段。nai-diffusion-5-full 为文档推荐的通用动漫插画模型；精准参考支持 nai-diffusion-4-5 与 nai-diffusion-5 系列，其他模型会自动回退 4.5。director-tools（图片处理）由面板动作自动选用，无需在此配置。",
         "options": [
             "nai-diffusion-5-full",
             "nai-diffusion-5-curated",
@@ -55,7 +55,7 @@
         "type": "string",
         "default": "vibe",
         "description": "参考图使用模式",
-        "hint": "vibe：参考图走 generations 的 reference_image_multiple 做风格/角色参考（§5）；img2img：参考图走 /v1/images/edits 做图生图重绘（§4）；director：精准参考，走 generations 的 director_reference_* 参数（§6，建议配合 nai-diffusion-4-5 系列模型）。本地代理的 edits 端点始终按 img2img 处理。",
+        "hint": "支持一次提交多张参考图（最多 8 张，面板可逐图设置强度）。vibe：参考图走 generations 的 reference_image_multiple 做风格/角色参考（§5）；img2img：仅取第一张图走 /v1/images/edits 做图生图重绘（§4）；director：精准参考，走 generations 的 director_reference_* 参数（§6，支持 nai-diffusion-4-5 与 nai-diffusion-5 系列）。本地代理的 edits 端点始终按 img2img 处理。",
         "options": [
             "vibe",
             "img2img",
@@ -74,7 +74,40 @@
         "type": "string",
         "default": "character&style",
         "description": "精准参考描述",
-        "hint": "精准参考（director 模式）的 base_caption（§6），决定从参考图保留哪些信息，常见取值：character&style、character、style。面板可临时覆盖。",
+        "hint": "精准参考（director 模式）的默认 base_caption（§6），决定从参考图保留哪些信息，常见取值：character&style、character、style；按顺序应用到全部参考图，面板可逐张覆盖。",
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_vibe_strength": {
+        "type": "float",
+        "default": 0.6,
+        "description": "Vibe 参考权重",
+        "hint": "Vibe 参考模式下每张参考图的默认权重（reference_strength_multiple，0-1，§5）：越大越受参考图影响。面板逐图设置与 LLM 工具/陪伴联动未显式给强度时使用此值。",
+        "min": 0,
+        "max": 1,
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_director_strength": {
+        "type": "float",
+        "default": 1.0,
+        "description": "精准参考权重",
+        "hint": "精准参考（director）模式下每张参考图的默认主权重（director_reference_strength_values，0-1，§8）。保持角色建议 0.9-1.0；面板逐图设置与聊天/陪伴调用未显式给强度时使用此值。",
+        "min": 0,
+        "max": 1,
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_director_secondary_strength": {
+        "type": "float",
+        "default": 0.5,
+        "description": "精准参考次级特征权重",
+        "hint": "精准参考的次级特征强度（director_reference_secondary_strength_values，0-1，§8 推荐区间 0.35-0.7）：越高越强地保留参考图的画风细节。",
+        "min": 0,
+        "max": 1,
         "condition": {
             "call_mode": "openai"
         }
@@ -83,7 +116,7 @@
         "type": "file",
         "default": [],
         "description": "精准参考兜底参考图",
-        "hint": "参考图使用模式为「精准参考」时，若请求没有携带参考图（聊天指令、陪伴插件联动等场景），自动使用这里的第一张图作为精准参考图；留空则照旧提示需要参考图。支持 png/jpg/webp。",
+        "hint": "参考图使用模式为「精准参考」时，若请求没有携带参考图（聊天指令、陪伴插件联动等场景），自动按顺序使用这里的全部图片作为精准参考（最多 8 张）；留空则照旧提示需要参考图。支持 png/jpg/webp。",
         "file_types": ["png", "jpg", "jpeg", "webp"],
         "condition": {
             "call_mode": "openai"

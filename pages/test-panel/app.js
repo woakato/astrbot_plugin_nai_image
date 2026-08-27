@@ -1,10 +1,11 @@
 /**
- * NAI 生图测试面板 - 前端逻辑 v4.6 (Endfield Protocol)
+ * NAI 生图测试面板 - 前端逻辑 v4.7 (Endfield Protocol)
  *
  * 包含：
  *   - 双提示词框：NAI 风格 + 自然语言
- *   - OpenAI 兼容格式：参考图（vibe / img2img / director 精准参考）、噪声、
- *     种子、director-tools 图片处理动作、多角色坐标控制与完整模型列表
+ *   - OpenAI 兼容格式：多张参考图（最多 8 张，Vibe / 精准参考支持逐图强度，
+ *     精准参考可逐图指定 base_caption）、img2img 重绘、噪声、种子、
+ *     director-tools 图片处理动作、多角色坐标控制与完整模型列表
  *     （对齐接口文档 §4-§9）
  *   - 终末地高可见度动态等高线拓扑地形引擎 (Multi-Peak Gaussian + Dense Marching Squares)
  *   - 柔和战术圆角与亚克力毛玻璃材质交互
@@ -56,8 +57,9 @@
     openaiConfigStatusText: $("openaiConfigStatusText"),
     refUploadWrap: $("refUploadWrap"),
     refFile: $("refFile"),
-    refPreviewWrap: $("refPreviewWrap"),
-    refPreview: $("refPreview"),
+    refCountTag: $("refCountTag"),
+    refGridWrap: $("refGridWrap"),
+    refGrid: $("refGrid"),
     refRemove: $("refRemove"),
     refStrengthWrap: $("refStrengthWrap"),
     refStrength: $("refStrength"),
@@ -69,8 +71,6 @@
     openaiSeed: $("openaiSeed"),
     directorActionWrap: $("directorActionWrap"),
     directorAction: $("directorAction"),
-    directorCaptionWrap: $("directorCaptionWrap"),
-    directorCaption: $("directorCaption"),
     charListWrap: $("charListWrap"),
     charList: $("charList"),
     charAdd: $("charAdd"),
@@ -79,8 +79,13 @@
   // ===== 状态 =====
   let isGenerating = false;
   let lastRequestBody = null;
-  // 本地上传参考图的裸 base64（不含 data: 前缀），仅 OpenAI 兼容格式使用
-  let referenceImageB64 = "";
+  // 本地上传参考图列表（OpenAI 兼容格式）：{ b64, dataUrl, name, strength, caption }
+  let referenceImages = [];
+  // 精准参考描述默认值（后端配置下发，新参考图卡片初始化用）
+  let defaultDirectorCaption = "character&style";
+  // 参考图默认权重（后端配置下发，新参考图卡片初始化用）
+  let defaultVibeStrength = 0.6;
+  let defaultDirectorStrength = 1;
   // 当前调用格式："direct" | "openai"
   let currentCallFormat = "direct";
   // 分段切换按钮引用
@@ -351,8 +356,7 @@
     return [
       "naiPrompt", "nlPrompt", "sampler", "size", "steps", "scale",
       "cfg", "noiseSchedule", "model", "count", "style", "customArtists", "negative",
-      "refStrength", "refMode", "refNoise", "openaiSeed", "directorAction",
-      "directorCaption"
+      "refStrength", "refMode", "refNoise", "openaiSeed", "directorAction"
     ];
   }
 
@@ -432,9 +436,22 @@
         openaiModels = config.openai_models;
         if (currentCallFormat === "openai") updateModelOptionsUI();
       }
-      // 精准参考描述：后端配置下发默认值（不覆盖已缓存的输入）
-      if (els.directorCaption && !els.directorCaption.value.trim() && config.openai_director_caption) {
-        els.directorCaption.value = config.openai_director_caption;
+      // 精准参考描述默认值：后端配置下发，新参考图卡片以此初始化
+      if (config.openai_director_caption) {
+        defaultDirectorCaption = String(config.openai_director_caption);
+      }
+      // 参考图默认权重：后端配置下发，新参考图卡片以此初始化
+      const vibeStrength = parseFloat(config.openai_vibe_strength);
+      if (!Number.isNaN(vibeStrength) && vibeStrength >= 0 && vibeStrength <= 1) {
+        defaultVibeStrength = vibeStrength;
+      }
+      const directorStrength = parseFloat(config.openai_director_strength);
+      if (
+        !Number.isNaN(directorStrength) &&
+        directorStrength >= 0 &&
+        directorStrength <= 1
+      ) {
+        defaultDirectorStrength = directorStrength;
       }
       // OpenAI 兼容格式配置状态（仅在 OpenAI 模式下展示）
       if (els.openaiConfigStatus && currentCallFormat === "openai") {
@@ -555,25 +572,39 @@
       body.custom_artists = els.customArtists.value.trim();
     }
 
-    // OpenAI 兼容格式：附带本地上传参考图、重绘强度、噪声、种子、
-    // 参考图使用模式与 director-tools 动作（对齐接口文档 §4-§8）
+    // OpenAI 兼容格式：附带本地上传的多张参考图（§5.2 最多 8 张）、逐图
+    // 强度/精准参考描述、img2img 重绘参数、种子、参考图使用模式与
+    // director-tools 动作（对齐接口文档 §4-§8）
     if (body.call_format === "openai") {
-      if (referenceImageB64) {
-        body.reference_image_b64 = referenceImageB64;
+      const refs = referenceImages;
+      if (refs.length) {
+        body.reference_image_b64_list = refs.map((r) => r.b64);
       }
-      // director 模式下这两项是 img2img 参数、不适用，跳过以免默认值
-      // 覆盖精准参考的主强度（后端按文档 §8.5 默认 1.0）
-      const isDirector = els.refMode && els.refMode.value === "director";
-      if (!isDirector && els.refStrength) {
-        const strength = parseFloat(els.refStrength.value);
-        if (!Number.isNaN(strength) && strength > 0 && strength <= 1) {
-          body.strength = strength;
+      const mode = els.refMode ? els.refMode.value : "vibe";
+      if (els.refMode) {
+        body.reference_mode = mode;
+      }
+      if (mode === "img2img") {
+        // img2img 仅取第一张主输入图，使用全局重绘强度与附加噪声；
+        // 其余模式走逐图强度（后端按 vibe 默认 0.6 / 精准参考默认 1.0）
+        if (els.refStrength) {
+          const strength = parseFloat(els.refStrength.value);
+          if (!Number.isNaN(strength) && strength > 0 && strength <= 1) {
+            body.strength = strength;
+          }
         }
-      }
-      if (!isDirector && els.refNoise) {
-        const noise = parseFloat(els.refNoise.value);
-        if (!Number.isNaN(noise) && noise >= 0 && noise <= 1) {
-          body.noise = noise;
+        if (els.refNoise) {
+          const noise = parseFloat(els.refNoise.value);
+          if (!Number.isNaN(noise) && noise >= 0 && noise <= 1) {
+            body.noise = noise;
+          }
+        }
+      } else if (refs.length) {
+        body.reference_strengths = refs.map((r) =>
+          Math.min(1, Math.max(0, Number(r.strength) || 0))
+        );
+        if (mode === "director") {
+          body.director_captions = refs.map((r) => r.caption);
         }
       }
       if (els.openaiSeed && els.openaiSeed.value !== "") {
@@ -582,18 +613,8 @@
           body.seed = seed;
         }
       }
-      if (els.refMode) {
-        body.reference_mode = els.refMode.value;
-      }
       if (els.directorAction && els.directorAction.value) {
         body.director_action = els.directorAction.value;
-      }
-      // 精准参考（§6）：director 模式下附带 base_caption
-      if (els.refMode && els.refMode.value === "director" && els.directorCaption) {
-        const caption = els.directorCaption.value.trim();
-        if (caption) {
-          body.director_caption = caption;
-        }
       }
       // 多角色坐标控制（§7）：收集角色行，空提示词的行跳过
       const chars = collectCharRows();
@@ -680,21 +701,168 @@
     return chars;
   }
 
-  // 精准参考描述输入框仅在 director 模式下可见
-  function toggleDirectorCaption() {
+  // ===== 多张参考图管理（OpenAI 兼容格式 §5.2，最多 8 张） =====
+  const MAX_REF_IMAGES = 8;
+  const REF_CAPTIONS = ["character&style", "character", "style"];
+
+  function currentRefMode() {
+    return els.refMode ? els.refMode.value : "vibe";
+  }
+
+  // 新参考图卡片按模式取插件设置的默认权重：精准参考 1.0（§8.5）、
+  // Vibe 参考 0.6，均可在设置中修改
+  function defaultRefStrength() {
+    return currentRefMode() === "director" ? defaultDirectorStrength : defaultVibeStrength;
+  }
+
+  function addRefImages(fileList) {
+    let remaining = MAX_REF_IMAGES - referenceImages.length;
+    Array.from(fileList || []).forEach((file) => {
+      if (remaining <= 0) return;
+      if (!file || file.type.indexOf("image/") !== 0) return;
+      remaining -= 1;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const dataUrl = String(e.target.result || "");
+        const comma = dataUrl.indexOf(",");
+        referenceImages.push({
+          b64: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl,
+          dataUrl,
+          name: file.name || `image_${referenceImages.length + 1}`,
+          strength: defaultRefStrength(),
+          caption: defaultDirectorCaption,
+        });
+        renderRefGrid();
+        saveCache();
+      };
+      reader.onerror = () => {
+        showError(`参考图 ${file.name || ""} 读取失败，请重新选择。`);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function removeRefImage(index) {
+    referenceImages.splice(index, 1);
+    renderRefGrid();
+    saveCache();
+  }
+
+  function clearReferenceImage() {
+    referenceImages = [];
+    if (els.refFile) els.refFile.value = "";
+    renderRefGrid();
+  }
+
+  function renderRefGrid() {
+    if (!els.refGrid) return;
+    const mode = currentRefMode();
+    els.refGrid.className = "ref-grid mode-" + mode;
+    els.refGrid.innerHTML = "";
+
+    referenceImages.forEach((item, idx) => {
+      const row = document.createElement("div");
+      row.className = "ref-item";
+
+      const thumb = document.createElement("img");
+      thumb.className = "ref-thumb";
+      thumb.src = item.dataUrl;
+      thumb.alt = `参考图 ${idx + 1}`;
+      thumb.title = item.name;
+      thumb.addEventListener("click", () => openLightbox(item.dataUrl));
+      row.appendChild(thumb);
+
+      const body = document.createElement("div");
+      body.className = "ref-item-body";
+
+      const controls = document.createElement("div");
+      controls.className = "ref-item-controls";
+
+      // 逐图强度：vibe 写入 reference_strength_multiple、精准参考写入
+      // director_reference_strength_values（均按下标对应）
+      const strengthInput = document.createElement("input");
+      strengthInput.type = "number";
+      strengthInput.className =
+        "input acrylic-input ref-strength-input";
+      strengthInput.min = "0";
+      strengthInput.max = "1";
+      strengthInput.step = "0.05";
+      strengthInput.value = String(item.strength);
+      strengthInput.title = `第 ${idx + 1} 张参考图的强度（0-1）`;
+      strengthInput.addEventListener("change", () => {
+        const value = parseFloat(strengthInput.value);
+        if (!Number.isNaN(value)) {
+          item.strength = Math.min(1, Math.max(0, value));
+        }
+        strengthInput.value = String(item.strength);
+        saveCache();
+      });
+      controls.appendChild(strengthInput);
+
+      // 逐图精准参考描述（仅 director 模式显示）
+      const captionSelect = document.createElement("select");
+      captionSelect.className = "select acrylic-input ref-caption-select";
+      REF_CAPTIONS.forEach((cap) => {
+        const opt = document.createElement("option");
+        opt.value = cap;
+        opt.textContent = cap;
+        captionSelect.appendChild(opt);
+      });
+      if (REF_CAPTIONS.indexOf(item.caption) < 0) {
+        item.caption = defaultDirectorCaption;
+      }
+      captionSelect.value = item.caption;
+      captionSelect.title = `第 ${idx + 1} 张参考图的 base_caption`;
+      captionSelect.addEventListener("change", () => {
+        item.caption = captionSelect.value;
+        saveCache();
+      });
+      controls.appendChild(captionSelect);
+
+      body.appendChild(controls);
+
+      const meta = document.createElement("div");
+      meta.className = "ref-item-meta";
+      meta.textContent = `REF_${String(idx + 1).padStart(2, "0")} · ${item.name}`;
+      body.appendChild(meta);
+
+      row.appendChild(body);
+
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "btn-link ref-item-remove";
+      removeBtn.title = "移除该参考图";
+      removeBtn.innerHTML = '<span class="link-icon">✕</span>';
+      removeBtn.addEventListener("click", () => removeRefImage(idx));
+      row.appendChild(removeBtn);
+
+      els.refGrid.appendChild(row);
+    });
+
+    if (els.refCountTag) {
+      els.refCountTag.textContent = `${referenceImages.length} / ${MAX_REF_IMAGES}`;
+    }
+    if (els.refGridWrap) {
+      if (referenceImages.length) show(els.refGridWrap);
+      else hide(els.refGridWrap);
+    }
+  }
+
+  // 按参考图使用模式切换可见性：全局重绘强度/附加噪声仅 img2img 使用，
+  // vibe / 精准参考改用逐图强度（CSS 按 mode-* 类控制卡片内控件显隐）
+  function applyRefModeUI() {
     const openai = currentCallFormat === "openai";
-    const director = els.refMode && els.refMode.value === "director";
-    if (openai && director) {
-      show(els.directorCaptionWrap);
-      // 精准参考不需要重绘强度/附加噪声（那是 img2img 参数），隐藏避免误导
+    const mode = currentRefMode();
+    if (els.refGrid) {
+      els.refGrid.classList.remove("mode-vibe", "mode-img2img", "mode-director");
+      els.refGrid.classList.add("mode-" + mode);
+    }
+    if (openai && mode === "img2img") {
+      show(els.refStrengthWrap);
+      show(els.refNoiseWrap);
+    } else {
       hide(els.refStrengthWrap);
       hide(els.refNoiseWrap);
-    } else {
-      hide(els.directorCaptionWrap);
-      if (openai) {
-        show(els.refStrengthWrap);
-        show(els.refNoiseWrap);
-      }
     }
   }
 
@@ -707,21 +875,29 @@
       showError("请至少填写一个提示词框（NAI 风格或自然语言）。");
       return;
     }
-    if (body.director_action && !body.reference_image_b64) {
-      showError("图片处理动作需要先在「调用格式」卡片上传一张源图片。");
-      return;
-    }
-    if (body.reference_mode === "director" && !body.reference_image_b64) {
-      showError("精准参考（director）需要先在「调用格式」卡片上传一张参考图。");
-      return;
+    if (body.call_format === "openai") {
+      const refCount = (body.reference_image_b64_list || []).length;
+      if (body.director_action && !refCount) {
+        showError("图片处理动作需要先在「调用格式」卡片上传一张源图片。");
+        return;
+      }
+      if (body.reference_mode === "director" && !refCount) {
+        showError(
+          "精准参考（director）需要先在「调用格式」卡片上传至少一张参考图（可多选，最多 8 张）。"
+        );
+        return;
+      }
     }
 
     lastRequestBody = body;
     isGenerating = true;
+    const refCountText = (body.reference_image_b64_list || []).length
+      ? `（含 ${(body.reference_image_b64_list || []).length} 张参考图）`
+      : "";
     els.loadingText.textContent = body.director_action
       ? "正在以 director-tools 处理图片..."
       : body.call_format === "openai"
-        ? "正在以 OpenAI 兼容格式生成（参考图已随请求提交）..."
+        ? `正在以 OpenAI 兼容格式生成${refCountText}...`
         : "正在转译 + 生成图片...";
     setLoading(true);
     hideError();
@@ -971,7 +1147,6 @@
     els.refNoise.value = "0.7";
     els.openaiSeed.value = "-1";
     els.directorAction.value = "";
-    els.directorCaption.value = "character&style";
     clearCharRows();
     toggleCustomArtists();
     setCallFormat("direct");
@@ -1002,15 +1177,13 @@
     var openai = fmt === "openai";
     if (openai) {
       show(els.refUploadWrap);
-      show(els.refStrengthWrap);
       show(els.refModeWrap);
-      show(els.refNoiseWrap);
       show(els.openaiSeedWrap);
       show(els.directorActionWrap);
       show(els.charListWrap);
       if (els.openaiConfigStatus) show(els.openaiConfigStatus);
       els.callFormatHint.textContent =
-        "请求按 OpenAI 兼容格式发往配置的 /v1/images 端点，支持参考图、种子与图片处理动作。";
+        "请求按 OpenAI 兼容格式发往配置的 /v1/images 端点，支持多张参考图、种子与图片处理动作。";
       els.trialBtn.disabled = true;
       els.trialBtn.title = "试用生成仅支持 NAI 直连格式";
     } else {
@@ -1028,36 +1201,15 @@
       els.trialBtn.title = "";
       loadTrialStatus();
     }
-    toggleDirectorCaption();
+    applyRefModeUI();
     updateModelOptionsUI();
   }
 
-  function clearReferenceImage() {
-    referenceImageB64 = "";
-    if (els.refFile) els.refFile.value = "";
-    hide(els.refPreviewWrap);
-    if (els.refPreview) els.refPreview.removeAttribute("src");
-  }
-
   function handleReferenceFileChange() {
-    const file = els.refFile && els.refFile.files && els.refFile.files[0];
-    if (!file) {
-      clearReferenceImage();
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = String(e.target.result || "");
-      const comma = dataUrl.indexOf(",");
-      referenceImageB64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
-      els.refPreview.src = dataUrl;
-      show(els.refPreviewWrap);
-    };
-    reader.onerror = () => {
-      clearReferenceImage();
-      showError("参考图读取失败，请重新选择图片文件。");
-    };
-    reader.readAsDataURL(file);
+    if (!els.refFile || !els.refFile.files) return;
+    addRefImages(els.refFile.files);
+    // 允许再次选择同一批文件
+    els.refFile.value = "";
   }
 
   // ===== 载入默认负面词 =====
@@ -1193,7 +1345,11 @@
     els.refFile.addEventListener("change", handleReferenceFileChange);
     els.refRemove.addEventListener("click", clearReferenceImage);
     if (els.refMode) {
-      els.refMode.addEventListener("change", toggleDirectorCaption);
+      els.refMode.addEventListener("change", () => {
+        applyRefModeUI();
+        renderRefGrid();
+        saveCache();
+      });
     }
     if (els.charAdd) {
       els.charAdd.addEventListener("click", () => {

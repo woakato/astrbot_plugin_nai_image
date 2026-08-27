@@ -191,11 +191,11 @@ class NAIImageCompanionExtensionAPI:
         ``size`` / ``ratio`` / ``style`` 按 NAI 参数体系归一化。
 
         后端路由由插件全局 ``call_mode`` 决定：``openai`` 时走 OpenAI 兼容
-        格式，参考图按插件「参考图使用模式」（vibe / img2img / director）
-        路由，未带参考图且为 director 模式时使用设置里的兜底参考图，
-        否则 ``/v1/images/generations`` 文生图；``direct`` 时走传统 GET
-        （nai.sta1n.cn 文生图，参考图降级为文生图）。``strength`` 为重绘
-        强度。
+        格式，参考图（可多张，最多 8 张）按插件「参考图使用模式」（vibe /
+        img2img / director）路由，未带参考图且为 director 模式时使用设置里的
+        兜底参考图，否则 ``/v1/images/generations`` 文生图；``direct`` 时走
+        传统 GET（nai.sta1n.cn 文生图，参考图降级为文生图）。``strength``
+        为重绘/参考强度。
 
         Returns:
             与 image_companion 同构的 ``{handled, backend, image_path, note, metadata}``。
@@ -211,12 +211,13 @@ class NAIImageCompanionExtensionAPI:
         session_key = _first_text(req.get("session_key"), req.get("continuity_key"))[
             :340
         ]
-        reference_path = self._resolve_reference_path(req)
+        reference_paths = self._resolve_reference_paths(req)
         strength = self._coerce_strength(req.get("strength"))
-        if reference_path:
+        if reference_paths:
             logger.info(
                 f"{_LOG_TAG} 本次直连请求携带参考图 | kind={workflow_kind} "
-                f"path={reference_path[:160]} strength={strength}"
+                f"refs={len(reference_paths)} first={reference_paths[0][:160]} "
+                f"strength={strength}"
             )
 
         prompt_format = self._resolve_prompt_format(req)
@@ -255,18 +256,20 @@ class NAIImageCompanionExtensionAPI:
 
         try:
             if plugin.call_mode == "openai":
-                # OpenAI 兼容模式：有参考图走图生图，否则文生图；画师串并入 prompt
-                if reference_path:
+                # OpenAI 兼容模式：有参考图按插件「参考图使用模式」路由
+                # （vibe/img2img/director），否则文生图；画师串并入 prompt
+                if reference_paths:
                     logger.info(
-                        f"{_LOG_TAG} 调用模式 OpenAI，携带参考图走图生图 | "
-                        f"kind={workflow_kind} path={reference_path[:160]} strength={strength}"
+                        f"{_LOG_TAG} 调用模式 OpenAI，携带 {len(reference_paths)} 张"
+                        f"参考图 | kind={workflow_kind} "
+                        f"first={reference_paths[0][:160]} strength={strength}"
                     )
                 openai_prompt = plugin._openai_prompt(prepared_prompt, style)
                 images, reason = await plugin._openai_generate(
                     openai_prompt,
                     size,
                     n=1,
-                    reference_image_path=reference_path or None,
+                    reference_image_paths=reference_paths or None,
                     strength=strength,
                     negative=negative,
                 )
@@ -326,7 +329,7 @@ class NAIImageCompanionExtensionAPI:
             style=style,
             size=size,
             image_path=str(image_path),
-            reference_path=reference_path,
+            reference_path=reference_paths[0] if reference_paths else "",
         )
         note = "生成完成"
         self._note_generation(
@@ -475,18 +478,22 @@ class NAIImageCompanionExtensionAPI:
             return _PROMPT_FORMAT_NAI
         return _PROMPT_FORMAT_NATURAL
 
-    def _resolve_reference_path(self, request: dict[str, Any]) -> str:
-        """从陪伴请求中解析参考图路径。
+    def _resolve_reference_paths(self, request: dict[str, Any]) -> list[str]:
+        """从陪伴请求中解析参考图路径列表。
 
-        ``reference_image_path`` 优先；未传时取 ``reference_image_paths``
-        首项（多图职责组合时 NAI 侧先按单图处理）。
+        ``reference_image_paths`` 数组优先，兼容旧的单一 ``reference_image_path``
+        字段；按请求顺序最多取 8 张（接口文档 §5.2 参考图上限）。
         """
-        path = _first_text(request.get("reference_image_path"))
-        if not path:
-            paths = request.get("reference_image_paths")
-            if isinstance(paths, (list, tuple)) and paths:
-                path = _first_text(paths[0])
-        return path
+        paths: list[str] = []
+        raw_list = request.get("reference_image_paths")
+        if isinstance(raw_list, (list, tuple)):
+            paths.extend(
+                str(item).strip() for item in raw_list if str(item or "").strip()
+            )
+        single = _first_text(request.get("reference_image_path"))
+        if single:
+            paths.insert(0, single)
+        return paths[:8]
 
     @staticmethod
     def _coerce_strength(value: Any) -> float | None:

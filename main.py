@@ -254,13 +254,22 @@ OPENAI_DIRECTOR_ACTIONS = {
     "declutter": "清理画面元素",
 }
 
-# 支持精准参考（director_reference_*）的 NAI 4.5 模型集合（新文档 §8.1）。
-# 其他模型携带精准参考字段会被服务端直接 400 拒绝。
+# 参考图单次请求张数上限（§5.2）：vibe 的 reference_image_multiple 与
+# 精准参考的 director_reference_* 数组均按此收敛。
+OPENAI_MAX_REFERENCE_IMAGES = 8
+
+# 支持精准参考（director_reference_*）的模型集合：NAI 4.5 与 NAI 5 全系
+# 实测均支持精准参考。其他模型携带精准参考字段会被服务端拒绝，仍自动切换
+# 为 nai-diffusion-4-5-full。
 OPENAI_DIRECTOR_MODELS = {
     "nai-diffusion-4-5-full",
     "nai-diffusion-4-5-curated",
     "nai45",
     "nai45-curated",
+    "nai-diffusion-5-full",
+    "nai-diffusion-5-curated",
+    "nai5",
+    "nai5-curated",
 }
 
 # 精准参考 base_caption 仅允许的枚举值（新文档 §8.4）。
@@ -624,6 +633,29 @@ class NAIGenerateImagePlugin(Star):
         ).strip()
         if self.openai_director_caption not in OPENAI_DIRECTOR_CAPTIONS:
             self.openai_director_caption = "character&style"
+
+        # 参考图默认权重（§5/§8）：聊天指令、LLM 工具与陪伴联动等未显式
+        # 给逐图强度时使用；面板逐图设置优先于这些默认值。
+        def _load_ref_strength(key: str, default: float) -> float:
+            try:
+                value = config.get(key)
+                return (
+                    round(max(0.0, min(1.0, float(value))), 2)
+                    if value not in (None, "")
+                    else default
+                )
+            except (TypeError, ValueError):
+                return default
+
+        self.openai_vibe_strength: float = _load_ref_strength(
+            "openai_vibe_strength", 0.6
+        )
+        self.openai_director_strength: float = _load_ref_strength(
+            "openai_director_strength", 1.0
+        )
+        self.openai_director_secondary_strength: float = _load_ref_strength(
+            "openai_director_secondary_strength", 0.5
+        )
         # 精准参考兜底参考图：director 模式下请求未携带参考图（聊天指令/陪伴
         # 联动等场景）时，取此处第一个存在的文件。配置值为文件路径列表。
         _fb_cfg = config.get("openai_director_fallback_images") or []
@@ -1277,7 +1309,10 @@ class NAIGenerateImagePlugin(Star):
         n: int = 1,
         reference_image_path: str | None = None,
         reference_image_bytes: bytes | None = None,
+        reference_image_paths: Sequence[str] | None = None,
+        reference_image_bytes_list: Sequence[bytes] | None = None,
         strength: float | None = None,
+        reference_strengths: Sequence[float] | None = None,
         noise: float | None = None,
         steps: int | None = None,
         scale: float | None = None,
@@ -1289,6 +1324,7 @@ class NAIGenerateImagePlugin(Star):
         reference_mode: str | None = None,
         director_action: str | None = None,
         director_caption: str | None = None,
+        director_captions: Sequence[str] | None = None,
         characters: Sequence[tuple[str, float, float]] | None = None,
     ) -> tuple[list[bytes], str]:
         """OpenAI 兼容格式生图（文生图 / 图生图 / 参考图 / 图片处理）。
@@ -1297,9 +1333,10 @@ class NAIGenerateImagePlugin(Star):
         带参考图时按 ``reference_mode`` 选择 ``vibe``（generations 的
         ``reference_image_multiple``，§5）、``img2img``（``/v1/images/edits``
         的 JSON ``image`` 字段，§4）或 ``director``（generations 的
-        ``director_reference_*`` 精准参考，§6）；``director_action`` 对应
-        director-tools 图片处理（§8）；``characters`` 非空时附加多角色坐标
-        控制（§7）。对 408/429/502/503/504 按 2/4/8 秒指数退避选择性重试；
+        ``director_reference_*`` 精准参考，§6）。vibe / director 支持一次
+        提交最多 8 张参考图（§5.2），五个数组按下标一一对应；``director_action``
+        对应 director-tools 图片处理（§8）；``characters`` 非空时附加多角色
+        坐标控制（§7）。对 408/429/502/503/504 按 2/4/8 秒指数退避选择性重试；
         超时不自动重试（上游可能仍在生成并扣费）；400/401/403 默认不重
         试，但错误文案提示"稍后重试"的瞬时故障除外。
 
@@ -1307,10 +1344,16 @@ class NAIGenerateImagePlugin(Star):
             prompt: 主体提示词（已合并画师串）。
             size: NAI 尺寸键（竖图/方图/...）或像素尺寸 "WxH"。
             n: 生成张数。
-            reference_image_path: 参考图本地路径（与 bytes 二选一）。
-            reference_image_bytes: 参考图字节内容（优先于路径）。
-            strength: img2img 重绘强度、vibe/精准参考强度，0-1；精准参考
-                默认 1.0，次级强度与信息提取量按文档 §8 固定为 0.5/1.0。
+            reference_image_path: 单张参考图本地路径（旧参数，与多图列表合并）。
+            reference_image_bytes: 单张参考图字节内容（旧参数，与多图列表合并）。
+            reference_image_paths: 多张参考图本地路径列表，最多取前 8 张。
+            reference_image_bytes_list: 多张参考图字节内容列表，优先于路径，
+                最多取前 8 张；img2img 仅使用第一张（§5.3 主输入图）。
+            strength: img2img 重绘强度、vibe/精准参考统一强度，0-1；被
+                reference_strengths 覆盖。vibe 默认 0.6，精准参考默认 1.0。
+            reference_strengths: 每张参考图的强度列表（vibe 的
+                reference_strength_multiple / 精准参考的
+                director_reference_strength_values），不足位数用 strength 默认值补齐。
             noise: img2img 附加噪声强度，0-1。
             steps / scale / sampler / noise_schedule / seed / negative:
                 高级参数，留 None 时使用插件全局配置。
@@ -1321,8 +1364,11 @@ class NAIGenerateImagePlugin(Star):
                 colorize/emotion/declutter），指定时 model 强制 director-tools。
             director_caption: 精准参考描述（新文档 §8.4 的 base_caption），仅
                 允许 character / style / character&style，默认
-                self.openai_director_caption。精准参考仅支持 NAI 4.5 模型，
-                非 4.5 模型会自动切换为 nai-diffusion-4-5-full。
+                self.openai_director_caption；被 director_captions 逐项覆盖。
+                精准参考仅支持 NAI 4.5 / NAI 5 模型，其他模型会自动切换为
+                nai-diffusion-4-5-full。
+            director_captions: 每张精准参考图的 base_caption 列表，非法值回退
+                director_caption / 插件配置。
             characters: 多角色坐标列表 (提示词, x, y)，坐标 0-1（§7），
                 最多取前 6 个；仅对 generations 类请求生效。
 
@@ -1356,53 +1402,81 @@ class NAIGenerateImagePlugin(Star):
         api_key = self.openai_api_key
         timeout = aiohttp.ClientTimeout(total=self.openai_timeout)
 
-        # 参考图：bytes 优先，其次从路径读取；统一编码为 Data URI（§5 示例/§11）
-        image_bytes: bytes | None = None
+        # ==== 参考图收集：多图列表优先，兼容旧单图参数（§5.2 上限 8 张） ====
+        ref_bytes_list: list[bytes] = []
+        if reference_image_bytes_list:
+            ref_bytes_list.extend(reference_image_bytes_list)
         if reference_image_bytes:
-            image_bytes = reference_image_bytes
-        elif reference_image_path:
+            ref_bytes_list.insert(0, reference_image_bytes)
+        _ref_paths = list(reference_image_paths or ())
+        if reference_image_path:
+            _ref_paths.insert(0, reference_image_path)
+        for _path in _ref_paths:
+            text = str(_path or "").strip()
+            if not text:
+                continue
             try:
-                ref_path = Path(reference_image_path)
-                if ref_path.is_file():
-                    image_bytes = await asyncio.to_thread(ref_path.read_bytes)
+                file = Path(text)
+                if file.is_file():
+                    ref_bytes_list.append(await asyncio.to_thread(file.read_bytes))
             except Exception as exc:
                 logger.warning(
-                    f"{LOG_TAG} [openai_generate] 读取参考图失败: {type(exc).__name__}: {exc}"
+                    f"{LOG_TAG} [openai_generate] 读取参考图失败: "
+                    f"{type(exc).__name__}: {exc}"
                 )
 
         ref_mode = (reference_mode or self.openai_reference_mode or "vibe").casefold()
         if ref_mode not in ("img2img", "vibe", "director"):
             ref_mode = "vibe"
-        is_edit = bool(image_bytes) and ref_mode == "img2img" and not is_director
-        if (is_director or ref_mode == "director") and not image_bytes:
+        if (is_director or ref_mode == "director") and not ref_bytes_list:
             # 兜底参考图：director 模式且请求未带图时（聊天指令/陪伴联动），
-            # 使用设置里的第一个可用文件；director-tools 仍需显式提供待处理图
+            # 按设置里的文件顺序全部启用直至上限；director-tools 仍需显式
+            # 提供待处理图。设置页上传的文件存的是相对插件数据目录的路径，
+            # 绝对路径（用户手填）则原样使用。
             if not is_director:
-                # 设置页上传的文件存的是相对插件数据目录的路径，绝对路径
-                # （用户手填）则原样使用
                 _data_dir = StarTools.get_data_dir(PLUGIN_NAME)
                 for _fb_path in self.openai_director_fallback_images:
+                    if len(ref_bytes_list) >= OPENAI_MAX_REFERENCE_IMAGES:
+                        break
                     try:
                         _fb_file = Path(_fb_path)
                         if not _fb_file.is_absolute():
                             _fb_file = _data_dir / _fb_file
                         if _fb_file.is_file():
-                            image_bytes = await asyncio.to_thread(_fb_file.read_bytes)
-                            logger.info(
-                                f"{LOG_TAG} [openai_generate] 精准参考使用兜底参考图: "
-                                f"{_fb_file}"
+                            ref_bytes_list.append(
+                                await asyncio.to_thread(_fb_file.read_bytes)
                             )
-                            break
                     except Exception:
                         continue
-            if not image_bytes:
+                if ref_bytes_list:
+                    logger.info(
+                        f"{LOG_TAG} [openai_generate] 精准参考使用兜底参考图 "
+                        f"{len(ref_bytes_list)} 张"
+                    )
+            if not ref_bytes_list:
                 return [], "no_reference_image"
 
-        # img2img 要求源图与目标尺寸严格一致，否则上游直接拒绝；
-        # vibe / director 不强制比例，但上游适配器同样按 §10 契约校验参考图
-        # （最大边 1920、面积 3686400），超限会报 "image dimensions exceed the
-        # maximum allowed size"，因此超限图片先等比缩小（不放大、不重编码合规图）。
-        if image_bytes:
+        if len(ref_bytes_list) > OPENAI_MAX_REFERENCE_IMAGES:
+            logger.info(
+                f"{LOG_TAG} [openai_generate] 参考图超过 {OPENAI_MAX_REFERENCE_IMAGES} "
+                f"张上限，截断 {len(ref_bytes_list)} -> {OPENAI_MAX_REFERENCE_IMAGES}"
+            )
+            ref_bytes_list = ref_bytes_list[:OPENAI_MAX_REFERENCE_IMAGES]
+
+        # img2img 要求源图与目标尺寸严格一致，否则上游直接拒绝，且数组仅以
+        # 第一张作为主输入图（§5.3）；vibe / director 不强制比例，但上游适配
+        # 器同样按 §10 契约校验参考图（最大边 1920、面积 3686400），超限会报
+        # "image dimensions exceed the maximum allowed size"，因此超限图片先
+        # 等比缩小（不放大、不重编码合规图）。
+        is_edit = bool(ref_bytes_list) and ref_mode == "img2img" and not is_director
+        if is_edit and len(ref_bytes_list) > 1:
+            logger.info(
+                f"{LOG_TAG} [openai_generate] img2img 仅支持单张主输入图，"
+                f"已忽略多余 {len(ref_bytes_list) - 1} 张参考图"
+            )
+            ref_bytes_list = ref_bytes_list[:1]
+        ref_uris: list[str] = []
+        if ref_bytes_list:
             try:
                 import io
 
@@ -1438,22 +1512,38 @@ class NAIGenerateImagePlugin(Star):
                         img.save(out_buf, format="PNG")
                         return out_buf.getvalue()
 
-                image_bytes = await asyncio.to_thread(_fit_ref_image, image_bytes)
+                def _prepare_refs() -> list[bytes]:
+                    fitted: list[bytes] = []
+                    for raw in ref_bytes_list:
+                        try:
+                            fitted.append(_fit_ref_image(raw))
+                        except Exception as exc:
+                            logger.warning(
+                                f"{LOG_TAG} [openai_generate] 参考图尺寸适配失败: {exc}"
+                            )
+                            fitted.append(raw)
+                    return fitted
+
+                ref_bytes_list = await asyncio.to_thread(_prepare_refs)
+                # Data URI 格式（与文档 §5 参考图示例一致）；MIME 按文件魔数
+                # 判断，尺寸适配后的字节固定为 PNG，未适配的原图保持自身格式。
+                for raw in ref_bytes_list:
+                    if raw.startswith(b"\xff\xd8\xff"):
+                        _mime = "image/jpeg"
+                    elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+                        _mime = "image/webp"
+                    elif raw.startswith(b"GIF8"):
+                        _mime = "image/gif"
+                    else:
+                        _mime = "image/png"
+                    ref_uris.append(
+                        f"data:{_mime};base64," + base64.b64encode(raw).decode()
+                    )
             except Exception as exc:
-                logger.warning(f"{LOG_TAG} [openai_generate] 参考图尺寸适配失败: {exc}")
-        image_b64 = ""
-        if image_bytes:
-            # Data URI 格式（与文档 §5 参考图示例一致）；MIME 按文件魔数判断，
-            # 尺寸适配后的字节固定为 PNG，未适配的原图保持自身格式。
-            if image_bytes.startswith(b"\xff\xd8\xff"):
-                _mime = "image/jpeg"
-            elif image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
-                _mime = "image/webp"
-            elif image_bytes.startswith(b"GIF8"):
-                _mime = "image/gif"
-            else:
-                _mime = "image/png"
-            image_b64 = f"data:{_mime};base64," + base64.b64encode(image_bytes).decode()
+                logger.warning(
+                    f"{LOG_TAG} [openai_generate] 参考图处理失败: {type(exc).__name__}: {exc}"
+                )
+        image_b64 = ref_uris[0] if ref_uris else ""
 
         # ==== 高级参数组装（§3.2/§10.2），留 None 的项回退插件全局配置 ====
         try:
@@ -1512,6 +1602,50 @@ class NAIGenerateImagePlugin(Star):
             )
             char_entries = []
 
+        # ==== 逐图参考参数（vibe / 精准参考共用） ====
+        # 强度：reference_strengths 按下标逐张生效，缺位或非法值回退统一
+        # strength 参数，仍缺失时用模式默认值补齐（vibe 默认 0.6、精准参考
+        # 默认 1.0），保证数组与参考图严格等长。
+        _strength_default = (
+            self.openai_director_strength
+            if ref_mode == "director"
+            else self.openai_vibe_strength
+        )
+        _scalar_strength: float | None = None
+        if strength is not None:
+            try:
+                _scalar_strength = round(max(0.0, min(1.0, float(strength))), 2)
+            except (TypeError, ValueError):
+                _scalar_strength = None
+        ref_strength_values: list[float] = []
+        for i in range(len(ref_uris)):
+            value = (
+                _scalar_strength if _scalar_strength is not None else _strength_default
+            )
+            if reference_strengths and i < len(reference_strengths):
+                try:
+                    per_value = float(reference_strengths[i])
+                    if 0 <= per_value <= 1:
+                        value = round(per_value, 2)
+                except (TypeError, ValueError):
+                    pass
+            ref_strength_values.append(value)
+        # 精准参考逐图描述（§8.4）：base_caption 仅三个枚举值合法，非法值
+        # 回退 director_caption / 插件配置，最终回退 character&style。
+        _caption_fallback = (
+            director_caption or self.openai_director_caption or ""
+        ).strip()
+        if _caption_fallback not in OPENAI_DIRECTOR_CAPTIONS:
+            _caption_fallback = "character&style"
+        ref_director_captions: list[str] = []
+        for i in range(len(ref_uris)):
+            caption = ""
+            if director_captions and i < len(director_captions):
+                caption = str(director_captions[i] or "").strip()
+            if caption not in OPENAI_DIRECTOR_CAPTIONS:
+                caption = _caption_fallback
+            ref_director_captions.append(caption)
+
         # ==== 请求体组装：文生图 / img2img / vibe / 精准参考 / director-tools ====
         payload: dict[str, Any] = {
             "prompt": prompt,
@@ -1527,55 +1661,52 @@ class NAIGenerateImagePlugin(Star):
         elif is_edit:
             payload["action"] = "img2img"
             payload["image"] = image_b64
-            if strength is not None:
-                parameters["strength"] = max(0.0, min(1.0, float(strength)))
+            if _scalar_strength is not None:
+                parameters["strength"] = _scalar_strength
             if noise is not None:
                 parameters["noise"] = max(0.0, min(1.0, float(noise)))
-        elif ref_mode == "director" and image_bytes:
+        elif ref_mode == "director" and ref_uris:
             # 精准参考（新文档 §8）：五个 director_reference_* 数组严格等长、
             # 按下标一一对应；参考图由服务端自动规范化（§8.6），客户端无需
-            # 预处理。
+            # 预处理。information_extracted 固定 1.0：实测其他取值（如 0.7）
+            # 会被上游参数校验拒绝（HTTP 400），与 §8 各示例保持一致。
             payload["action"] = "generate"
-            # 精准参考仅支持 NAI 4.5 两个模型（§8.1），其余模型会被直接 400；
-            # 当前模型不满足时自动切换到 4-5-full 以保证能力可用。
+            # 精准参考仅支持 NAI 4.5 / NAI 5 模型（实测），其余模型会被服务端
+            # 拒绝；当前模型不满足时自动切换到 4-5-full 以保证能力可用。
             if (model or "").strip().casefold() not in OPENAI_DIRECTOR_MODELS:
                 logger.info(
-                    f"{LOG_TAG} [openai_generate] 精准参考仅支持 NAI 4.5 模型，"
-                    f"自动由 {model or '(none)'} 切换为 nai-diffusion-4-5-full"
+                    f"{LOG_TAG} [openai_generate] 精准参考不支持当前模型 {model or '(none)'}"
+                    "（仅 4.5 / 5 系列），自动切换为 nai-diffusion-4-5-full"
                 )
                 model = "nai-diffusion-4-5-full"
                 payload["model"] = model
-            _primary = (
-                max(0.0, min(1.0, float(strength))) if strength is not None else 1.0
+            parameters["director_reference_images"] = ref_uris
+            parameters["director_reference_strength_values"] = ref_strength_values
+            # 次级特征强度（§8.5 推荐 0.35-0.7），默认取插件设置
+            parameters["director_reference_secondary_strength_values"] = [
+                self.openai_director_secondary_strength
+            ] * len(ref_uris)
+            parameters["director_reference_information_extracted"] = [1.0] * len(
+                ref_uris
             )
-            # base_caption 仅允许三个枚举值（§8.4），非法值会被 400 拒绝
-            _caption = (director_caption or self.openai_director_caption or "").strip()
-            if _caption not in OPENAI_DIRECTOR_CAPTIONS:
-                _caption = "character&style"
-            parameters["director_reference_images"] = [image_b64]
-            parameters["director_reference_strength_values"] = [round(_primary, 2)]
-            # 次级特征强度（§8.5 推荐 0.35-0.7），取中间值
-            parameters["director_reference_secondary_strength_values"] = [0.5]
-            # information_extracted 固定 1.0：实测其他取值（如 0.7）会被上游
-            # 参数校验拒绝（HTTP 400），与 §8 各示例保持一致
-            parameters["director_reference_information_extracted"] = [1.0]
             parameters["director_reference_descriptions"] = [
                 {
                     "caption": {
-                        "base_caption": _caption,
+                        "base_caption": cap,
                         "char_captions": [],
                     },
                     "legacy_uc": False,
                 }
+                for cap in ref_director_captions
             ]
-        elif image_bytes:
+        elif ref_uris:
             # vibe 参考：数组按下标一一对应（§5）
             payload["action"] = "generate"
-            parameters["reference_image_multiple"] = [image_b64]
-            parameters["reference_strength_multiple"] = [
-                max(0.0, min(1.0, float(strength))) if strength is not None else 0.6
-            ]
-            parameters["reference_information_extracted_multiple"] = [0.7]
+            parameters["reference_image_multiple"] = ref_uris
+            parameters["reference_strength_multiple"] = ref_strength_values
+            parameters["reference_information_extracted_multiple"] = [0.7] * len(
+                ref_uris
+            )
         else:
             payload["action"] = "generate"
 
@@ -1610,9 +1741,9 @@ class NAIGenerateImagePlugin(Star):
             mode_desc = f"director/{director_action}"
         elif is_edit:
             mode_desc = "img2img"
-        elif image_bytes and ref_mode == "director":
+        elif ref_uris and ref_mode == "director":
             mode_desc = "director_ref"
-        elif image_bytes:
+        elif ref_uris:
             mode_desc = "vibe"
         else:
             mode_desc = "t2i"
@@ -1620,7 +1751,7 @@ class NAIGenerateImagePlugin(Star):
             f"{LOG_TAG} [openai_generate] endpoint={endpoint} model={model or '(none)'} "
             f"mode={mode_desc} size={size} n={payload['n']} steps={_steps} scale={_scale} "
             f"seed={_seed if _seed >= 0 else 'random'} chars={len(char_entries)} "
-            f"ref_bytes={len(image_bytes) if image_bytes else 0}"
+            f"refs={len(ref_uris)} ref_bytes={sum(len(b) for b in ref_bytes_list)}"
         )
 
         # ==== 发送请求：可重试状态码按 2/4/8 秒指数退避（§14）；超时不重试 ====
@@ -1700,7 +1831,7 @@ class NAIGenerateImagePlugin(Star):
             # 未开通精准参考能力，单独标记以便给出针对性提示。
             if (
                 status == 400
-                and image_bytes
+                and ref_uris
                 and ref_mode == "director"
                 and not director_action
             ):
@@ -2203,6 +2334,9 @@ class NAIGenerateImagePlugin(Star):
                 ),
                 "openai_reference_mode": self.openai_reference_mode,
                 "openai_director_caption": self.openai_director_caption,
+                "openai_vibe_strength": self.openai_vibe_strength,
+                "openai_director_strength": self.openai_director_strength,
+                "openai_director_secondary_strength": self.openai_director_secondary_strength,
                 "openai_seed": self.openai_seed,
                 "openai_timeout": self.openai_timeout,
                 "openai_max_retries": self.openai_max_retries,
@@ -2329,12 +2463,15 @@ class NAIGenerateImagePlugin(Star):
         )
 
     async def _test_panel_generate_openai(self) -> Any:
-        """Web API: OpenAI 兼容格式生图（支持本地上传参考图）。
+        """Web API: OpenAI 兼容格式生图（支持本地上传多张参考图）。
 
         面板切换「OpenAI 兼容」后走此接口，请求体与 ``test_panel/generate``
-        一致（双提示词 + 生成参数），额外支持 ``reference_image_b64``（data
-        URL 或裸 base64）与 ``strength``。实际生图由 ``_openai_generate`` 完成，
-        接口地址/密钥/模型由插件配置项 openai_api_* 决定。
+        一致（双提示词 + 生成参数），额外支持 ``reference_image_b64_list``
+        （data URL 或裸 base64 的数组，最多 8 张，兼容旧的单一
+        ``reference_image_b64`` 字段）、逐图强度 ``reference_strengths``、
+        逐图精准参考描述 ``director_captions`` 与 img2img 的 ``strength``。
+        实际生图由 ``_openai_generate`` 完成，接口地址/密钥/模型由插件配置项
+        openai_api_* 决定。
         """
         try:
             body = await web_request.json(default={})
@@ -2367,22 +2504,38 @@ class NAIGenerateImagePlugin(Star):
         except (TypeError, ValueError):
             n = 1
 
-        # 本地上传参考图：data URL 或裸 base64
-        reference_image_bytes: bytes | None = None
-        raw_ref = str(body.get("reference_image_b64") or "").strip()
-        if raw_ref:
+        # 本地上传参考图：优先 reference_image_b64_list 数组（最多 8 张，§5.2），
+        # 兼容旧的单一 reference_image_b64 字段；各项为 data URL 或裸 base64
+        raw_refs: list[str] = []
+        raw_ref_list = body.get("reference_image_b64_list")
+        if isinstance(raw_ref_list, str):
+            raw_ref_list = [raw_ref_list]
+        if isinstance(raw_ref_list, list):
+            raw_refs.extend(str(item or "").strip() for item in raw_ref_list)
+        legacy_ref = str(body.get("reference_image_b64") or "").strip()
+        if legacy_ref:
+            raw_refs.insert(0, legacy_ref)
+        raw_refs = [item for item in raw_refs if item][:OPENAI_MAX_REFERENCE_IMAGES]
+        reference_image_bytes_list: list[bytes] = []
+        for idx, raw_ref in enumerate(raw_refs, start=1):
             try:
                 if raw_ref.startswith("data:"):
                     raw_ref = raw_ref.split(",", 1)[1]
-                reference_image_bytes = base64.b64decode(raw_ref)
+                decoded = base64.b64decode(raw_ref)
             except Exception as exc:
                 logger.warning(
-                    f"{LOG_TAG} [test_panel:generate_openai] 参考图 base64 解析失败: {exc!r}"
+                    f"{LOG_TAG} [test_panel:generate_openai] 第 {idx} 张参考图 "
+                    f"base64 解析失败: {exc!r}"
                 )
-                return error_response("参考图数据解析失败，请重新上传", status_code=400)
-            if not reference_image_bytes:
-                return error_response("参考图数据为空，请重新上传", status_code=400)
-        if director_action and not reference_image_bytes:
+                return error_response(
+                    f"第 {idx} 张参考图数据解析失败，请重新上传", status_code=400
+                )
+            if not decoded:
+                return error_response(
+                    f"第 {idx} 张参考图数据为空，请重新上传", status_code=400
+                )
+            reference_image_bytes_list.append(decoded)
+        if director_action and not reference_image_bytes_list:
             return error_response("图片处理动作需要上传一张源图片", status_code=400)
 
         strength: float | None = None
@@ -2394,6 +2547,20 @@ class NAIGenerateImagePlugin(Star):
                     strength = None
             except (TypeError, ValueError):
                 strength = None
+
+        # 逐图参考强度（vibe / 精准参考）：与参考图按下标对应，0-1，非法值跳过
+        reference_strengths: list[float] | None = None
+        raw_strengths = body.get("reference_strengths")
+        if isinstance(raw_strengths, (list, tuple)):
+            parsed_strengths = []
+            for item in raw_strengths:
+                try:
+                    value = float(item)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= value <= 1:
+                    parsed_strengths.append(round(value, 2))
+            reference_strengths = parsed_strengths or None
 
         noise: float | None = None
         raw_noise = body.get("noise")
@@ -2409,9 +2576,9 @@ class NAIGenerateImagePlugin(Star):
         reference_mode = str(body.get("reference_mode") or "").strip().casefold()
         if reference_mode not in ("vibe", "img2img", "director"):
             reference_mode = None
-        if reference_mode == "director" and not reference_image_bytes:
+        if reference_mode == "director" and not reference_image_bytes_list:
             return error_response(
-                "精准参考（director）需要上传一张参考图", status_code=400
+                "精准参考（director）需要至少上传一张参考图", status_code=400
             )
 
         # 解析可选覆盖参数
@@ -2444,6 +2611,14 @@ class NAIGenerateImagePlugin(Star):
         custom_artists = _opt_str("custom_artists")
         model = _opt_str("model")
         director_caption = _opt_str("director_caption")
+
+        # 逐图精准参考描述（§8.4）：面板传 base_caption 数组，与参考图按下标
+        # 对应；非法值由 _openai_generate 回退统一配置处理。
+        director_captions: list[str] | None = None
+        raw_captions = body.get("director_captions")
+        if isinstance(raw_captions, (list, tuple)):
+            parsed_captions = [str(item or "").strip() for item in raw_captions]
+            director_captions = [item for item in parsed_captions if item] or None
 
         # 多角色坐标（§7）：面板传 [{prompt, x, y}, ...]，坐标 0-1，最多 6 个
         characters: list[tuple[str, float, float]] | None = None
@@ -2497,7 +2672,7 @@ class NAIGenerateImagePlugin(Star):
         logger.info(
             f"{LOG_TAG} [test_panel:generate_openai] "
             f"prompt='{full_prompt[:60]}' size={size}→{pixel_size} n={n} "
-            f"reference={'yes' if reference_image_bytes else 'no'} strength={strength} "
+            f"reference={len(reference_image_bytes_list)}张 strength={strength} "
             f"steps={steps} seed={seed} model={model} style={style} "
             f"ref_mode={reference_mode or self.openai_reference_mode} "
             f"director={director_action or '-'} chars={len(characters or [])}"
@@ -2509,8 +2684,9 @@ class NAIGenerateImagePlugin(Star):
                 full_prompt,
                 pixel_size,
                 n=n,
-                reference_image_bytes=reference_image_bytes,
+                reference_image_bytes_list=reference_image_bytes_list or None,
                 strength=strength,
+                reference_strengths=reference_strengths,
                 noise=noise,
                 steps=steps,
                 scale=scale,
@@ -2522,6 +2698,7 @@ class NAIGenerateImagePlugin(Star):
                 reference_mode=reference_mode,
                 director_action=director_action or None,
                 director_caption=director_caption,
+                director_captions=director_captions,
                 characters=characters,
             )
         except Exception as exc:
@@ -2551,7 +2728,7 @@ class NAIGenerateImagePlugin(Star):
                 "merge_info": merge_info,
                 "elapsed_info": f"{len(images_b64)} 张",
                 "call_format": "openai",
-                "reference_used": bool(reference_image_bytes),
+                "reference_used": bool(reference_image_bytes_list),
             }
         )
 

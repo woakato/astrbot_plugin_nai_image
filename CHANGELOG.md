@@ -1,5 +1,32 @@
 # 更新日志
 
+## v2.5.0 (2026-08-27)
+
+### 多张参考图（面板 + 插件设置）
+
+- **后端 `_openai_generate` 支持多张参考图**：
+  - 新增 `reference_image_bytes_list` / `reference_image_paths` 多图参数（兼容旧的单一 `reference_image_path` / `reference_image_bytes`），单次请求最多 8 张（§5.2），超出自动截断。
+  - Vibe 参考：`reference_image_multiple` / `reference_strength_multiple` / `reference_information_extracted_multiple` 按提交顺序逐张对应，强度缺省 0.6、信息提取量固定 0.7。
+  - 精准参考：五个 `director_reference_*` 数组与图片严格等长；新增逐张 base_caption 覆盖（`director_captions`），非法值回退统一配置再回退 `character&style`；主强度缺省仍为 1.0。
+  - 新增逐图强度参数 `reference_strengths`：按下标生效，缺位由统一 `strength` 参数或模式默认值补齐。
+  - img2img 保持单张语义：仅取第一张作为 `/v1/images/edits` 主输入图（§5.3），多余图片忽略并记录日志。
+  - 每张参考图独立执行超限等比缩小与尺寸适配，单张失败不影响其余图片。
+
+- **测试面板**：
+  - 参考图上传框支持一次多选（png/jpeg/webp），缩略图列表展示 `REF_01 · 文件名` 并可单独删除或点击放大。
+  - Vibe / 精准参考模式下每张参考图内嵌强度输入框（精准参考附 base_caption 下拉），按当前模式控制显隐；img2img 仅显示全局「重绘强度 / 附加噪声」并只使用第一张图。
+  - 面板请求改用 `reference_image_b64_list` + `reference_strengths` + `director_captions` 字段（兼容旧字段）。
+
+- **插件设置**：
+  - 新增参考图权重配置：「Vibe 参考权重」（`openai_vibe_strength`，默认 0.6）、「精准参考权重」（`openai_director_strength`，默认 1.0）、「精准参考次级特征权重」（`openai_director_secondary_strength`，默认 0.5）。聊天指令、LLM 工具与陪伴联动未显式给强度时使用这些默认值；测试面板上传的新参考图卡片也以此初始化。
+  - 「精准参考兜底参考图」（`openai_director_fallback_images`）从"只取第一张"升级为按顺序使用全部已配置文件（最多 8 张）；「精准参考描述」作为默认描述应用到全部兜底图。
+
+- **陪伴直连**：陪伴插件传来的 `reference_image_paths` 数组完整接收并路由到 vibe / 精准参考数组，不再只取首项。
+
+- **修复：NAI 5 系列误判为不支持精准参考**：v4.5f 与 v5f 实测均支持精准参考，`nai-diffusion-5-full` / `nai-diffusion-5-curated` 已加入支持模型集合，不再自动切换到 nai-diffusion-4-5-full；仅非 4.5 / 5 系列模型仍自动回退。
+
+- **测试**：新增 `tests/test_openai_multi_reference.py`，覆盖 vibe/精准参考多图数组等长、逐图强度回退、模型自动切换、img2img 单图语义与 8 张上限截断。
+
 ## v2.4.0 (2026-08-26)
 
 ### OpenAI 兼容接口全面对齐

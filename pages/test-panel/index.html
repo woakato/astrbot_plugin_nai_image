@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NAI 生图控制终端 // ENDFIELD PROTOCOL</title>
-  <link rel="stylesheet" href="./app.css?v=4.6.2" />
+  <link rel="stylesheet" href="./app.css?v=4.7.0" />
 </head>
 <body>
   <!-- 终末地等高线动态地形 Canvas + 底部工业网格 -->
@@ -84,11 +84,11 @@
               <span id="openaiConfigStatusText">未配置 OpenAI 接口</span>
             </div>
 
-            <!-- 参考图上传（仅 OpenAI 兼容格式显示） -->
+            <!-- 参考图上传（仅 OpenAI 兼容格式显示，最多 8 张） -->
             <div id="refUploadWrap" class="field hidden">
               <div class="field-header">
-                <label class="field-label" for="refFile">参考图 // REFERENCE IMAGE</label>
-                <span class="field-tech-tag">LOCAL_UPLOAD</span>
+                <label class="field-label" for="refFile">参考图 // REFERENCE IMAGES</label>
+                <span id="refCountTag" class="field-tech-tag">0 / 8</span>
               </div>
               <div class="input-wrap">
                 <input
@@ -96,21 +96,22 @@
                   type="file"
                   class="input acrylic-input"
                   accept="image/png,image/jpeg,image/webp"
+                  multiple
                 />
               </div>
-              <div id="refPreviewWrap" class="ref-preview-wrap hidden">
-                <img id="refPreview" class="ref-preview" alt="参考图预览" />
+              <div id="refGridWrap" class="ref-grid-wrap hidden">
+                <div id="refGrid" class="ref-grid"></div>
                 <button id="refRemove" type="button" class="btn-link">
-                  <span class="link-icon">✕</span> 移除参考图
+                  <span class="link-icon">✕</span> 移除全部参考图
                 </button>
               </div>
               <div class="field-hint">
                 <span class="hint-icon">◈</span>
-                <span>从本地上传参考图，随 OpenAI 兼容格式请求提交；上游图生图参数接入后用于重绘 / 改图。</span>
+                <span>可一次选择多张参考图（最多 8 张）。Vibe / 精准参考模式下每张参考图可单独设置强度，精准参考模式还可逐张指定描述；img2img 仅使用第一张。</span>
               </div>
             </div>
 
-            <!-- 重绘强度（仅 OpenAI 兼容格式显示） -->
+            <!-- 重绘强度（仅 OpenAI 兼容格式 + img2img 模式显示） -->
             <div id="refStrengthWrap" class="field hidden">
               <label class="field-label" for="refStrength">重绘强度 // STRENGTH</label>
               <div class="input-wrap">
@@ -126,7 +127,7 @@
               </div>
               <div class="field-hint">
                 <span class="hint-icon">◈</span>
-                <span>0-1。img2img 时越小越贴近原图；Vibe 参考时越大受参考图影响越深。</span>
+                <span>仅 img2img 模式使用（0-1），越小越贴近原图；Vibe / 精准参考的强度请在各参考图上单独设置。</span>
               </div>
             </div>
 
@@ -142,29 +143,11 @@
               </div>
               <div class="field-hint">
                 <span class="hint-icon">◈</span>
-                <span>vibe：reference_* 风格/角色参考；img2img：/v1/images/edits 重绘；director：精准参考（§6，建议 nai-diffusion-4-5 系列）。未上传参考图时本项无效。</span>
+                <span>vibe：reference_* 风格/角色参考（支持多张）；img2img：/v1/images/edits 重绘（仅取第一张）；director：精准参考（§6，支持 4.5 / 5 系列，可多张并逐图设权重）。未上传参考图时本项无效。</span>
               </div>
             </div>
 
-            <!-- 精准参考描述（仅 OpenAI 兼容格式 + director 模式显示） -->
-            <div id="directorCaptionWrap" class="field hidden">
-              <label class="field-label" for="directorCaption">精准参考描述 // CAPTION</label>
-              <div class="input-wrap">
-                <input
-                  id="directorCaption"
-                  type="text"
-                  class="input acrylic-input"
-                  value="character&style"
-                  placeholder="character&style"
-                />
-              </div>
-              <div class="field-hint">
-                <span class="hint-icon">◈</span>
-                <span>精准参考的 base_caption，决定保留参考图的哪些信息：character&style / character / style。</span>
-              </div>
-            </div>
-
-            <!-- img2img 附加噪声（仅 OpenAI 兼容格式显示） -->
+            <!-- img2img 附加噪声（仅 OpenAI 兼容格式 + img2img 模式显示） -->
             <div id="refNoiseWrap" class="field hidden">
               <label class="field-label" for="refNoise">附加噪声 // NOISE</label>
               <div class="input-wrap">
@@ -180,7 +163,7 @@
               </div>
               <div class="field-hint">
                 <span class="hint-icon">◈</span>
-                <span>img2img 附加噪声强度 (0-1)，随 strength 一并写入 parameters。</span>
+                <span>仅 img2img 模式使用的附加噪声强度 (0-1)，随 strength 一并写入 parameters。</span>
               </div>
             </div>
 
@@ -622,6 +605,6 @@
     </main>
   </div>
 
-  <script src="./app.js?v=4.6.2"></script>
+  <script src="./app.js?v=4.7.0"></script>
 </body>
 </html>

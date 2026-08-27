@@ -1490,8 +1490,8 @@ body::before {
   box-shadow: 0 0 8px rgba(255, 94, 87, 0.7);
 }
 
-/* ===== 参考图预览（OpenAI 兼容格式） ===== */
-.ref-preview-wrap {
+/* ===== 多张参考图网格（OpenAI 兼容格式 §5.2，最多 8 张） ===== */
+.ref-grid-wrap {
   margin-top: 8px;
   display: flex;
   flex-direction: column;
@@ -1499,13 +1499,78 @@ body::before {
   gap: 6px;
 }
 
-.ref-preview {
-  max-width: 100%;
-  max-height: 240px;
-  object-fit: contain;
+.ref-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.ref-item {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--edge-ink-subtle);
+  background: rgba(16, 17, 16, 0.05);
+}
+
+.ref-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
   border-radius: var(--radius-sm);
   border: 1px solid var(--edge-ink-subtle);
   background: rgba(0, 0, 0, 0.08);
+  cursor: zoom-in;
+  flex: none;
+}
+
+.ref-item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ref-item-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ref-strength-input {
+  width: 76px;
+  text-align: center;
+}
+
+.ref-caption-select {
+  max-width: 180px;
+}
+
+/* 按参考图使用模式控制逐图控件显隐：img2img 走全局重绘强度、隐藏逐图
+   强度；base_caption 下拉仅精准参考模式可见 */
+.ref-grid.mode-img2img .ref-strength-input {
+  display: none;
+}
+
+.ref-grid:not(.mode-director) .ref-caption-select {
+  display: none;
+}
+
+.ref-item-meta {
+  font-size: 11px;
+  color: var(--edge-ink-muted);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ref-item-remove {
+  padding: 3px 9px;
 }
 
 /* ===== 多角色坐标行（OpenAI 兼容格式 §7） ===== */
