@@ -936,7 +936,7 @@ class NAIGenerateImagePlugin(Star):
                 conflicts.append(source.name)
                 continue
             try:
-                shutil.move(str(source), str(destination))
+                shutil.move(source, destination)
                 moved += 1
             except OSError as exc:
                 logger.warning(
