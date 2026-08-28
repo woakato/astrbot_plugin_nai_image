@@ -2,6 +2,7 @@ import asyncio
 import base64
 import mimetypes
 import re
+import shutil
 import time
 from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
@@ -904,10 +905,60 @@ class NAIGenerateImagePlugin(Star):
         """延迟解析插件数据目录，避免模块加载阶段依赖 AstrBot 运行环境。"""
 
         if self._image_history_dir is None:
-            self._image_history_dir = (
-                StarTools.get_data_dir(PLUGIN_NAME) / "image_history"
-            )
+            self._image_history_dir = self._get_plugin_data_dir() / "image_history"
         return self._image_history_dir
+
+    @staticmethod
+    def _get_plugin_data_dir() -> Path:
+        """返回 AstrBot 为本插件分配的数据目录。"""
+
+        return StarTools.get_data_dir(PLUGIN_NAME)
+
+    def _migrate_legacy_data_dir(self) -> None:
+        """把旧版工作目录下的数据整体迁移到 AstrBot 插件数据目录。"""
+
+        legacy_dir = (Path.cwd() / "data" / PLUGIN_NAME).resolve(strict=False)
+        target_dir = self._get_plugin_data_dir().resolve(strict=False)
+        if legacy_dir == target_dir or not legacy_dir.exists():
+            return
+        if not legacy_dir.is_dir():
+            logger.warning(
+                f"{LOG_TAG} 旧版数据路径不是目录，跳过迁移 | path={legacy_dir}"
+            )
+            return
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        conflicts: list[str] = []
+        for source in sorted(legacy_dir.iterdir(), key=lambda path: path.name):
+            destination = target_dir / source.name
+            if destination.exists() or destination.is_symlink():
+                conflicts.append(source.name)
+                continue
+            try:
+                shutil.move(str(source), str(destination))
+                moved += 1
+            except OSError as exc:
+                logger.warning(
+                    f"{LOG_TAG} 旧版数据项迁移失败 | source={source} "
+                    f"target={destination} error={exc!r}"
+                )
+
+        removed = False
+        try:
+            legacy_dir.rmdir()
+            removed = True
+        except OSError as exc:
+            logger.warning(
+                f"{LOG_TAG} 旧版数据目录仍有未迁移内容，保留原目录 | "
+                f"path={legacy_dir} conflicts={conflicts} error={exc!r}"
+            )
+
+        logger.info(
+            f"{LOG_TAG} 旧版数据目录迁移完成 | source={legacy_dir} "
+            f"target={target_dir} moved={moved} conflicts={len(conflicts)} "
+            f"source_removed={removed}"
+        )
 
     @staticmethod
     def _write_and_cleanup_image_history(
@@ -1013,7 +1064,13 @@ class NAIGenerateImagePlugin(Star):
 
     async def initialize(self):
         logger.info(f"{LOG_TAG} [initialize] 阶段开始")
-        # 1) aiohttp session —— 失败也继续，至少把代理先起来
+        # 1) 启动时迁移旧版误写到 data/<plugin_name> 的运行数据。
+        try:
+            await asyncio.to_thread(self._migrate_legacy_data_dir)
+        except Exception as exc:
+            logger.warning(f"{LOG_TAG} [initialize] 旧版数据目录迁移异常: {exc!r}")
+
+        # 2) aiohttp session —— 失败也继续，至少把代理先起来
         #    trust_env：开启「绕过系统代理」时忽略环境变量代理，强制直连
         #    生图站，避免梯子的 HTTP 代理出口把请求带偏。
         try:
@@ -1034,7 +1091,7 @@ class NAIGenerateImagePlugin(Star):
                 f"{LOG_TAG} [initialize] aiohttp session 创建失败: {e!r}（将继续，远程出图会受影响）"
             )
 
-        # 2) 本地代理 —— 由 enable_proxy 控制。开启时先停掉旧实例（热重载
+        # 3) 本地代理 —— 由 enable_proxy 控制。开启时先停掉旧实例（热重载
         #    场景），再带 3 次 retry（间隔 1s）启动，应对 TIME_WAIT 等端口占用。
         if not self.enable_proxy:
             await self._stop_proxy_server()
@@ -1064,7 +1121,7 @@ class NAIGenerateImagePlugin(Star):
                     f"不可用 —— 上游 healthcheck 会走 nai.sta1n.cn, 不会被本地 {self.proxy_port} 错误掩盖。last_err={last_err!r}"
                 )
 
-        # 3) 注册测试面板 Web API（路由需带插件名前缀才能被 Bridge SDK 匹配）
+        # 4) 注册测试面板 Web API（路由需带插件名前缀才能被 Bridge SDK 匹配）
         try:
             self.context.register_web_api(
                 f"{PAGE_API_PREFIX}/config",
@@ -1114,7 +1171,7 @@ class NAIGenerateImagePlugin(Star):
         except Exception as e:
             logger.warning(f"{LOG_TAG} [initialize] 注册测试面板 Web API 失败: {e!r}")
 
-        # 4) 试用生成：解密代码内混淆密钥 + 加载本地试用次数
+        # 5) 试用生成：解密代码内混淆密钥 + 加载本地试用次数
         await self._init_trial_feature()
 
         logger.info(
@@ -2121,7 +2178,6 @@ class NAIGenerateImagePlugin(Star):
     async def _init_trial_feature(self) -> None:
         """初始化试用功能：解密代码内混淆密钥 + 加载本地试用次数。"""
         import json
-        from pathlib import Path
 
         # 1) 解密代码内混淆密钥（无网络依赖）
         if _TRIAL_KEY_ENC:
@@ -2135,7 +2191,7 @@ class NAIGenerateImagePlugin(Star):
 
         # 2) 加载本地试用次数
         try:
-            trial_dir = Path("data") / PLUGIN_NAME
+            trial_dir = self._get_plugin_data_dir()
             trial_dir.mkdir(parents=True, exist_ok=True)
             trial_file = trial_dir / "trial_usage.json"
             self._trial_usage_file = str(trial_file)
@@ -2307,7 +2363,6 @@ class NAIGenerateImagePlugin(Star):
     async def _test_panel_save_cache(self) -> Any:
         """Web API: 保存面板状态缓存到本地文件（替代 localStorage，因为 iframe sandbox 限制）。"""
         import json
-        from pathlib import Path
 
         try:
             body = await web_request.json(default={})
@@ -2315,7 +2370,7 @@ class NAIGenerateImagePlugin(Star):
             return error_response("请求体解析失败", status_code=400)
 
         try:
-            cache_dir = Path("data") / PLUGIN_NAME
+            cache_dir = self._get_plugin_data_dir()
             cache_dir.mkdir(parents=True, exist_ok=True)
             cache_file = cache_dir / "panel_cache.json"
             cache_file.write_text(
@@ -2330,10 +2385,9 @@ class NAIGenerateImagePlugin(Star):
     async def _test_panel_load_cache(self) -> Any:
         """Web API: 从本地文件加载面板状态缓存。"""
         import json
-        from pathlib import Path
 
         try:
-            cache_file = Path("data") / PLUGIN_NAME / "panel_cache.json"
+            cache_file = self._get_plugin_data_dir() / "panel_cache.json"
             if not cache_file.exists():
                 return json_response({"status": "ok", "data": None})
             data = json.loads(cache_file.read_text(encoding="utf-8"))
