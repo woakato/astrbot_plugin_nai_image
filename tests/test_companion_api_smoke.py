@@ -5,7 +5,10 @@ import pathlib
 import sys
 import types
 
-sys.path.insert(0, r"E:\AstrBot\data\plugins")
+# The package-style import below needs the parent of the repository root on
+# sys.path; resolve it relatively so the test works on any checkout machine
+# (and in CI) instead of a hardcoded local path.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from astrbot_plugin_nai_image.companion_api import NAIImageCompanionExtensionAPI
 
