@@ -540,11 +540,31 @@ def migrate_legacy_translate_config(config: dict) -> str | None:
     return None
 
 
+def migrate_invalid_call_mode(config: dict) -> str | None:
+    """归一化非法或被污染的 call_mode 并写回 dict。
+
+    call_mode 为 "openai" 但未配置 OpenAI 兼容接口地址时（新版本默认值
+    被污染的典型表现），回退为 "direct"，避免生图请求打到空地址；其余
+    非法值同样回退 "direct"，与运行时归一化行为一致。已完整配置 OpenAI
+    站点的配置不受影响。
+
+    返回迁移后的字符串值；无需迁移返回 None。
+    """
+    mode = str(config.get("call_mode") or "").strip()
+    if mode == "openai" and not str(config.get("openai_api_base_url") or "").strip():
+        config["call_mode"] = "direct"
+        return "direct"
+    if mode not in ("direct", "openai"):
+        config["call_mode"] = "direct"
+        return "direct"
+    return None
+
+
 @register(
     "astrbot_plugin_nai_image",
     "缪缪的小水泡",
     "基于 nai.sta1n.cn 的 NovelAI 生图插件",
-    "2.3.7",
+    "2.5.1",
 )
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -606,7 +626,10 @@ class NAIGenerateImagePlugin(Star):
         self.negative: str = neg if neg else DEFAULT_NEGATIVE
         self.enable_template: bool = bool(config.get("enable_template", True))
         self.character_preset: str = (config.get("character_preset") or "").strip()
-        # 调用模式：direct（传统 GET nai.sta1n.cn）/ openai（OpenAI 兼容站点）
+        # 调用模式：direct（传统 GET nai.sta1n.cn）/ openai（OpenAI 兼容站点）。
+        # 先归一化被污染/非法的 call_mode（如 openai 但未配置接口地址），再读取；
+        # 迁移结果在 init 末尾统一持久化。
+        healed_call_mode = migrate_invalid_call_mode(config)
         self.call_mode: str = (config.get("call_mode") or "direct").strip()
         if self.call_mode not in ("direct", "openai"):
             self.call_mode = "direct"
@@ -688,14 +711,18 @@ class NAIGenerateImagePlugin(Star):
         self._session: aiohttp.ClientSession | None = None
         self.proxy_runner: web.AppRunner | None = None
         self.proxy_port: int = int(config.get("proxy_port") or PROXY_PORT)
-        # v2.2.4 及更早版本的 enable_translate 为布尔值，新版 schema 要求字符串三态。
-        # 保留布尔值会导致 dashboard 保存配置时因类型校验失败，这里加载时归一化并
-        # 尝试写回磁盘，保证旧配置用户升级后仍可正常保存；写回失败不影响本次运行。
-        if migrate_legacy_translate_config(config) is not None:
+        # 旧配置迁移：v2.2.4 及更早版本的布尔 enable_translate、被污染或非法
+        # 的 call_mode（如 openai 但未配置接口地址）。保留旧值会导致 dashboard
+        # 保存配置时类型校验失败或生图请求打到空地址，这里加载时归一化并尝试
+        # 写回磁盘；写回失败不影响本次运行。
+        if (
+            migrate_legacy_translate_config(config) is not None
+            or healed_call_mode is not None
+        ):
             try:
-                self._persist_translate_config_migration()
+                self._persist_config_migrations()
             except Exception as exc:
-                logger.warning(f"{LOG_TAG} 旧版布尔转译配置迁移失败: {exc}")
+                logger.warning(f"{LOG_TAG} 插件配置迁移写回失败: {exc}")
         self.translate_mode: str = normalize_translate_mode(
             config.get("enable_translate", TRANSLATE_MODE_OFF)
         )
@@ -750,7 +777,19 @@ class NAIGenerateImagePlugin(Star):
         # 「绕过系统代理直连生图站」默认开启：请求 nai.sta1n.cn 时忽略
         # 系统/环境代理强制直连，避免梯子代理出口导致连不上生图站。
         self.bypass_system_proxy: bool = bool(config.get("bypass_system_proxy", True))
-        self.enable_proxy: bool = bool(config.get("enable_proxy", True))
+        self.enable_proxy: bool = bool(config.get("enable_proxy", False))
+        # 直连与本地代理二选一：旧版或手改配置可能两者同时开启，此时以陪伴
+        # 直连为准，自动关闭本地代理并写回，保证落盘配置始终互斥。
+        if self.enable_companion_link and self.enable_proxy:
+            self.enable_proxy = False
+            config["enable_proxy"] = False
+            _save_config = getattr(config, "save_config", None)
+            if callable(_save_config):
+                _save_config()
+            logger.info(
+                f"{LOG_TAG} [init] 检测到陪伴直连与本地代理同时开启，"
+                f"已按二选一规则自动关闭本地代理（enable_proxy=false）并写回配置"
+            )
         # 陪伴系列插件通过 get_nai_image_api() / extension_api 直连本插件。
         self.extension_api = NAIImageCompanionExtensionAPI(self)
         _active_plugin = self
@@ -821,8 +860,12 @@ class NAIGenerateImagePlugin(Star):
             return ".webp"
         return ".img"
 
-    def _persist_translate_config_migration(self) -> None:
-        """把磁盘插件配置中的旧版布尔 enable_translate 迁移为字符串并保存。"""
+    def _persist_config_migrations(self) -> None:
+        """把磁盘插件配置中的旧版/被污染配置项迁移为当前格式并保存。
+
+        目前包含：旧版布尔 enable_translate -> 字符串三态；被污染或非法的
+        call_mode -> direct。写回失败不影响本次运行。
+        """
         import json as _json
         import os as _os
 
@@ -840,15 +883,22 @@ class NAIGenerateImagePlugin(Star):
             ),
             schema=schema,
         )
+        migrated = False
         if isinstance(plugin_cfg.get("enable_translate"), bool):
             plugin_cfg["enable_translate"] = normalize_translate_mode(
                 plugin_cfg["enable_translate"]
             )
-            plugin_cfg.save_config()
+            migrated = True
             logger.info(
                 f"{LOG_TAG} 已自动迁移旧版布尔 enable_translate 配置 -> "
                 f"{plugin_cfg['enable_translate']}"
             )
+        healed_mode = migrate_invalid_call_mode(plugin_cfg)
+        if healed_mode is not None:
+            migrated = True
+            logger.info(f"{LOG_TAG} 已自动修正无效的 call_mode 配置 -> {healed_mode}")
+        if migrated:
+            plugin_cfg.save_config()
 
     def _get_image_history_dir(self) -> Path:
         """延迟解析插件数据目录，避免模块加载阶段依赖 AstrBot 运行环境。"""

@@ -1,6 +1,6 @@
 import pytest
 
-from main import migrate_legacy_translate_config
+from main import migrate_invalid_call_mode, migrate_legacy_translate_config
 
 
 @pytest.mark.parametrize(
@@ -27,3 +27,28 @@ def test_migrate_legacy_translate_config_missing_key_untouched():
     config = {}
     assert migrate_legacy_translate_config(config) is None
     assert "enable_translate" not in config
+
+
+def test_migrate_invalid_call_mode_resets_openai_without_base_url():
+    config = {"call_mode": "openai", "openai_api_base_url": "", "openai_api_key": "k"}
+    assert migrate_invalid_call_mode(config) == "direct"
+    assert config["call_mode"] == "direct"
+
+
+def test_migrate_invalid_call_mode_keeps_configured_openai():
+    config = {"call_mode": "openai", "openai_api_base_url": "https://example.com"}
+    assert migrate_invalid_call_mode(config) is None
+    assert config["call_mode"] == "openai"
+
+
+@pytest.mark.parametrize("value", [None, "", "OpenAI", "未知模式"])
+def test_migrate_invalid_call_mode_normalizes_unknown_value(value):
+    config = {"call_mode": value} if value is not None else {}
+    assert migrate_invalid_call_mode(config) == "direct"
+    assert config["call_mode"] == "direct"
+
+
+def test_migrate_invalid_call_mode_keeps_direct():
+    config = {"call_mode": "direct"}
+    assert migrate_invalid_call_mode(config) is None
+    assert config["call_mode"] == "direct"
