@@ -1560,7 +1560,14 @@ class NAIGenerateImagePlugin(Star):
                         f"{LOG_TAG} [openai_generate] 精准参考使用兜底参考图 "
                         f"{len(ref_bytes_list)} 张"
                     )
-            if not ref_bytes_list:
+                else:
+                    # 无参考图也无兜底图：按文档契约回退纯文生图，只有
+                    # director-tools 图片处理动作才强制要求源图。
+                    logger.info(
+                        f"{LOG_TAG} [openai_generate] 精准参考模式未带参考图且"
+                        "未配置兜底参考图，回退纯文生图"
+                    )
+            if not ref_bytes_list and is_director:
                 return [], "no_reference_image"
 
         if len(ref_bytes_list) > OPENAI_MAX_REFERENCE_IMAGES:

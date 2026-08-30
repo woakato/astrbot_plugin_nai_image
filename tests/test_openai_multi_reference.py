@@ -162,6 +162,23 @@ def test_director_unsupported_model_falls_back_to_45():
     assert last_payload(plugin)["model"] == "nai-diffusion-4-5-full"
 
 
+def test_director_without_reference_falls_back_to_text2img():
+    plugin = make_plugin(reference_mode="director")
+    images, reason = asyncio.run(
+        plugin._openai_generate(
+            "a girl at the seaside",
+            "1024x1024",
+            n=1,
+            reference_mode="director",
+        )
+    )
+    # 无参考图且未配置兜底参考图：回退纯文生图，不再报 no_reference_image
+    assert reason == "ok" and images
+    params = last_payload(plugin)["parameters"]
+    assert "director_reference_images" not in params
+    assert "reference_image_multiple" not in params
+
+
 def test_configured_director_weights_are_applied():
     plugin = make_plugin(reference_mode="director")
     plugin.openai_vibe_strength = 0.45
