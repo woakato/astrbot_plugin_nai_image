@@ -1,4 +1,4 @@
-# 🎨 NAI 生图插件 (`astrbot_plugin_nai_image` v2.2.0)
+# 🎨 NAI 生图插件 (`astrbot_plugin_nai_image` v3.0.0)
 
 基于 **NovelAI Diffusion V4.5 / V5** 的 AstrBot 绘图插件。内置 **19,663 条实测 Tag 法典词库**，支持**多槽位（名称 + 模型 + 画师串）预设管理**、**V4.5 / V5 模型级 Tag 物理隔离**、**原生多角色块 (`characterPrompts`) 防串色架构**以及独立 Web 调试面板。
 

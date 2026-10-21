@@ -1,6 +1,6 @@
 name: "astrbot_plugin_nai_image"
 display_name: "NAI生图插件"
 desc: "基于 NovelAI V4.5 / V5 的 AstrBot 生图插件——支持原生多角色块控制、法典检索、衣柜联动与相册归档。"
-version: "v2.2.0"
+version: "v3.0.0"
 author: "Evenstar259"
 repo: "https://github.com/woakato/astrbot_plugin_nai_image"

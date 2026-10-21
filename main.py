@@ -507,7 +507,7 @@ def migrate_legacy_translate_config(config: dict) -> str | None:
     "astrbot_plugin_nai_image",
     "Evenstar259",
     "基于 NovelAI V4.5 / V5 的 AstrBot 生图插件——支持原生多角色块控制、法典检索、衣柜联动与相册归档。",
-    "v2.2.0",
+    "v3.0.0",
     "",
 )
 class NAIGenerateImagePlugin(Star):
@@ -3444,7 +3444,7 @@ class NAIGenerateImagePlugin(Star):
     async def imgstatus(self, event: AstrMessageEvent):
         """检查当前 NAI 生图服务的配置与会话状态。"""
         lines = [
-            f"🎨 NAI生图插件 (v2.2.0) 状态：",
+            f"🎨 NAI生图插件 (v3.0.0) 状态：",
             f"• 接口地址: {self.openai_api_base_url or '❌ 未配置'}",
             f"• API Key: {'✅ 已配置' if self.openai_api_key else '❌ 未配置'}",
             f"• 当前模型: {self.openai_api_model}",
