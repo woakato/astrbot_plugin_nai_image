@@ -18,23 +18,12 @@
       "days": {
         "2026-09-28": {
           "cost": 24, "count": 3, "failed": 0,
-          "upstream_cost": 20, "upstream_events": 2,
           "by_transport": {"get": 1, "web_jobs": 2},
           "by_model": {"nai-diffusion-4-5-full": 24},
           "by_size": {"竖图": 8, "2K竖图": 16}
         }
-      },
-      "upstream": {
-        "balance": 943.0,
-        "checked_at": 1690000000.0,
-        "last_delta": 8,
-        "last_error": ""
       }
     }
-
-``upstream_cost`` 只记录上游余额两次查询之间的减少量，来源是真实的网页
-余额变化，单位与 ``cost`` 相同但统计口径不同（包含同一密钥在网页或其他
-客户端的用量），因此不能相加。
 
 类本身是纯同步的（便于单测），异步封装与并发锁由 ``main.py`` 负责。
 """
@@ -43,10 +32,9 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 STATS_VERSION = 1
 # 默认统计文件名（相对插件数据目录）。
@@ -89,9 +77,7 @@ def date_range(days: int, end_day: str | None = None) -> list[str]:
         return []
     end = _parse_day(end_day) if end_day else datetime.now().date()
     start = end - timedelta(days=days - 1)
-    return [
-        (start + timedelta(days=offset)).strftime(_DAY_FORMAT) for offset in range(days)
-    ]
+    return [(start + timedelta(days=offset)).strftime(_DAY_FORMAT) for offset in range(days)]
 
 
 def _new_bucket() -> dict[str, Any]:
@@ -99,22 +85,9 @@ def _new_bucket() -> dict[str, Any]:
         "cost": 0,
         "count": 0,
         "failed": 0,
-        # 上游余额同步得到的实际扣费，与插件按价目表估算的 cost 分开累计，
-        # 避免把估算值和余额变化重复计入同一个总数。
-        "upstream_cost": 0,
-        "upstream_events": 0,
         "by_transport": {},
         "by_model": {},
         "by_size": {},
-    }
-
-
-def _new_upstream_state() -> dict[str, Any]:
-    return {
-        "balance": None,
-        "checked_at": 0.0,
-        "last_delta": 0,
-        "last_error": "",
     }
 
 
@@ -127,7 +100,6 @@ class UsageStatsStore:
             "version": STATS_VERSION,
             "updated_at": 0.0,
             "days": {},
-            "upstream": _new_upstream_state(),
         }
         self._loaded = False
 
@@ -153,21 +125,6 @@ class UsageStatsStore:
         if not isinstance(parsed, dict) or not isinstance(parsed.get("days"), dict):
             self._backup_corrupted()
             return self._data
-        upstream_state = _new_upstream_state()
-        raw_upstream = parsed.get("upstream")
-        if isinstance(raw_upstream, dict):
-            try:
-                if raw_upstream.get("balance") is not None:
-                    upstream_state["balance"] = float(raw_upstream["balance"])
-                upstream_state["checked_at"] = float(
-                    raw_upstream.get("checked_at") or 0.0
-                )
-                upstream_state["last_delta"] = int(raw_upstream.get("last_delta") or 0)
-            except (TypeError, ValueError):
-                upstream_state = _new_upstream_state()
-            upstream_state["last_error"] = str(raw_upstream.get("last_error") or "")[
-                :200
-            ]
         self._data = {
             "version": STATS_VERSION,
             "updated_at": float(parsed.get("updated_at") or 0.0),
@@ -176,7 +133,6 @@ class UsageStatsStore:
                 for day, bucket in parsed["days"].items()
                 if isinstance(bucket, dict)
             },
-            "upstream": upstream_state,
         }
         return self._data
 
@@ -249,78 +205,10 @@ class UsageStatsStore:
                 bucket[key][value] = bucket[key].get(value, 0) + cost
         return bucket
 
-    def record_upstream(
-        self,
-        cost: int,
-        *,
-        balance: float | None = None,
-        checked_at: float | None = None,
-        last_error: str = "",
-        day: str | None = None,
-    ) -> dict[str, Any]:
-        """记录一次上游余额同步得到的实际扣费。
-
-        ``cost`` 是相邻两次余额查询之间的减少量，单独累计到
-        ``upstream_cost``，不会混入插件按价目表估算的 ``cost``。
-
-        Args:
-            cost: 本次检测到的余额减少量（点），负数按 0 处理。
-            balance: 本次查询到的上游余额，未知时传 None。
-            checked_at: 本次查询的时间戳（秒），None 时使用当前时间。
-            last_error: 查询失败时的错误摘要，成功传空串。
-            day: 计入的日期（YYYY-MM-DD），默认今天。
-
-        Returns:
-            当天的聚合桶。
-        """
-
-        self.load()
-        day = day or today_str()
-        bucket = self._data["days"].setdefault(day, _new_bucket())
-        cost = max(0, int(round(cost)))
-        if cost:
-            bucket["upstream_cost"] += cost
-            bucket["upstream_events"] += 1
-        self.set_upstream_state(
-            balance=balance,
-            checked_at=checked_at,
-            last_delta=cost,
-            last_error=last_error,
-        )
-        return bucket
-
-    def set_upstream_state(
-        self,
-        *,
-        balance: float | None = None,
-        checked_at: float | None = None,
-        last_delta: int | None = None,
-        last_error: str | None = None,
-    ) -> dict[str, Any]:
-        """更新上游余额同步状态；None 表示保留原值。"""
-
-        state = self._data.setdefault("upstream", _new_upstream_state())
-        if balance is not None:
-            state["balance"] = float(balance)
-        if checked_at is not None:
-            state["checked_at"] = float(checked_at)
-        if last_delta is not None:
-            state["last_delta"] = int(last_delta)
-        if last_error is not None:
-            state["last_error"] = str(last_error)[:200]
-        return state
-
-    def upstream_state(self) -> dict[str, Any]:
-        """返回上游余额同步状态快照。"""
-
-        self.load()
-        return dict(self._data.get("upstream") or _new_upstream_state())
-
     def reset(self) -> None:
         """清空全部统计。"""
 
         self._data["days"] = {}
-        self._data["upstream"] = _new_upstream_state()
         self._data["updated_at"] = time.time()
 
     # ---------- 查询 ----------
@@ -353,10 +241,6 @@ class UsageStatsStore:
                     "cost": int(bucket["cost"]) if bucket else 0,
                     "count": int(bucket["count"]) if bucket else 0,
                     "failed": int(bucket["failed"]) if bucket else 0,
-                    "upstream_cost": int(bucket["upstream_cost"]) if bucket else 0,
-                    "upstream_events": (
-                        int(bucket["upstream_events"]) if bucket else 0
-                    ),
                 }
             )
         return result
@@ -368,8 +252,6 @@ class UsageStatsStore:
         cost = sum(row["cost"] for row in rows)
         count = sum(row["count"] for row in rows)
         failed = sum(row["failed"] for row in rows)
-        upstream_cost = sum(row["upstream_cost"] for row in rows)
-        upstream_events = sum(row["upstream_events"] for row in rows)
         active = sum(1 for row in rows if row["cost"])
         return {
             "days_in_window": len(rows),
@@ -377,8 +259,6 @@ class UsageStatsStore:
             "cost": cost,
             "count": count,
             "failed": failed,
-            "upstream_cost": upstream_cost,
-            "upstream_events": upstream_events,
             "avg_cost": round(cost / active, 1) if active else 0.0,
             "peak_cost": max((row["cost"] for row in rows), default=0),
             "peak_date": max(rows, key=lambda row: row["cost"])["date"] if rows else "",
@@ -436,12 +316,7 @@ def sparkline(values: Iterable[int]) -> str:
 def format_usage_report(store: UsageStatsStore, days: int = 7) -> str:
     """渲染聊天指令用的中文用量报告。"""
 
-    upstream = store.upstream_state()
-    if (
-        store.is_empty()
-        and upstream.get("balance") is None
-        and not upstream.get("last_error")
-    ):
+    if store.is_empty():
         return (
             "📊 暂无点数消耗记录。\n"
             "每次成功生图后会按上游档位表累计点数，生成一张后再来查即可。"
@@ -461,12 +336,7 @@ def format_usage_report(store: UsageStatsStore, days: int = 7) -> str:
 
     lines = [
         f"📊 NAI 点数用量（{window_label}）",
-        f"今日: {today_row['cost']} 点 / {today_row['count']} 张"
-        + (
-            f" · 上游 {today_row['upstream_cost']} 点"
-            if today_row.get("upstream_cost")
-            else ""
-        ),
+        f"今日: {today_row['cost']} 点 / {today_row['count']} 张",
     ]
     if days <= 0:
         lines.append(
@@ -482,54 +352,24 @@ def format_usage_report(store: UsageStatsStore, days: int = 7) -> str:
                 f"{window_label}: {window['cost']} 点 / {window['count']} 张"
                 f"（{window['active_days']} 天有消耗，日均 {window['avg_cost']} 点）"
             )
-        lines.append(f"累计: {overall['cost']} 点 / {overall['count']} 张{since}")
+        lines.append(
+            f"累计: {overall['cost']} 点 / {overall['count']} 张{since}"
+        )
     if window["failed"]:
         lines.append(f"失败: {window['failed']} 次（上游失败不扣点，仅作排查参考）")
-
-    # 上游余额同步：与插件估算值分开展示，避免把网页/其他客户端的用量
-    # 混进插件自己的点数台账。
-    upstream_cost = int(window["upstream_cost"] or 0)
-    if (
-        upstream_cost
-        or upstream.get("balance") is not None
-        or upstream.get("last_error")
-    ):
-        upstream_text = f"上游实际扣费: {upstream_cost} 点（{window_label}）"
-        if upstream.get("balance") is not None:
-            upstream_text += f" · 余额 {upstream['balance']:g} 点"
-        if upstream.get("checked_at"):
-            synced_at = datetime.fromtimestamp(upstream["checked_at"]).strftime(
-                "%m-%d %H:%M"
-            )
-            upstream_text += f" · 最近同步 {synced_at}"
-        if upstream.get("last_error"):
-            upstream_text += f" · 同步异常: {upstream['last_error'][:60]}"
-        lines.append(upstream_text)
-        if window["cost"] and upstream_cost:
-            lines.append(
-                f"估算/实际差额: {window['cost'] - upstream_cost:+d} 点"
-                "（上游实际包含同一密钥在网页或其他客户端的用量）"
-            )
 
     rows = store.series(days)
     lines.append("")
     lines.append(f"趋势: {sparkline(row['cost'] for row in rows)}")
-    if any(row["upstream_cost"] for row in rows):
-        lines.append(f"上游趋势: {sparkline(row['upstream_cost'] for row in rows)}")
     if window["peak_cost"]:
         lines.append(f"峰值: {window['peak_cost']} 点（{window['peak_date']}）")
 
-    active_rows = [
-        row for row in reversed(rows) if row["cost"] or row["upstream_cost"]
-    ][:10]
+    active_rows = [row for row in reversed(rows) if row["cost"]][:10]
     if active_rows:
         lines.append("")
         lines.append("明细（近 10 个有消耗的日子）:")
         for row in active_rows:
-            detail = f"  {row['date'][5:]}  {row['cost']} 点 / {row['count']} 张"
-            if row["upstream_cost"]:
-                detail += f" · 上游 {row['upstream_cost']} 点"
-            lines.append(detail)
+            lines.append(f"  {row['date'][5:]}  {row['cost']} 点 / {row['count']} 张")
 
     breakdown_lines = []
     for field, label in (("model", "模型"), ("size", "画幅"), ("transport", "通道")):

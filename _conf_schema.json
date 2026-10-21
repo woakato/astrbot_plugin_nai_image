@@ -1,37 +1,4 @@
 {
-    "call_mode": {
-        "type": "string",
-        "default": "direct",
-        "description": "调用模式",
-        "hint": "决定聊天调用（指令 / 陪伴联动）走哪套生图后端。",
-        "options": [
-            "direct",
-            "openai"
-        ],
-        "labels": [
-            "传统 GET（nai.sta1n.cn）",
-            "OpenAI 兼容（/v1/images）"
-        ],
-        "obvious": true
-    },
-    "image_gen_key": {
-        "type": "string",
-        "default": "",
-        "description": "生图 Token",
-        "hint": "必填。在 nai.sta1n.cn 申请到的 toUserId。",
-        "obvious": true,
-        "condition": {
-            "call_mode": "direct"
-        }
-    },
-    "base_url": {
-        "type": "string",
-        "default": "https://nai.sta1n.cn",
-        "description": "生图服务地址",
-        "condition": {
-            "call_mode": "direct"
-        }
-    },
     "request_timeout": {
         "type": "int",
         "default": 180,
@@ -40,65 +7,50 @@
         "min": 30,
         "max": 600
     },
-    "show_cost_estimate": {
-        "type": "bool",
-        "default": true,
-        "description": "显示预计消耗点数",
-        "hint": "开启后 /image 回复与测试面板会实时显示本次生图的预计点数消耗（按步数×画质档位估算）。关闭则不再显示。用 /price 可单独试算并查询实时余额。",
-        "condition": {
-            "call_mode": "direct"
-        }
-    },
     "enable_usage_stats": {
         "type": "bool",
         "default": true,
         "description": "点数用量统计",
         "hint": "开启后每次成功出图会按日期累计点数消耗，可用 /usage 指令查询，并在测试面板以柱状图/趋势线查看（7/30/90 日）。关闭后不再记录，历史数据保留。"
     },
-    "enable_upstream_billing_sync": {
-        "type": "bool",
-        "default": false,
-        "description": "同步上游余额扣费",
-        "hint": "定时查询生图密钥的上游余额，把相邻两次查询之间的余额减少量记为「上游实际扣费」，与插件按档位表估算的点数分开统计，便于对账。只读取余额，不消耗点数；需要传统 GET 直连模式、开启「点数用量统计」并配置 image_gen_key。上游未开放逐笔扣费明细，因此这是按余额变化推算的总额，会包含同一密钥在网页或其他客户端的用量；停机期间的变化不计入。",
-        "condition": {
-            "call_mode": "direct"
-        }
-    },
-    "upstream_billing_sync_interval": {
-        "type": "int",
-        "default": 10,
-        "description": "余额同步间隔（分钟）",
-        "hint": "每隔多少分钟查询一次上游余额；间隔越短越及时，但请求次数更多。范围 1-1440。",
-        "min": 1,
-        "max": 1440,
-        "condition": {
-            "call_mode": "direct",
-            "enable_upstream_billing_sync": true
-        }
-    },
     "openai_api_base_url": {
         "type": "string",
         "default": "",
         "description": "OpenAI 兼容生图接口地址",
-        "hint": "例如 https://api1.syuan.org。聊天调用 / 陪伴联动 / 面板「OpenAI 兼容」格式使用此地址。",
-        "condition": {
-            "call_mode": "openai"
-        }
+        "hint": "例如 https://api.example.com。聊天调用 / 陪伴联动 / 面板「OpenAI 兼容」格式使用此地址。"
     },
     "openai_api_key": {
         "type": "string",
         "default": "",
         "description": "OpenAI 兼容接口密钥",
-        "hint": "OpenAI 兼容格式的 Bearer Token。",
-        "condition": {
-            "call_mode": "openai"
-        }
+        "hint": "OpenAI 兼容格式的 Bearer Token。"
+    },
+    "active_artist_slot": {
+        "type": "string",
+        "default": "1",
+        "description": "后端正式生图启用槽位（与 UI 测试面板槽位独立）",
+        "hint": "选择平时聊天 / AI 工具生图时正式使用的预设槽位（包含该槽位绑定的模型与专属画师串）。在「测试面板」中新建或修改槽位并保存后，此处下拉选项会自动同步更新。",
+        "options": [
+            "1",
+            "2",
+            "3",
+            "4",
+            "5"
+        ],
+        "labels": [
+            "槽位 1 · V4.5 主力画风 [nai-diffusion-4-5-full]",
+            "槽位 2 · V4.5 清新厚涂 [nai-diffusion-4-5-full]",
+            "槽位 3 · V4.5 赛璐璐同人 [nai-diffusion-4-5-full]",
+            "槽位 4 · NAI V5 专属画风 [nai-diffusion-5-full]",
+            "槽位 5 · NAI V5 备用 [nai-diffusion-5-curated]"
+        ],
+        "obvious": true
     },
     "openai_api_model": {
         "type": "string",
         "default": "nai-diffusion-5-full",
-        "description": "OpenAI 兼容接口模型名",
-        "hint": "接口必填字段。nai-diffusion-5-full 为文档推荐的通用动漫插画模型；精准参考支持 nai-diffusion-4-5 与 nai-diffusion-5 系列，其他模型会自动回退 4.5。director-tools（图片处理）由面板动作自动选用，无需在此配置。",
+        "description": "生图模型（切换自动隔离 V4.5 / V5 提示词、画师串与法典词库）",
+        "hint": "选择当前使用的 NovelAI 模型。切换 V4.5 与 V5 时，下方画师串、角色底模以及 AI 调用的法典词库会自动按模型隔离切换，防止混用 Tag。",
         "options": [
             "nai-diffusion-5-full",
             "nai-diffusion-5-curated",
@@ -109,26 +61,7 @@
             "nai-diffusion-3",
             "nai-diffusion-furry-3"
         ],
-        "condition": {
-            "call_mode": "openai"
-        }
-    },
-    "model": {
-        "type": "string",
-        "default": "nai-diffusion-4-5-full",
-        "description": "生图模型",
-        "hint": "选择生成模型。步数 1-28 时：nai-diffusion-4-5-full（V4.5 完整版）标准画幅单张 1 点；nai-diffusion-5-full（V5 完整版）标准画幅单张 8 点。2K 一律 15 点、4K 一律 25 点（与模型无关）。步数 29 起走任务接口并按档位加价，详见 README 价目表。",
-        "options": [
-            "nai-diffusion-4-5-full",
-            "nai-diffusion-5-full"
-        ],
-        "labels": [
-            "nai-diffusion-4-5-full (V4.5 完整版)",
-            "nai-diffusion-5-full (V5 完整版)"
-        ],
-        "condition": {
-            "call_mode": "direct"
-        }
+        "obvious": true
     },
     "image_size": {
         "type": "string",
@@ -182,19 +115,38 @@
     "custom_artists": {
         "type": "string",
         "default": "",
-        "description": "自定义画师串",
-        "hint": "仅在「默认风格」选择「自定义」时生效。",
+        "description": "自定义画师串（NAI V4.5 专属）",
+        "hint": "当生图模型为 NAI V4.5 系列且画风为「自定义」时自动前置拼接。",
+        "obvious": true,
         "condition": {
-            "image_style": "自定义"
+            "openai_api_model": [
+                "nai-diffusion-4-5-full",
+                "nai-diffusion-4-5-curated",
+                "nai-diffusion-4-full",
+                "nai-diffusion-4-curated-preview",
+                "nai-diffusion-3",
+                "nai-diffusion-furry-3"
+            ]
+        }
+    },
+    "custom_artists_v5": {
+        "type": "string",
+        "default": "",
+        "description": "自定义画师串（NAI V5 专属）",
+        "hint": "当生图模型切换为 NAI V5 系列且画风为「自定义」时自动前置拼接（与 V4.5 画师串物理隔离）。",
+        "obvious": true,
+        "condition": {
+            "openai_api_model": [
+                "nai-diffusion-5-full",
+                "nai-diffusion-5-curated"
+            ]
         }
     },
     "steps": {
         "type": "int",
         "default": 24,
         "description": "采样步数",
-        "hint": "直连模式经任务接口支持 1-50 步（29 步起按档位加价，46-50 步单价最高）；OpenAI 兼容模式同样限 1-50，超出自动收敛。",
-        "min": 1,
-        "max": 50
+        "hint": "直连模式经任务接口支持 1-50 步（29 步起按档位加价，46-50 步单价最高）；OpenAI 兼容模式同样限 1-50，超出自动收敛。"
     },
     "scale": {
         "type": "float",
@@ -246,10 +198,7 @@
             "Vibe 参考（风格/角色参考）",
             "img2img（图生图重绘）",
             "精准参考（director）"
-        ],
-        "condition": {
-            "call_mode": "openai"
-        }
+        ]
     },
     "openai_director_caption": {
         "type": "string",
@@ -260,10 +209,7 @@
             "character&style",
             "character",
             "style"
-        ],
-        "condition": {
-            "call_mode": "openai"
-        }
+        ]
     },
     "openai_vibe_strength": {
         "type": "float",
@@ -271,10 +217,7 @@
         "description": "Vibe 参考权重",
         "hint": "Vibe 参考模式下每张参考图的默认权重（reference_strength_multiple，0-1，§5）：越大越受参考图影响。面板逐图设置与 LLM 工具/陪伴联动未显式给强度时使用此值。",
         "min": 0,
-        "max": 1,
-        "condition": {
-            "call_mode": "openai"
-        }
+        "max": 1
     },
     "openai_director_strength": {
         "type": "float",
@@ -282,10 +225,7 @@
         "description": "精准参考权重",
         "hint": "精准参考（director）模式下每张参考图的默认主权重（director_reference_strength_values，0-1，§8）。保持角色建议 0.9-1.0；面板逐图设置与聊天/陪伴调用未显式给强度时使用此值。",
         "min": 0,
-        "max": 1,
-        "condition": {
-            "call_mode": "openai"
-        }
+        "max": 1
     },
     "openai_director_secondary_strength": {
         "type": "float",
@@ -293,41 +233,34 @@
         "description": "精准参考次级特征权重",
         "hint": "精准参考的次级特征强度（director_reference_secondary_strength_values，0-1，§8 推荐区间 0.35-0.7）：越高越强地保留参考图的画风细节。",
         "min": 0,
-        "max": 1,
-        "condition": {
-            "call_mode": "openai"
-        }
+        "max": 1
     },
     "openai_director_fallback_images": {
         "type": "file",
         "default": [],
         "description": "精准参考兜底参考图",
         "hint": "参考图使用模式为「精准参考」时，若请求没有携带参考图（聊天指令、陪伴插件联动等场景），自动按顺序使用这里的全部图片作为精准参考（最多 8 张）；留空则照旧提示需要参考图。支持 png/jpg/webp。",
-        "file_types": ["png", "jpg", "jpeg", "webp"],
-        "condition": {
-            "call_mode": "openai"
-        }
+        "file_types": [
+            "png",
+            "jpg",
+            "jpeg",
+            "webp"
+        ]
     },
     "openai_seed": {
         "type": "int",
         "default": -1,
         "description": "随机种子",
         "hint": "-1 表示每次随机（不发送 seed 字段）；填入非负整数可固定种子复现画面。面板可临时覆盖。",
-        "min": -1,
-        "condition": {
-            "call_mode": "openai"
-        }
+        "min": -1
     },
     "openai_max_retries": {
         "type": "int",
         "default": 2,
         "description": "失败重试次数",
-        "hint": "对 408/429/502/503/504 及上游繁忙类瞬时错误按 2/4/8 秒指数退避重试；400/401/403 与请求超时不重试（超时可能仍在生成并扣费，避免重复扣费）。设为 0 不重试。",
+        "hint": "对 408/429/502/503/504 与超时按 2/4/8 秒指数退避重试；400/401/403 不重试。设为 0 不重试。",
         "min": 0,
-        "max": 3,
-        "condition": {
-            "call_mode": "openai"
-        }
+        "max": 3
     },
     "enable_template": {
         "type": "bool",
@@ -338,8 +271,32 @@
     "character_preset": {
         "type": "string",
         "default": "",
-        "description": "角色预设",
-        "hint": "填入角色在 NAI 里的核心关键词和身体描述补全，如 muelsyse(Arknights), mechanical headwear 等。无论是否开启 LLM 转译，本项都会拼接（这是关闭转译后唯一保留的提示词预处理）。若源请求插件已带角色词则无需配置。"
+        "description": "角色固定外貌底模（NAI V4.5 专属）",
+        "hint": "当使用 NAI V4.5 模型时，作为角色块1（char1_prompt）的基础外貌 Tag。留空则不附加固定外貌。",
+        "obvious": true,
+        "condition": {
+            "openai_api_model": [
+                "nai-diffusion-4-5-full",
+                "nai-diffusion-4-5-curated",
+                "nai-diffusion-4-full",
+                "nai-diffusion-4-curated-preview",
+                "nai-diffusion-3",
+                "nai-diffusion-furry-3"
+            ]
+        }
+    },
+    "character_preset_v5": {
+        "type": "string",
+        "default": "",
+        "description": "角色固定外貌底模（NAI V5 专属）",
+        "hint": "当切换为 NAI V5 模型时，作为角色块1（char1_prompt）的基础外貌 Tag（若留空则回退沿用 V4.5 角色外貌底模）。",
+        "obvious": true,
+        "condition": {
+            "openai_api_model": [
+                "nai-diffusion-5-full",
+                "nai-diffusion-5-curated"
+            ]
+        }
     },
     "enable_translate": {
         "type": "string",
@@ -358,29 +315,6 @@
         "description": "转译模型供应商",
         "hint": "从 AstrBot 已配置的 provider 中选一个。留空时使用 AstrBot 的默认 provider。建议选择便宜/快速的小模型。",
         "_special": "select_provider"
-    },
-    "default_outfit": {
-        "type": "string",
-        "default": "",
-        "description": "默认服装",
-        "hint": "在转译模式为「开启」，或「自动」识别到自然语言时生效；提示词没有具体服装且缓存为空时自动补全。使用英文逗号分隔 SD/NAI tag，例如：modern fashion, dark green knit dress, fitted sweater, slim pants, leather boots。"
-    },
-    "enable_outfit_cache": {
-        "type": "bool",
-        "default": true,
-        "description": "启用服装缓存池",
-        "hint": "开启后记录提示词中出现过的具体服装/换装描述，并在缓存时长内对模糊描述自动沿用；关闭后不写入也不读取缓存，本次提示词中的服装上下文与「默认服装」逻辑不受影响。"
-    },
-    "outfit_cache_ttl_seconds": {
-        "type": "int",
-        "default": 3600,
-        "description": "服装缓存时长",
-        "hint": "单位为秒，仅在「启用服装缓存池」开启时生效。具体服装或换装描述会写入缓存，后续模糊描述自动沿用；默认 3600 秒，超时后回退默认服装，设为 0 亦不启用缓存写入。",
-        "min": 0,
-        "max": 86400,
-        "condition": {
-            "enable_outfit_cache": true
-        }
     },
     "interrogate_provider": {
         "type": "string",
@@ -445,59 +379,6 @@
         "hint": "控制 LLM 生图工具 NAI_Generate_Image 是否允许模型自行指定画风。开启时模型可传入画风（不传则使用「默认风格」设置）；关闭时工具不再向模型暴露画风参数，生图自动使用「默认风格」设置里选好的画风。",
         "condition": {
             "enable_llm_tool": true
-        }
-    },
-    "enable_companion_link": {
-        "type": "bool",
-        "default": true,
-        "description": "启用陪伴插件直连",
-        "hint": "开启后为陪伴系列插件暴露与 image_companion 一致的扩展接口（get_nai_image_api / extension_api），生图请求直接在进程内调用本插件，无需经过本地代理。与「启用本地 OpenAI 兼容代理」二选一：开启本项并保存后，本地代理会自动关闭并隐藏；需要改用本地代理时，请先关闭本项并保存。",
-        "condition": {
-            "enable_proxy": false
-        }
-    },
-    "companion_prompt_format": {
-        "type": "string",
-        "default": "自然语言模式（en）",
-        "description": "陪伴直连提示词模式",
-        "hint": "自然语言模式（en）：把陪伴插件发来的英文自然语言（可含背景信息与需求）原样直接提交给 NAI，不经过 LLM 转译，更适合新版 NAI；nai tag模式：提示词按 NovelAI 标签规则归一化后原样透传，更灵活。",
-        "options": [
-            "自然语言模式（en）",
-            "nai tag模式"
-        ],
-        "condition": {
-            "enable_companion_link": true
-        }
-    },
-    "companion_image_retention_days": {
-        "type": "int",
-        "default": 30,
-        "description": "陪伴直连图片保留天数",
-        "hint": "陪伴直连生成的图片保存在 plugin_data/astrbot_plugin_nai_image/companion_images，按天清理超期文件；设为 0 不按时间清理。",
-        "min": 0,
-        "max": 3650,
-        "condition": {
-            "enable_companion_link": true
-        }
-    },
-    "enable_proxy": {
-        "type": "bool",
-        "default": false,
-        "description": "启用本地 OpenAI 兼容代理",
-        "hint": "开启后在 127.0.0.1:<代理端口> 提供 /v1/images 接口，供陪伴插件或其他 OpenAI 兼容客户端调用，关闭后不再占用端口。与「启用陪伴插件直连」二选一：开启本项并保存后，陪伴直连会自动关闭并隐藏；需要改用直连时，请先关闭本项并保存。",
-        "condition": {
-            "enable_companion_link": false
-        }
-    },
-    "proxy_port": {
-        "type": "int",
-        "default": 8765,
-        "description": "本地代理端口",
-        "hint": "「启用本地 OpenAI 兼容代理」开启时生效；修改后需要重载插件。",
-        "min": 1024,
-        "max": 65535,
-        "condition": {
-            "enable_proxy": true
         }
     },
     "bypass_system_proxy": {
