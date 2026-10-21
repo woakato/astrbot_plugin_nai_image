@@ -1,1780 +1,516 @@
-/**
- * NAI 生图测试面板 - 前端逻辑 v4.8 (Endfield Protocol)
- *
- * 包含：
- *   - 双提示词框：NAI 风格 + 自然语言
- *   - OpenAI 兼容格式：多张参考图（最多 8 张，Vibe / 精准参考支持逐图强度，
- *     精准参考可逐图指定 base_caption）、img2img 重绘、噪声、种子、
- *     director-tools 图片处理动作、多角色坐标控制与完整模型列表
- *     （对齐接口文档 §4-§9）
- *   - 终末地高可见度动态等高线拓扑地形引擎 (Multi-Peak Gaussian + Dense Marching Squares)
- *   - 柔和战术圆角与亚克力毛玻璃材质交互
- *   - 自动转译与生图流水线展示
- */
-
+// NAI 生图测试面板前端逻辑（支持三合一槽位：自定义名称 + 绑定模型 + 专属画师串，切换自动同步提示词与词库）
 (function () {
   "use strict";
 
-  // ===== DOM 引用 =====
-  const $ = (id) => document.getElementById(id);
-  const els = {
-    contourCanvas: $("contourCanvas"),
-    naiPrompt: $("naiPrompt"),
-    nlPrompt: $("nlPrompt"),
-    sampler: $("sampler"),
-    size: $("size"),
-    steps: $("steps"),
-    costBadge: $("costBadge"),
-    scale: $("scale"),
-    cfg: $("cfg"),
-    noiseSchedule: $("noiseSchedule"),
-    model: $("model"),
-    count: $("count"),
-    style: $("style"),
-    customArtistsWrapper: $("customArtistsWrapper"),
-    customArtists: $("customArtists"),
-    negative: $("negative"),
-    loadDefaultNegative: $("loadDefaultNegative"),
-    generateBtn: $("generateBtn"),
-    trialBtn: $("trialBtn"),
-    trialStatus: $("trialStatus"),
-    trialStatusText: $("trialStatusText"),
-    resetBtn: $("resetBtn"),
-    tokenBadge: $("tokenBadge"),
-    baseUrlBadge: $("baseUrlBadge"),
-    resultMeta: $("resultMeta"),
-    emptyState: $("emptyState"),
-    loadingState: $("loadingState"),
-    loadingText: $("loadingText"),
-    errorState: $("errorState"),
-    errorMsg: $("errorMsg"),
-    retryBtn: $("retryBtn"),
-    resultGrid: $("resultGrid"),
-    mergeInfo: $("mergeInfo"),
-    mergeSteps: $("mergeSteps"),
-    callFormat: $("callFormat"),
-    callFormatHint: $("callFormatHint"),
-    openaiConfigStatus: $("openaiConfigStatus"),
-    openaiConfigStatusText: $("openaiConfigStatusText"),
-    refUploadWrap: $("refUploadWrap"),
-    refFile: $("refFile"),
-    refCountTag: $("refCountTag"),
-    refGridWrap: $("refGridWrap"),
-    refGrid: $("refGrid"),
-    refRemove: $("refRemove"),
-    refStrengthWrap: $("refStrengthWrap"),
-    refStrength: $("refStrength"),
-    refModeWrap: $("refModeWrap"),
-    refMode: $("refMode"),
-    refNoiseWrap: $("refNoiseWrap"),
-    refNoise: $("refNoise"),
-    openaiSeedWrap: $("openaiSeedWrap"),
-    openaiSeed: $("openaiSeed"),
-    directorActionWrap: $("directorActionWrap"),
-    directorAction: $("directorAction"),
-    charListWrap: $("charListWrap"),
-    charList: $("charList"),
-    charAdd: $("charAdd"),
-    usageRangeSwitch: $("usageRangeSwitch"),
-    usageRefreshBtn: $("usageRefreshBtn"),
-    usageSummary: $("usageSummary"),
-    usageChart: $("usageChart"),
-    usageBreakdown: $("usageBreakdown"),
-    usageEmpty: $("usageEmpty"),
-    usageDisabled: $("usageDisabled"),
-    usageError: $("usageError"),
+  const BRIDGE_URLS = [
+    "/assets/astrbot-page-bridge.js",
+    "https://cdn.jsdelivr.net/npm/astrbot-page-bridge@latest/dist/astrbot-page-bridge.js",
+  ];
+
+  const MODEL_GROUPS = {
+    "nai4.5": {
+      label: "NAI V4.5",
+      shortTag: "V4.5",
+      grimTitle: "NAI V4.5 专属 Tag 词库（共 18,505 条）",
+      defaultScope: "nai4.5_all",
+      scopes: [
+        { value: "nai4.5_all", text: "V4.5 全部词条 (18,505)" },
+        { value: "nai4.5_sfw", text: "V4.5 常规词条 (6,448)" },
+        { value: "nai4.5_nsfw", text: "V4.5 NSFW 词条 (12,057)" },
+      ],
+      quickCategories: ["画风", "光影", "视角", "表情", "制服", "连衣裙", "丝袜", "体位"],
+      defaultQuery: "画风",
+    },
+    "nai5": {
+      label: "NAI V5",
+      shortTag: "V5",
+      grimTitle: "NAI V5 专属 Tag 词库（共 1,158 条）",
+      defaultScope: "nai5_all",
+      scopes: [
+        { value: "nai5_all", text: "V5 全部词条 (1,158)" },
+        { value: "nai5_sfw", text: "V5 常规词条 (238)" },
+        { value: "nai5_nsfw", text: "V5 NSFW 词条 (920)" },
+      ],
+      quickCategories: ["画风", "人体", "服装", "表情", "姿势", "视角", "玩法", "特写"],
+      defaultQuery: "",
+    },
   };
 
-  // ===== 状态 =====
-  let isGenerating = false;
-  let lastRequestBody = null;
-  // 点数用量统计：当前窗口天数与后端快照
-  let usageDays = 7;
-  let usageData = null;
-  // 本地上传参考图列表（OpenAI 兼容格式）：{ b64, dataUrl, name, strength, caption }
-  let referenceImages = [];
-  // 精准参考描述默认值（后端配置下发，新参考图卡片初始化用）
-  let defaultDirectorCaption = "character&style";
-  // 参考图默认权重（后端配置下发，新参考图卡片初始化用）
-  let defaultVibeStrength = 0.6;
-  let defaultDirectorStrength = 1;
-  // 当前调用格式："direct" | "openai"
-  let currentCallFormat = "direct";
-  // 分段切换按钮引用
-  let formatToggleBtns = [];
-  // OpenAI 兼容模型列表（后端配置接口下发，用于切换格式时替换模型下拉项）
-  let openaiModels = [
-    "nai-diffusion-5-full",
-    "nai-diffusion-5-curated",
-    "nai-diffusion-4-5-full",
-    "nai-diffusion-4-5-curated",
-    "nai-diffusion-4-full",
-    "nai-diffusion-4-curated-preview",
-    "nai-diffusion-3",
-    "nai-diffusion-furry-3",
-  ];
-  // NAI 直连模式可用的模型下拉项
-  const DIRECT_MODEL_OPTIONS = [
-    { value: "nai-diffusion-4-5-full", label: "V4.5 完整版 [4.5_FULL]" },
-    { value: "nai-diffusion-5-full", label: "V5 完整版 [5.0_FULL]" },
-  ];
-  // 是否展示点数预估徽标（后端下发 show_cost_estimate）
-  let panelShowCostEstimate = true;
-
-  // ===== 工具函数 =====
-  function show(el) { if (el) el.classList.remove("hidden"); }
-  function hide(el) { if (el) el.classList.add("hidden"); }
-
-  function setBadge(el, text, type) {
-    if (!el) return;
-    el.textContent = text;
-    el.className = "badge " + (type || "badge-neutral");
+  function getModelGroupKey(modelName) {
+    const m = String(modelName || "").toLowerCase();
+    if (m.includes("-5-") || m.includes("nai5") || m.endsWith("-5")) {
+      return "nai5";
+    }
+    return "nai4.5";
   }
 
-  /**
-   * 等待 Bridge SDK 就绪
-   */
+  let bridge = null;
+  const state = {
+    config: {},
+    slots: [],
+    activeSlotId: 1,
+    currentGroup: "nai4.5",
+    groupPrompts: {
+      "nai4.5": { naiPrompt: "", nlPrompt: "", grimQuery: "画风" },
+      "nai5": { naiPrompt: "", nlPrompt: "", grimQuery: "" },
+    },
+    generating: false,
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  const el = {
+    connBadge: $("connBadge"),
+    btnRefresh: $("btnRefresh"),
+    activeSlotBadge: $("activeSlotBadge"),
+    backendSlotBadge: $("backendSlotBadge"),
+    btnAddSlot: $("btnAddSlot"),
+    btnDeleteSlot: $("btnDeleteSlot"),
+    btnSaveSlot: $("btnSaveSlot"),
+    slotTabs: $("slotTabs"),
+    inpSlotName: $("inpSlotName"),
+    selModel: $("selModel"),
+    inpArtists: $("inpArtists"),
+    activeModelBadge: $("activeModelBadge"),
+    btnClearPrompt: $("btnClearPrompt"),
+    lblNaiPrompt: $("lblNaiPrompt"),
+    naiPrompt: $("naiPrompt"),
+    nlPrompt: $("nlPrompt"),
+    selSize: $("selSize"),
+    selStyle: $("selStyle"),
+    inpSteps: $("inpSteps"),
+    inpScale: $("inpScale"),
+    selSampler: $("selSampler"),
+    btnGenerate: $("btnGenerate"),
+    titleGrimBox: $("titleGrimBox"),
+    grimScope: $("grimScope"),
+    grimQuery: $("grimQuery"),
+    btnGrimSearch: $("btnGrimSearch"),
+    grimQuickTags: $("grimQuickTags"),
+    grimResults: $("grimResults"),
+    grimCountBadge: $("grimCountBadge"),
+    genTimer: $("genTimer"),
+    canvasEmpty: $("canvasEmpty"),
+    resultImg: $("resultImg"),
+    resultActions: $("resultActions"),
+    btnDownloadImg: $("btnDownloadImg"),
+    btnCopyFinalPrompt: $("btnCopyFinalPrompt"),
+    finalPromptPre: $("finalPromptPre"),
+    toast: $("toast"),
+  };
+
+  let toastTimer = null;
+  function showToast(msg) {
+    if (!el.toast) return;
+    el.toast.textContent = msg;
+    el.toast.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.toast.classList.remove("show"), 2600);
+  }
+
   async function getBridge() {
-    const deadline = Date.now() + 5000;
-    while (!window.AstrBotPluginPage && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    if (!window.AstrBotPluginPage) {
-      throw new Error("Bridge SDK 未就绪，请从 AstrBot 后台的插件拓展页打开此面板");
-    }
-    await window.AstrBotPluginPage.ready();
-    return window.AstrBotPluginPage;
-  }
-
-  // =========================================================================
-  // ===== 终末地等高线拓扑地形引擎 (HIGH-VISIBILITY CONTOUR TOPOLOGY) =====
-  // =========================================================================
-  function initContourEngine() {
-    const canvas = els.contourCanvas;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    let width = 0;
-    let height = 0;
-    let dpr = 1;
-
-    // 保持优雅大气的山脉尺度，调大高斯半径并恢复缓和悠远的流动速度
-    const NUM_SOURCES = 18;
-    const sources = [];
-
-    function initSources() {
-      sources.length = 0;
-      for (let i = 0; i < NUM_SOURCES; i++) {
-        const isPeak = i % 3 !== 0;
-        sources.push({
-          relX: 0.05 + Math.random() * 0.9,
-          relY: 0.05 + Math.random() * 0.9,
-          baseRadius: 160 + Math.random() * 180, // 调大山丘尺度 (160~340px)，舒展大气
-          amp: (isPeak ? 1.0 : -0.8) * (0.75 + Math.random() * 0.5),
-          speedX: (Math.random() - 0.5) * 0.00012,
-          speedY: (Math.random() - 0.5) * 0.00012,
-          freq: 0.00035 + Math.random() * 0.00055, // 回到舒缓沉稳的波动频率
-          phase: Math.random() * Math.PI * 2,
-          radiusOscFreq: 0.00025 + Math.random() * 0.00045,
-        });
-      }
-    }
-
-    function resize() {
-      dpr = Math.min(window.devicePixelRatio || 1, 2);
-      width = window.innerWidth;
-      height = window.innerHeight;
-      canvas.width = width * dpr;
-      canvas.height = height * dpr;
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    }
-
-    window.addEventListener("resize", resize);
-    resize();
-    initSources();
-
-    // 16 层等高线切片，间隔适度自然
-    const NUM_LEVELS = 16;
-    const ISO_LEVELS = [];
-    for (let i = 0; i < NUM_LEVELS; i++) {
-      ISO_LEVELS.push(-1.35 + (2.7 / (NUM_LEVELS - 1)) * i);
-    }
-
-    // Marching Squares 网格步长
-    const STEP = 26;
-
-    // Marching squares 查找表
-    const MS_EDGES = [
-      [],
-      [[3, 2]],
-      [[2, 1]],
-      [[3, 1]],
-      [[0, 1]],
-      [[3, 0], [2, 1]],
-      [[0, 2]],
-      [[3, 0]],
-      [[0, 3]],
-      [[0, 2]],
-      [[0, 1], [3, 2]],
-      [[0, 1]],
-      [[1, 3]],
-      [[1, 2]],
-      [[2, 3]],
-      []
-    ];
-
-    function evaluateField(x, y, time) {
-      let val = 0;
-      for (let i = 0; i < NUM_SOURCES; i++) {
-        const s = sources[i];
-        const driftX = Math.sin(time * s.freq + s.phase) * 45;
-        const driftY = Math.cos(time * s.freq * 0.85 + s.phase) * 45;
-        const sx = s.relX * width + driftX;
-        const sy = s.relY * height + driftY;
-
-        const dx = x - sx;
-        const dy = y - sy;
-        const distSq = dx * dx + dy * dy;
-
-        const r = s.baseRadius + Math.sin(time * s.radiusOscFreq + s.phase) * 30;
-        const twoSigmaSq = 2 * r * r;
-
-        // 局部截断加速
-        if (distSq < 6.5 * r * r) {
-          val += s.amp * Math.exp(-distSq / twoSigmaSq);
-        }
-      }
-      return val;
-    }
-
-    function getEdgePoint(edgeIndex, x0, y0, step, vTL, vTR, vBR, vBL, iso) {
-      const interp = (vA, vB) => {
-        const d = vB - vA;
-        return Math.abs(d) < 1e-6 ? 0.5 : Math.max(0, Math.min(1, (iso - vA) / d));
-      };
-
-      switch (edgeIndex) {
-        case 0:
-          return { x: x0 + interp(vTL, vTR) * step, y: y0 };
-        case 1:
-          return { x: x0 + step, y: y0 + interp(vTR, vBR) * step };
-        case 2:
-          return { x: x0 + interp(vBL, vBR) * step, y: y0 + step };
-        case 3:
-          return { x: x0, y: y0 + interp(vTL, vBL) * step };
-        default:
-          return { x: x0, y: y0 };
-      }
-    }
-
-    // 绘制等高线：保持清晰可见度同时线条更雅致
-    function stitchAndRenderPolylines(segments, isoIndex, totalLevels) {
-      if (segments.length === 0) return;
-
-      const isKeyRidge = isoIndex === totalLevels - 2 || isoIndex === totalLevels - 5;
-      const isMajorLine = isoIndex % 3 === 0;
-
-      ctx.beginPath();
-      for (let s = 0; s < segments.length; s++) {
-        const seg = segments[s];
-        ctx.moveTo(seg[0].x, seg[0].y);
-        ctx.lineTo(seg[1].x, seg[1].y);
-      }
-
-      if (isKeyRidge) {
-        ctx.strokeStyle = "rgba(217, 199, 0, 0.38)"; // 终末地黄色山脊线
-        ctx.lineWidth = 1.4;
-      } else if (isMajorLine) {
-        ctx.strokeStyle = "rgba(16, 17, 16, 0.15)";  // 适度清晰的主等高线
-        ctx.lineWidth = 1.1;
-      } else {
-        ctx.strokeStyle = "rgba(16, 17, 16, 0.06)";  // 柔和优雅的细等高线
-        ctx.lineWidth = 0.8;
-      }
-      ctx.stroke();
-    }
-
-    let lastFrameTime = 0;
-    const TARGET_INTERVAL = 1000 / 30;
-
-    function render(timestamp) {
-      requestAnimationFrame(render);
-
-      if (document.hidden) return;
-      if (timestamp - lastFrameTime < TARGET_INTERVAL) return;
-      lastFrameTime = timestamp;
-
-      ctx.clearRect(0, 0, width, height);
-
-      const cols = Math.ceil(width / STEP) + 1;
-      const rows = Math.ceil(height / STEP) + 1;
-      const grid = new Float32Array(cols * rows);
-
-      for (let r = 0; r < rows; r++) {
-        const y = r * STEP;
-        const rowOffset = r * cols;
-        for (let c = 0; c < cols; c++) {
-          const x = c * STEP;
-          grid[rowOffset + c] = evaluateField(x, y, timestamp);
-        }
-      }
-
-      for (let l = 0; l < ISO_LEVELS.length; l++) {
-        const iso = ISO_LEVELS[l];
-        const segments = [];
-
-        for (let r = 0; r < rows - 1; r++) {
-          const y0 = r * STEP;
-          const r0 = r * cols;
-          const r1 = (r + 1) * cols;
-
-          for (let c = 0; c < cols - 1; c++) {
-            const x0 = c * STEP;
-            const vTL = grid[r0 + c];
-            const vTR = grid[r0 + c + 1];
-            const vBR = grid[r1 + c + 1];
-            const vBL = grid[r1 + c];
-
-            let cellIndex = 0;
-            if (vTL >= iso) cellIndex |= 8;
-            if (vTR >= iso) cellIndex |= 4;
-            if (vBR >= iso) cellIndex |= 2;
-            if (vBL >= iso) cellIndex |= 1;
-
-            if (cellIndex === 0 || cellIndex === 15) continue;
-
-            const edgePairs = MS_EDGES[cellIndex];
-            for (let p = 0; p < edgePairs.length; p++) {
-              const pA = getEdgePoint(edgePairs[p][0], x0, y0, STEP, vTL, vTR, vBR, vBL, iso);
-              const pB = getEdgePoint(edgePairs[p][1], x0, y0, STEP, vTL, vTR, vBR, vBL, iso);
-              segments.push([pA, pB]);
-            }
-          }
-        }
-
-        stitchAndRenderPolylines(segments, l, ISO_LEVELS.length);
-      }
-    }
-
-    requestAnimationFrame(render);
-  }
-
-  // =========================================================================
-  // ===== 面板状态缓存（通过后端 API） =====
-  // =========================================================================
-  function getCachedFields() {
-    return [
-      "naiPrompt", "nlPrompt", "sampler", "size", "steps", "scale",
-      "cfg", "noiseSchedule", "model", "count", "style", "customArtists", "negative",
-      "refStrength", "refMode", "refNoise", "openaiSeed", "directorAction"
-    ];
-  }
-
-  let _saveCacheTimer = null;
-  function saveCache() {
-    if (_saveCacheTimer) clearTimeout(_saveCacheTimer);
-    _saveCacheTimer = setTimeout(async () => {
+    if (bridge) return bridge;
+    for (const url of BRIDGE_URLS) {
       try {
-        const data = {};
-        getCachedFields().forEach((key) => {
-          const el = els[key];
-          if (el) data[key] = el.value;
-        });
-        data.callFormat = currentCallFormat;
-        const chars = collectCharRows();
-        if (chars.length) data.characters = chars;
-        const bridge = await getBridge();
-        await bridge.apiPost("test_panel/save_cache", data);
-      } catch (e) {
-        console.warn("[NAI Panel] 缓存保存失败:", e);
-      }
-    }, 500);
-  }
-
-  async function loadCache() {
-    try {
-      const bridge = await getBridge();
-      const resp = await bridge.apiGet("test_panel/load_cache");
-      const data = (resp && resp.data) ? resp.data : resp;
-      if (!data || typeof data !== "object") return false;
-      let restored = false;
-      getCachedFields().forEach((key) => {
-        const el = els[key];
-        if (el && data[key] != null) {
-          el.value = data[key];
-          restored = true;
+        const mod = await import(url);
+        const BridgeCls = mod.AstrBotPageBridge || mod.default;
+        if (BridgeCls) {
+          bridge = new BridgeCls({ pluginName: "astrbot_plugin_nai_image" });
+          return bridge;
         }
-      });
-      if (data.callFormat === "openai" || data.callFormat === "direct") {
-        currentCallFormat = data.callFormat;
-        setCallFormat(currentCallFormat);
-        restored = true;
-      }
-      if (Array.isArray(data.characters) && data.characters.length) {
-        clearCharRows();
-        data.characters.slice(0, MAX_CHAR_ROWS).forEach((item) => {
-          if (!item || typeof item.prompt !== "string" || !item.prompt.trim()) return;
-          addCharRow(item.prompt, Number(item.x) || 0.5, Number(item.y) || 0.5);
+      } catch (_) {}
+    }
+    bridge = {
+      async apiGet(path) {
+        const r = await fetch("/astrbot_plugin_nai_image/" + path.replace(/^\/+/, ""));
+        return r.json();
+      },
+      async apiPost(path, body) {
+        const r = await fetch("/astrbot_plugin_nai_image/" + path.replace(/^\/+/, ""), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body || {}),
         });
-        restored = true;
-      }
-      return restored;
-    } catch (e) {
-      console.warn("[NAI Panel] 缓存加载失败:", e);
-      return false;
-    }
-  }
-
-  function clearCache() {
-    saveCache();
-  }
-
-  // ===== 加载 Token 状态 =====
-  async function loadTokenStatus() {
-    try {
-      const bridge = await getBridge();
-      const resp = await bridge.apiGet("test_panel/config");
-      const config = (resp && resp.data) ? resp.data : resp;
-      if (config.image_gen_key === "已配置") {
-        setBadge(els.tokenBadge, "Token: 已配置", "badge-success");
-      } else {
-        setBadge(els.tokenBadge, "Token: 未配置", "badge-error");
-      }
-      setBadge(els.baseUrlBadge, config.base_url || "--", "badge-info");
-      // 点数预估开关（后端下发 show_cost_estimate）：徽标是否展示
-      if (typeof config.show_cost_estimate === "boolean") {
-        panelShowCostEstimate = config.show_cost_estimate;
-      }
-      updateCostBadge();
-      // 后端下发的 OpenAI 兼容模型列表（对齐接口文档 §9）
-      if (Array.isArray(config.openai_models) && config.openai_models.length) {
-        openaiModels = config.openai_models;
-        if (currentCallFormat === "openai") updateModelOptionsUI();
-      }
-      // 精准参考描述默认值：后端配置下发，新参考图卡片以此初始化
-      if (config.openai_director_caption) {
-        defaultDirectorCaption = String(config.openai_director_caption);
-      }
-      // 参考图默认权重：后端配置下发，新参考图卡片以此初始化
-      const vibeStrength = parseFloat(config.openai_vibe_strength);
-      if (!Number.isNaN(vibeStrength) && vibeStrength >= 0 && vibeStrength <= 1) {
-        defaultVibeStrength = vibeStrength;
-      }
-      const directorStrength = parseFloat(config.openai_director_strength);
-      if (
-        !Number.isNaN(directorStrength) &&
-        directorStrength >= 0 &&
-        directorStrength <= 1
-      ) {
-        defaultDirectorStrength = directorStrength;
-      }
-      // OpenAI 兼容格式配置状态（仅在 OpenAI 模式下展示）
-      if (els.openaiConfigStatus && currentCallFormat === "openai") {
-        show(els.openaiConfigStatus);
-        if (config.openai_available) {
-          els.openaiConfigStatusText.textContent =
-            "OpenAI 接口已配置：" + (config.openai_api_base_url || "");
-          els.openaiConfigStatus.querySelector(".status-dot").className =
-            "status-dot ok";
-        } else {
-          els.openaiConfigStatusText.textContent =
-            "OpenAI 接口未配置：请在插件设置填写 openai_api_base_url 与 openai_api_key";
-          els.openaiConfigStatus.querySelector(".status-dot").className =
-            "status-dot error";
-        }
-      } else if (els.openaiConfigStatus) {
-        hide(els.openaiConfigStatus);
-      }
-    } catch (err) {
-      setBadge(els.tokenBadge, "配置加载失败", "badge-error");
-    }
-  }
-
-  // ===== 尺寸与点数消耗映射 =====
-  const SIZE_BASE_COSTS = [
-    { value: "竖图", baseCost: 1 },
-    { value: "横图", baseCost: 1 },
-    { value: "方图", baseCost: 1 },
-    { value: "2K竖图", baseCost: 15 },
-    { value: "2K横图", baseCost: 15 },
-    { value: "2K方图", baseCost: 15 },
-    { value: "4K竖图", baseCost: 25 },
-    { value: "4K横图", baseCost: 25 },
-    { value: "4K方图", baseCost: 25 },
-  ];
-
-  // OpenAI 兼容格式直接用像素分辨率（接口文档 §12.1），与 GET 分档名一一对应：
-  // 分档名经后端映射后的实际分辨率即为此处的 value。
-  const OPENAI_SIZE_OPTIONS = [
-    { value: "832x1216", tier: "竖图", baseCost: 1 },
-    { value: "1216x832", tier: "横图", baseCost: 1 },
-    { value: "1024x1024", tier: "方图", baseCost: 1 },
-    { value: "1088x1920", tier: "2K竖图", baseCost: 15 },
-    { value: "1920x1088", tier: "2K横图", baseCost: 15 },
-    { value: "1472x1472", tier: "2K方图", baseCost: 15 },
-  ];
-
-  // 分档名 ↔ OpenAI 像素分辨率互查（结果徽标显示用）。
-  function sizeDisplayName(value) {
-    const opt = OPENAI_SIZE_OPTIONS.find((o) => o.value === value);
-    return opt ? `${opt.value}（${opt.tier}）` : value;
-  }
-
-  // 任务接口（/api/web/jobs）步数上限。
-  const WEB_JOB_STEPS_MAX = 50;
-
-  // V5 完整版普通画幅起步 8 点（2026-09 上游计费模块；旧版为 5 点）。
-  function getModelCostFloor(modelName) {
-    return modelName === "nai-diffusion-5-full" ? 8 : 1;
-  }
-
-  // 步数档位加价：≤28 步 +0，29-35 +4，36-45 +6，46-50 +8。
-  function getStepsExtra(steps) {
-    if (steps > 45) return 8;
-    if (steps > 35) return 6;
-    if (steps > 28) return 4;
-    return 0;
-  }
-
-  // 单张点数（任务接口档位表）；Web 侧镜像 pricing.py 的计价规则：
-  // 画幅基础档 > 1（2K/4K）→ base + extra；V5 标准画幅 → 8 + extra；
-  // V4.5 标准画幅 → 有加价时 2 + extra，否则 1。
-  function computeUnitCost(sizeValue, modelName, steps) {
-    const baseCost = getSizeBaseCost(sizeValue);
-    const capped = Math.max(1, Math.min(parseInt(steps, 10) || 1, WEB_JOB_STEPS_MAX));
-    const extra = getStepsExtra(capped);
-    if (baseCost > 1) return baseCost + extra;
-    const floor = getModelCostFloor(modelName);
-    if (floor > 1) return floor + extra;
-    return extra ? 2 + extra : 1;
-  }
-
-  function getSizeBaseCost(sizeValue) {
-    const opt =
-      SIZE_BASE_COSTS.find((o) => o.value === sizeValue) ||
-      OPENAI_SIZE_OPTIONS.find((o) => o.value === sizeValue);
-    return opt ? opt.baseCost : 1;
-  }
-
-  // 实时刷新点数预估徽标（直连格式显示步数×画质档位；OpenAI 格式隐藏）。
-  // 直连通道固定为任务接口优先（1-50 步档位计价），上游不支持时自动回退 GET 直链。
-  function updateCostBadge() {
-    const badge = els.costBadge;
-    if (!badge) return;
-    if (currentCallFormat === "openai") {
-      hide(badge);
-      return;
-    }
-    if (panelShowCostEstimate === false) {
-      hide(badge);
-      return;
-    }
-    const steps = parseInt(els.steps.value, 10) || 1;
-    const count = parseInt(els.count.value, 10) || 1;
-    const capped = Math.max(1, Math.min(steps, WEB_JOB_STEPS_MAX));
-    const unit = computeUnitCost(els.size.value, els.model.value, steps);
-    let text = `💰 预计 ${unit} 点/张 · 任务接口`;
-    if (count > 1) text += ` · ${count} 张共 ${unit * count} 点`;
-    if (steps !== capped) text += `（步数按 ${capped} 计）`;
-    badge.textContent = text;
-    // 超过基础档（>1 点）时高亮，提示本次为加价档位。
-    badge.classList.toggle("cost-badge-high", unit > 1);
-    show(badge);
-  }
-
-  function updateSizeOptionsUI() {
-    const curSize = els.size.value;
-    const curModel = els.model.value;
-    els.size.innerHTML = "";
-    const options =
-      currentCallFormat === "openai"
-        ? OPENAI_SIZE_OPTIONS.map((opt) => ({
-            value: opt.value,
-            text: opt.value,
-            baseCost: opt.baseCost,
-          }))
-        : SIZE_BASE_COSTS.map((opt) => ({
-            value: opt.value,
-            text: opt.value,
-            baseCost: opt.baseCost,
-          }));
-    options.forEach((opt) => {
-      const cost = Math.max(opt.baseCost, getModelCostFloor(curModel));
-      const elOpt = document.createElement("option");
-      elOpt.value = opt.value;
-      elOpt.textContent = `${opt.text}(-${cost})`;
-      if (opt.value === curSize) {
-        elOpt.selected = true;
-      }
-      els.size.appendChild(elOpt);
-    });
-    if (!options.some((opt) => opt.value === curSize)) {
-      els.size.value = currentCallFormat === "openai" ? "832x1216" : "竖图";
-    }
-  }
-
-  // 按当前调用格式替换模型下拉项：直连只有 V4.5/V5 完整版，
-  // OpenAI 兼容格式展示接口文档 §9 的完整模型列表。
-  function updateModelOptionsUI() {
-    const curModel = els.model.value;
-    els.model.innerHTML = "";
-    if (currentCallFormat === "openai") {
-      openaiModels.forEach((name) => {
-        const opt = document.createElement("option");
-        opt.value = name;
-        opt.textContent = name;
-        els.model.appendChild(opt);
-      });
-    } else {
-      DIRECT_MODEL_OPTIONS.forEach((item) => {
-        const opt = document.createElement("option");
-        opt.value = item.value;
-        opt.textContent = item.label;
-        els.model.appendChild(opt);
-      });
-    }
-    if (Array.from(els.model.options).some((o) => o.value === curModel)) {
-      els.model.value = curModel;
-    }
-  }
-
-  // ===== 表单交互 =====
-  function toggleCustomArtists() {
-    if (els.style.value === "custom") {
-      show(els.customArtistsWrapper);
-    } else {
-      hide(els.customArtistsWrapper);
-    }
-    saveCache();
-  }
-
-  function buildRequestBody() {
-    const safeInt = (v, d) => { const n = parseInt(v, 10); return Number.isNaN(n) ? d : n; };
-    const safeFloat = (v, d) => { const n = parseFloat(v); return Number.isNaN(n) ? d : n; };
-
-    const body = {
-      nai_prompt: els.naiPrompt.value.trim(),
-      nl_prompt: els.nlPrompt.value.trim(),
-      style: els.style.value,
-      size: els.size.value,
-      sampler: els.sampler.value,
-      steps: safeInt(els.steps.value, 24),
-      scale: safeFloat(els.scale.value, 6),
-      cfg: safeFloat(els.cfg.value, 1),
-      noise_schedule: els.noiseSchedule.value,
-      model: els.model.value,
-      n: safeInt(els.count.value, 1),
-      call_format: currentCallFormat,
+        return r.json();
+      },
     };
-
-    const neg = els.negative.value.trim();
-    if (neg) body.negative = neg;
-
-    if (body.style === "custom") {
-      body.custom_artists = els.customArtists.value.trim();
-    }
-
-    // OpenAI 兼容格式：附带本地上传的多张参考图（§5.2 最多 8 张）、逐图
-    // 强度/精准参考描述、img2img 重绘参数、种子、参考图使用模式与
-    // director-tools 动作（对齐接口文档 §4-§8）
-    if (body.call_format === "openai") {
-      const refs = referenceImages;
-      if (refs.length) {
-        body.reference_image_b64_list = refs.map((r) => r.b64);
-      }
-      const mode = els.refMode ? els.refMode.value : "vibe";
-      if (els.refMode) {
-        body.reference_mode = mode;
-      }
-      if (mode === "img2img") {
-        // img2img 仅取第一张主输入图，使用全局重绘强度与附加噪声；
-        // 其余模式走逐图强度（后端按 vibe 默认 0.6 / 精准参考默认 1.0）
-        if (els.refStrength) {
-          const strength = parseFloat(els.refStrength.value);
-          if (!Number.isNaN(strength) && strength > 0 && strength <= 1) {
-            body.strength = strength;
-          }
-        }
-        if (els.refNoise) {
-          const noise = parseFloat(els.refNoise.value);
-          if (!Number.isNaN(noise) && noise >= 0 && noise <= 1) {
-            body.noise = noise;
-          }
-        }
-      } else if (refs.length) {
-        body.reference_strengths = refs.map((r) =>
-          Math.min(1, Math.max(0, Number(r.strength) || 0))
-        );
-        if (mode === "director") {
-          body.director_captions = refs.map((r) => r.caption);
-        }
-      }
-      if (els.openaiSeed && els.openaiSeed.value !== "") {
-        const seed = parseInt(els.openaiSeed.value, 10);
-        if (!Number.isNaN(seed) && seed >= -1) {
-          body.seed = seed;
-        }
-      }
-      if (els.directorAction && els.directorAction.value) {
-        body.director_action = els.directorAction.value;
-      }
-      // 多角色坐标控制（§7）：收集角色行，空提示词的行跳过
-      const chars = collectCharRows();
-      if (chars.length) {
-        body.characters = chars;
-      }
-    }
-
-    return body;
+    return bridge;
   }
 
-  // ===== 多角色坐标行管理（§7） =====
-  const MAX_CHAR_ROWS = 6;
+  function getActiveSlot() {
+    return (
+      state.slots.find((s) => Number(s.id) === Number(state.activeSlotId)) ||
+      state.slots[0] ||
+      null
+    );
+  }
 
-  function addCharRow(prompt = "", x = 0.5, y = 0.5) {
-    if (!els.charList || els.charList.children.length >= MAX_CHAR_ROWS) return;
+  function syncActiveSlotFromInputs() {
+    const slot = getActiveSlot();
+    if (!slot) return;
+    slot.name = el.inpSlotName.value.trim() || `槽位 ${slot.id}`;
+    slot.model = el.selModel.value;
+    slot.artists = el.inpArtists.value;
+  }
 
-    const row = document.createElement("div");
-    row.className = "char-row";
+  function saveCurrentGroupPrompts() {
+    const g = state.groupPrompts[state.currentGroup];
+    if (!g) return;
+    g.naiPrompt = el.naiPrompt.value;
+    g.nlPrompt = el.nlPrompt.value;
+    g.grimQuery = el.grimQuery.value;
+  }
 
-    const promptInput = document.createElement("input");
-    promptInput.type = "text";
-    promptInput.className = "input acrylic-input char-prompt";
-    promptInput.placeholder = "角色提示词，如 1girl, red dress";
-    promptInput.value = prompt;
+  async function persistPanelCache() {
+    saveCurrentGroupPrompts();
+    try {
+      const b = await getBridge();
+      await b.apiPost("test_panel/save_cache", {
+        activeSlotId: state.activeSlotId,
+        groupPrompts: state.groupPrompts,
+      });
+    } catch (_) {}
+  }
 
-    const xInput = document.createElement("input");
-    xInput.type = "number";
-    xInput.className = "input acrylic-input char-coord";
-    xInput.min = "0";
-    xInput.max = "1";
-    xInput.step = "0.05";
-    xInput.value = String(x);
-    xInput.title = "x 坐标（0-1，从左到右）";
+  function renderSlotTabs() {
+    el.slotTabs.innerHTML = "";
+    state.slots.forEach((slot) => {
+      const isAct = Number(slot.id) === Number(state.activeSlotId);
+      const gKey = getModelGroupKey(slot.model);
+      const shortTag = (MODEL_GROUPS[gKey] || MODEL_GROUPS["nai4.5"]).shortTag;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "slot-tab" + (isAct ? " active" : "");
+      btn.innerHTML = `<span>${slot.name || "槽位 " + slot.id}</span><span class="slot-model-tag">${shortTag}</span>`;
+      btn.addEventListener("click", () => {
+        if (Number(slot.id) === Number(state.activeSlotId)) return;
+        syncActiveSlotFromInputs();
+        selectSlot(slot.id, true);
+      });
+      el.slotTabs.appendChild(btn);
+    });
+  }
 
-    const yInput = document.createElement("input");
-    yInput.type = "number";
-    yInput.className = "input acrylic-input char-coord";
-    yInput.min = "0";
-    yInput.max = "1";
-    yInput.step = "0.05";
-    yInput.value = String(y);
-    yInput.title = "y 坐标（0-1，从上到下）";
+  function applyModelGroupUI(newGroupKey, isInit = false) {
+    if (!isInit && state.currentGroup && state.currentGroup !== newGroupKey) {
+      saveCurrentGroupPrompts();
+    }
+    state.currentGroup = newGroupKey;
+    const gInfo = MODEL_GROUPS[newGroupKey] || MODEL_GROUPS["nai4.5"];
+    const gData = state.groupPrompts[newGroupKey] || { naiPrompt: "", nlPrompt: "", grimQuery: "" };
 
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.className = "btn-link char-remove";
-    removeBtn.title = "移除该角色";
-    removeBtn.innerHTML = '<span class="link-icon">✕</span>';
-    removeBtn.addEventListener("click", () => {
-      row.remove();
-      saveCache();
+    el.activeModelBadge.textContent = "模型组：" + gInfo.label;
+    el.lblNaiPrompt.textContent = `正向提示词 (${gInfo.label} 组独立记忆 · 支持权重 1.2::tag:: 及【法典:词条名】)`;
+    el.titleGrimBox.textContent = gInfo.grimTitle;
+
+    el.naiPrompt.value = gData.naiPrompt || "";
+    el.nlPrompt.value = gData.nlPrompt || "";
+
+    el.grimScope.innerHTML = gInfo.scopes
+      .map((s) => `<option value="${s.value}">${s.text}</option>`)
+      .join("");
+    el.grimScope.value = gInfo.defaultScope;
+
+    el.grimQuickTags.innerHTML =
+      '<span class="capsule-label">' + gInfo.label + ' 常用分类：</span>' +
+      gInfo.quickCategories
+        .map((q) => `<button class="grim-quick" data-q="${q}" type="button">${q}</button>`)
+        .join("");
+
+    el.grimQuickTags.querySelectorAll(".grim-quick").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        el.grimQuery.value = btn.getAttribute("data-q") || "";
+        searchGrimoire(el.grimQuery.value, true);
+      });
     });
 
-    row.appendChild(promptInput);
-    row.appendChild(xInput);
-    row.appendChild(yInput);
-    row.appendChild(removeBtn);
-    els.charList.appendChild(row);
-
-    promptInput.addEventListener("input", saveCache);
-    xInput.addEventListener("change", saveCache);
-    yInput.addEventListener("change", saveCache);
+    el.grimQuery.value = gData.grimQuery !== undefined ? gData.grimQuery : gInfo.defaultQuery;
+    searchGrimoire(el.grimQuery.value, true);
   }
 
-  function clearCharRows() {
-    if (els.charList) els.charList.innerHTML = "";
+  // 选中某个槽位：同步填入该槽位的名称、绑定模型与画师串，并同步切换模型组提示词与词库
+  function selectSlot(slotId, autoSaveBackend = false, isInit = false) {
+    const slot =
+      state.slots.find((s) => Number(s.id) === Number(slotId)) || state.slots[0];
+    if (!slot) return;
+    state.activeSlotId = Number(slot.id);
+    el.inpSlotName.value = slot.name || `槽位 ${slot.id}`;
+    el.selModel.value = slot.model || "nai-diffusion-4-5-full";
+    el.inpArtists.value = slot.artists || "";
+    el.activeSlotBadge.textContent = `UI 测试中：${slot.name || "槽位 " + slot.id}`;
+    el.connBadge.textContent = `已就绪 (${slot.model})`;
+
+    renderSlotTabs();
+    const gKey = getModelGroupKey(slot.model);
+    applyModelGroupUI(gKey, isInit);
+
+    if (autoSaveBackend) {
+      persistPanelCache();
+      showToast(`UI 测试槽位已切换至「${slot.name}」（不影响后端正式设置）`);
+    }
   }
 
-  function collectCharRows() {
-    if (!els.charList) return [];
-    const chars = [];
-    Array.from(els.charList.children).forEach((row) => {
-      const inputs = row.querySelectorAll("input");
-      if (inputs.length < 3) return;
-      const prompt = String(inputs[0].value || "").trim();
-      if (!prompt) return;
-      let x = parseFloat(inputs[1].value);
-      let y = parseFloat(inputs[2].value);
-      if (Number.isNaN(x)) x = 0.5;
-      if (Number.isNaN(y)) y = 0.5;
-      x = Math.min(1, Math.max(0, x));
-      y = Math.min(1, Math.max(0, y));
-      chars.push({ prompt, x, y });
-    });
-    return chars;
+  async function saveSlotsToBackend(showSuccessToast = true) {
+    syncActiveSlotFromInputs();
+    renderSlotTabs();
+    const slot = getActiveSlot();
+    if (slot) {
+      el.activeSlotBadge.textContent = `当前激活：${slot.name}`;
+      el.connBadge.textContent = `已就绪 (${slot.model})`;
+    }
+    try {
+      const b = await getBridge();
+      await b.apiPost("test_panel/save_artists", {
+        active_slot_id: state.activeSlotId,
+        slots: state.slots,
+      });
+      persistPanelCache();
+      if (showSuccessToast) {
+        showToast("已保存槽位列表并同步至后端设置下拉框（后端正式槽位请在插件配置中选择）");
+      }
+    } catch (err) {
+      showToast("保存槽位失败: " + (err.message || err));
+    }
   }
 
-  // ===== 多张参考图管理（OpenAI 兼容格式 §5.2，最多 8 张） =====
-  const MAX_REF_IMAGES = 8;
-  const REF_CAPTIONS = ["character&style", "character", "style"];
-
-  function currentRefMode() {
-    return els.refMode ? els.refMode.value : "vibe";
+  function appendTagsToBoard(tags) {
+    const clean = (tags || "").trim().replace(/^,+|,+$/g, "").trim();
+    if (!clean) return;
+    const cur = el.naiPrompt.value.trim().replace(/,+$/g, "").trim();
+    el.naiPrompt.value = cur ? cur + ", " + clean : clean;
+    persistPanelCache();
   }
 
-  // 新参考图卡片按模式取插件设置的默认权重：精准参考 1.0（§8.5）、
-  // Vibe 参考 0.6，均可在设置中修改
-  function defaultRefStrength() {
-    return currentRefMode() === "director" ? defaultDirectorStrength : defaultVibeStrength;
+  async function loadAllContext() {
+    el.connBadge.textContent = "同步中…";
+    try {
+      const b = await getBridge();
+      const [cfg, ctx, cacheRes] = await Promise.all([
+        b.apiGet("test_panel/config"),
+        b.apiGet("test_panel/starry_context"),
+        b.apiGet("test_panel/load_cache"),
+      ]);
+      state.config = cfg || {};
+      state.slots = Array.isArray(ctx && ctx.artist_slots) && ctx.artist_slots.length
+        ? ctx.artist_slots
+        : [
+            {
+              id: 1,
+              name: "槽位 1 · V4.5 主力画风",
+              model: cfg.openai_api_model || "nai-diffusion-4-5-full",
+              artists: cfg.custom_artists || "",
+            },
+          ];
+
+      const cached = (cacheRes && cacheRes.data) || {};
+      if (cached.groupPrompts && typeof cached.groupPrompts === "object") {
+        if (cached.groupPrompts["nai4.5"]) {
+          state.groupPrompts["nai4.5"] = Object.assign(state.groupPrompts["nai4.5"], cached.groupPrompts["nai4.5"]);
+        }
+        if (cached.groupPrompts["nai5"]) {
+          state.groupPrompts["nai5"] = Object.assign(state.groupPrompts["nai5"], cached.groupPrompts["nai5"]);
+        }
+      }
+
+      const backendId = (ctx && ctx.backend_active_slot_id) || "1";
+      const backendSlot = state.slots.find((s) => String(s.id) === String(backendId));
+      if (el.backendSlotBadge) {
+        el.backendSlotBadge.textContent = "后端正式槽位：" + (backendSlot ? backendSlot.name : "槽位 " + backendId);
+      }
+      const initSlotId = cached.activeSlotId || (ctx && ctx.ui_test_slot_id) || state.slots[0].id;
+      if (cfg.steps) el.inpSteps.value = cfg.steps;
+      if (cfg.scale !== undefined) el.inpScale.value = cfg.scale;
+      if (cfg.sampler) el.selSampler.value = cfg.sampler;
+
+      selectSlot(initSlotId, false, true);
+    } catch (err) {
+      el.connBadge.textContent = "连接异常: " + (err.message || err);
+    }
   }
 
-  function addRefImages(fileList) {
-    let remaining = MAX_REF_IMAGES - referenceImages.length;
-    Array.from(fileList || []).forEach((file) => {
-      if (remaining <= 0) return;
-      if (!file || file.type.indexOf("image/") !== 0) return;
-      remaining -= 1;
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const dataUrl = String(e.target.result || "");
-        const comma = dataUrl.indexOf(",");
-        referenceImages.push({
-          b64: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl,
-          dataUrl,
-          name: file.name || `image_${referenceImages.length + 1}`,
-          strength: defaultRefStrength(),
-          caption: defaultDirectorCaption,
+  async function searchGrimoire(queryOverride, allowEmpty = false) {
+    const q = (queryOverride !== undefined ? queryOverride : el.grimQuery.value).trim();
+    const scope = el.grimScope.value;
+    el.grimCountBadge.textContent = "检索中…";
+    try {
+      const b = await getBridge();
+      const res = await b.apiPost("test_panel/grimoire_search", {
+        query: q,
+        scope: scope,
+        limit: 18,
+      });
+      const items = (res && res.data && res.data.items) || [];
+      el.grimCountBadge.textContent = `显示 ${items.length} 条`;
+      el.grimResults.innerHTML = "";
+      if (!items.length) {
+        el.grimResults.innerHTML = `<div style="grid-column:1/-1;text-align:center;color:#8b95a5;padding:18px;">当前模型词库下未找到包含「${q}」的词条</div>`;
+        return;
+      }
+      items.forEach((it) => {
+        const card = document.createElement("div");
+        card.className = "grim-card";
+        card.innerHTML = `
+          <div class="grim-card-head">
+            <span class="grim-title">${it.title}</span>
+            <span class="grim-vol">${it.volume || ""} · ${it.category || ""}</span>
+          </div>
+          <div class="grim-tags">${(it.clean_tags || "").slice(0, 180)}</div>
+          <div class="grim-card-actions">
+            <button class="btn btn-sm btn-accent act-append" type="button">+ 追加 Tags</button>
+            <button class="btn btn-sm btn-ghost act-macro" type="button">插入【法典:${it.title}】</button>
+          </div>
+        `;
+        card.querySelector(".act-append").addEventListener("click", () => {
+          appendTagsToBoard(it.clean_tags);
+          showToast(`已追加「${it.title}」的 Tags`);
         });
-        renderRefGrid();
-        saveCache();
+        card.querySelector(".act-macro").addEventListener("click", () => {
+          appendTagsToBoard(`【法典:${it.title}】`);
+          showToast(`已插入宏【法典:${it.title}】`);
+        });
+        el.grimResults.appendChild(card);
+      });
+    } catch (err) {
+      el.grimCountBadge.textContent = "检索失败";
+      showToast("检索异常: " + (err.message || err));
+    }
+  }
+
+  async function generateArtwork() {
+    if (state.generating) return;
+    const naiPrompt = el.naiPrompt.value.trim();
+    const nlPrompt = el.nlPrompt.value.trim();
+    if (!naiPrompt && !nlPrompt) {
+      showToast("请先填写提示词");
+      return;
+    }
+
+    syncActiveSlotFromInputs();
+    persistPanelCache();
+    state.generating = true;
+    el.btnGenerate.disabled = true;
+    el.btnGenerate.textContent = "正在生成中…";
+    const t0 = Date.now();
+    const tick = setInterval(() => {
+      el.genTimer.textContent = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+    }, 200);
+
+    try {
+      const b = await getBridge();
+      const payload = {
+        model: el.selModel.value,
+        nai_prompt: naiPrompt,
+        nl_prompt: nlPrompt,
+        size: el.selSize.value,
+        style: el.selStyle.value,
+        custom_artists: el.inpArtists.value.trim(),
+        steps: parseInt(el.inpSteps.value, 10) || 24,
+        scale: parseFloat(el.inpScale.value) || 6.0,
+        sampler: el.selSampler.value,
+        n: 1,
       };
-      reader.onerror = () => {
-        showError(`参考图 ${file.name || ""} 读取失败，请重新选择。`);
-      };
-      reader.readAsDataURL(file);
-    });
-  }
-
-  function removeRefImage(index) {
-    referenceImages.splice(index, 1);
-    renderRefGrid();
-    saveCache();
-  }
-
-  function clearReferenceImage() {
-    referenceImages = [];
-    if (els.refFile) els.refFile.value = "";
-    renderRefGrid();
-  }
-
-  function renderRefGrid() {
-    if (!els.refGrid) return;
-    const mode = currentRefMode();
-    els.refGrid.className = "ref-grid mode-" + mode;
-    els.refGrid.innerHTML = "";
-
-    referenceImages.forEach((item, idx) => {
-      const row = document.createElement("div");
-      row.className = "ref-item";
-
-      const thumb = document.createElement("img");
-      thumb.className = "ref-thumb";
-      thumb.src = item.dataUrl;
-      thumb.alt = `参考图 ${idx + 1}`;
-      thumb.title = item.name;
-      thumb.addEventListener("click", () => openLightbox(item.dataUrl));
-      row.appendChild(thumb);
-
-      const body = document.createElement("div");
-      body.className = "ref-item-body";
-
-      const controls = document.createElement("div");
-      controls.className = "ref-item-controls";
-
-      // 逐图强度：vibe 写入 reference_strength_multiple、精准参考写入
-      // director_reference_strength_values（均按下标对应）
-      const strengthInput = document.createElement("input");
-      strengthInput.type = "number";
-      strengthInput.className =
-        "input acrylic-input ref-strength-input";
-      strengthInput.min = "0";
-      strengthInput.max = "1";
-      strengthInput.step = "0.05";
-      strengthInput.value = String(item.strength);
-      strengthInput.title = `第 ${idx + 1} 张参考图的强度（0-1）`;
-      strengthInput.addEventListener("change", () => {
-        const value = parseFloat(strengthInput.value);
-        if (!Number.isNaN(value)) {
-          item.strength = Math.min(1, Math.max(0, value));
-        }
-        strengthInput.value = String(item.strength);
-        saveCache();
-      });
-      controls.appendChild(strengthInput);
-
-      // 逐图精准参考描述（仅 director 模式显示）
-      const captionSelect = document.createElement("select");
-      captionSelect.className = "select acrylic-input ref-caption-select";
-      REF_CAPTIONS.forEach((cap) => {
-        const opt = document.createElement("option");
-        opt.value = cap;
-        opt.textContent = cap;
-        captionSelect.appendChild(opt);
-      });
-      if (REF_CAPTIONS.indexOf(item.caption) < 0) {
-        item.caption = defaultDirectorCaption;
-      }
-      captionSelect.value = item.caption;
-      captionSelect.title = `第 ${idx + 1} 张参考图的 base_caption`;
-      captionSelect.addEventListener("change", () => {
-        item.caption = captionSelect.value;
-        saveCache();
-      });
-      controls.appendChild(captionSelect);
-
-      body.appendChild(controls);
-
-      const meta = document.createElement("div");
-      meta.className = "ref-item-meta";
-      meta.textContent = `REF_${String(idx + 1).padStart(2, "0")} · ${item.name}`;
-      body.appendChild(meta);
-
-      row.appendChild(body);
-
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.className = "btn-link ref-item-remove";
-      removeBtn.title = "移除该参考图";
-      removeBtn.innerHTML = '<span class="link-icon">✕</span>';
-      removeBtn.addEventListener("click", () => removeRefImage(idx));
-      row.appendChild(removeBtn);
-
-      els.refGrid.appendChild(row);
-    });
-
-    if (els.refCountTag) {
-      els.refCountTag.textContent = `${referenceImages.length} / ${MAX_REF_IMAGES}`;
-    }
-    if (els.refGridWrap) {
-      if (referenceImages.length) show(els.refGridWrap);
-      else hide(els.refGridWrap);
-    }
-  }
-
-  // 按参考图使用模式切换可见性：全局重绘强度/附加噪声仅 img2img 使用，
-  // vibe / 精准参考改用逐图强度（CSS 按 mode-* 类控制卡片内控件显隐）
-  function applyRefModeUI() {
-    const openai = currentCallFormat === "openai";
-    const mode = currentRefMode();
-    if (els.refGrid) {
-      els.refGrid.classList.remove("mode-vibe", "mode-img2img", "mode-director");
-      els.refGrid.classList.add("mode-" + mode);
-    }
-    if (openai && mode === "img2img") {
-      show(els.refStrengthWrap);
-      show(els.refNoiseWrap);
-    } else {
-      hide(els.refStrengthWrap);
-      hide(els.refNoiseWrap);
-    }
-  }
-
-  // ===== 生成图片 =====
-  async function generate() {
-    if (isGenerating) return;
-
-    const body = buildRequestBody();
-    if (!body.nai_prompt && !body.nl_prompt && !body.director_action) {
-      showError("请至少填写一个提示词框（NAI 风格或自然语言）。");
-      return;
-    }
-    if (body.call_format === "openai") {
-      const refCount = (body.reference_image_b64_list || []).length;
-      if (body.director_action && !refCount) {
-        showError("图片处理动作需要先在「调用格式」卡片上传一张源图片。");
+      const res = await b.apiPost("test_panel/generate_openai", payload);
+      clearInterval(tick);
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+      if (!res || res.status !== "ok" || !res.data || !res.data.length) {
+        el.genTimer.textContent = "生成失败";
+        showToast((res && res.message) || "生图失败，请检查日志");
         return;
       }
-      if (body.reference_mode === "director" && !refCount) {
-        showError(
-          "精准参考（director）需要先在「调用格式」卡片上传至少一张参考图（可多选，最多 8 张）。"
-        );
-        return;
-      }
-    }
 
-    lastRequestBody = body;
-    isGenerating = true;
-    const refCountText = (body.reference_image_b64_list || []).length
-      ? `（含 ${(body.reference_image_b64_list || []).length} 张参考图）`
-      : "";
-    els.loadingText.textContent = body.director_action
-      ? "正在以 director-tools 处理图片..."
-      : body.call_format === "openai"
-        ? `正在以 OpenAI 兼容格式生成${refCountText}...`
-        : "正在转译 + 生成图片...";
-    setLoading(true);
-    hideError();
-    hideResults();
-    hideMergeInfo();
+      const b64 = res.data[0].b64_json;
+      const dataUrl = "data:image/png;base64," + b64;
+      el.resultImg.src = dataUrl;
+      el.resultImg.classList.remove("hidden");
+      el.canvasEmpty.classList.add("hidden");
+      el.resultActions.classList.remove("hidden");
+      el.btnDownloadImg.href = dataUrl;
+      el.btnDownloadImg.download = "nai_" + Date.now() + ".png";
 
-    try {
-      const bridge = await getBridge();
-      const endpoint =
-        body.call_format === "openai"
-          ? "test_panel/generate_openai"
-          : "test_panel/generate";
-      const resp = await bridge.apiPost(endpoint, body);
-
-      let images, mergeInfo;
-      if (Array.isArray(resp)) {
-        images = resp;
-      } else if (resp && Array.isArray(resp.data)) {
-        images = resp.data;
-        mergeInfo = resp.merge_info;
-      } else if (resp && resp.data && Array.isArray(resp.data.data)) {
-        images = resp.data.data;
-        mergeInfo = resp.data.merge_info;
-      } else {
-        images = resp;
-        mergeInfo = (resp && resp.merge_info) || (resp && resp.data && resp.data.merge_info);
-      }
-
-      if (!images || !Array.isArray(images) || images.length === 0) {
-        const errMsg = (resp && resp.message) || (resp && resp.data && resp.data.message) || JSON.stringify(resp).slice(0, 200);
-        throw new Error(errMsg);
-      }
-
-      if (mergeInfo) {
-        displayMergeInfo(mergeInfo);
-      }
-
-      displayResults(images, body);
-      // 出图成功后刷新点数台账（新消耗已写入统计）
-      await loadUsageStats();
+      const fullPrompt = (res.merge_info && res.merge_info.full_prompt) || naiPrompt;
+      el.finalPromptPre.textContent = fullPrompt;
+      el.genTimer.textContent = "完成 (" + elapsed + ")";
+      showToast("图片生成完成");
     } catch (err) {
-      const msg = err?.message || String(err);
-      showError(msg);
+      clearInterval(tick);
+      el.genTimer.textContent = "请求异常";
+      showToast("请求失败: " + (err.message || err));
     } finally {
-      isGenerating = false;
-      setLoading(false);
+      state.generating = false;
+      el.btnGenerate.disabled = false;
+      el.btnGenerate.textContent = "立即测试生图（仅使用当前 UI 面板所选槽位与参数，不影响后端正式设置）";
     }
   }
 
-  // ===== 合并步骤展示 =====
-  function displayMergeInfo(info) {
-    hide(els.emptyState);
-    els.mergeSteps.innerHTML = "";
-
-    const steps = [];
-
-    if (info.nai_prompt) {
-      steps.push({ label: "NAI 风格提示词（原样保留）", value: info.nai_prompt });
-    }
-
-    if (info.nl_prompt) {
-      steps.push({ label: "自然语言提示词（待转译）", value: info.nl_prompt });
-    }
-
-    if (info.nl_prompt && info.translated_nl) {
-      const same = info.translated_nl === info.nl_prompt;
-      steps.push({
-        label: same ? "转译结果（未配置转译模型，原样使用）" : "转译结果（模型转译为 NAI 标签）",
-        value: info.translated_nl,
-      });
-    }
-
-    steps.push({ label: "完整 Prompt（发送至生图站点）", value: info.full_prompt, highlight: true });
-
-    steps.forEach((step, idx) => {
-      const row = document.createElement("div");
-      row.className = "merge-step";
-
-      const num = document.createElement("span");
-      num.className = "merge-step-num";
-      num.textContent = String(idx + 1);
-
-      const body = document.createElement("div");
-      body.className = "merge-step-body";
-
-      const label = document.createElement("div");
-      label.className = "merge-step-label";
-      label.textContent = step.label;
-
-      const value = document.createElement("div");
-      value.className = "merge-step-value" + (step.highlight ? " highlight" : "");
-      value.textContent = step.value;
-
-      body.appendChild(label);
-      body.appendChild(value);
-      row.appendChild(num);
-      row.appendChild(body);
-      els.mergeSteps.appendChild(row);
-    });
-
-    show(els.mergeInfo);
-  }
-
-  function hideMergeInfo() {
-    hide(els.mergeInfo);
-  }
-
-  // ===== UI 状态控制 =====
-  function setLoading(loading) {
-    if (loading) {
-      hide(els.emptyState);
-      hide(els.errorState);
-      show(els.loadingState);
-      els.generateBtn.disabled = true;
-      els.trialBtn.disabled = true;
-      els.loadingText.textContent = "正在转译 + 生成图片...";
-    } else {
-      hide(els.loadingState);
-      els.generateBtn.disabled = false;
-    }
-  }
-
-  function showError(msg) {
-    hide(els.emptyState);
-    hide(els.loadingState);
-    hide(els.resultGrid);
-    hideMergeInfo();
-    show(els.errorState);
-    els.errorMsg.textContent = msg || "未知错误";
-  }
-
-  function hideError() {
-    hide(els.errorState);
-  }
-
-  function hideResults() {
-    hide(els.resultGrid);
-    hide(els.resultMeta);
-    hideMergeInfo();
-    show(els.emptyState);
-  }
-
-  function displayResults(images, requestBody) {
-    hide(els.emptyState);
-    hide(els.errorState);
-
-    const styleNames = {
-      vertical: "韩漫小清新风",
-      comicDoujin: "漫画同人风",
-      r18: "2.5D唯美风",
-      lolita25d: "2.5D唯美风（萝）",
-      anime: "本子里番风",
-      galgame: "GalGame风",
-      custom: "自定义",
-    };
-    const formatLabel = requestBody.call_format === "openai" ? "OpenAI" : "NAI直连";
-    const metaText = `${styleNames[requestBody.style] || requestBody.style} · ${sizeDisplayName(requestBody.size)} · ${images.length} UNIT · ${formatLabel}`;
-    setBadge(els.resultMeta, metaText, "badge-tech-success");
-    show(els.resultMeta);
-
-    els.resultGrid.innerHTML = "";
-    els.resultGrid.className = "result-grid";
-
-    if (images.length > 1) {
-      els.resultGrid.classList.add(images.length === 2 ? "cols-2" : "cols-4");
-    }
-
-    images.forEach((item, idx) => {
-      const b64 = item.b64_json || item.b64 || item;
-      const wrap = document.createElement("div");
-      wrap.className = "result-item";
-
-      const label = document.createElement("span");
-      label.className = "result-item-label";
-      label.textContent = `${idx + 1} / ${images.length}`;
-      wrap.appendChild(label);
-
-      const img = document.createElement("img");
-      img.src = "data:image/png;base64," + b64;
-      img.alt = `生成结果 ${idx + 1}`;
-      img.addEventListener("click", () => openLightbox(img.src));
-      wrap.appendChild(img);
-
-      const actions = document.createElement("div");
-      actions.className = "result-item-actions";
-
-      const dlBtn = document.createElement("button");
-      dlBtn.className = "result-item-action";
-      dlBtn.textContent = "下载";
-      dlBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        downloadImage(b64, idx + 1);
-      });
-      actions.appendChild(dlBtn);
-
-      wrap.appendChild(actions);
-      els.resultGrid.appendChild(wrap);
-    });
-
-    show(els.resultGrid);
-  }
-
-  // ===== 图片放大 =====
-  function openLightbox(src) {
-    const lb = document.createElement("div");
-    lb.className = "lightbox";
-    const img = document.createElement("img");
-    img.src = src;
-    img.addEventListener("click", (e) => e.stopPropagation());
-    lb.appendChild(img);
-    lb.addEventListener("click", () => lb.remove());
-    document.body.appendChild(lb);
-  }
-
-  function downloadImage(b64, index) {
-    const link = document.createElement("a");
-    link.href = "data:image/png;base64," + b64;
-    link.download = `nai_test_${Date.now()}_${index}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }
-
-  // ===== 重置参数 =====
-  function resetParams() {
-    clearCache();
-    els.naiPrompt.value = "";
-    els.nlPrompt.value = "";
-    els.sampler.value = "k_dpmpp_2m_sde";
-    els.steps.value = "24";
-    els.scale.value = "6";
-    els.cfg.value = "1";
-    els.noiseSchedule.value = "karras";
-    els.model.value = "nai-diffusion-4-5-full";
-    els.style.value = "vertical";
-    updateSizeOptionsUI();
-    els.size.value = "竖图";
-    els.count.value = "1";
-    els.negative.value = "";
-    els.customArtists.value = "";
-    clearReferenceImage();
-    els.refStrength.value = "0.7";
-    els.refMode.value = "vibe";
-    els.refNoise.value = "0.7";
-    els.openaiSeed.value = "-1";
-    els.directorAction.value = "";
-    clearCharRows();
-    toggleCustomArtists();
-    setCallFormat("direct");
-    saveCache();
-  }
-
-  // ===== 调用格式切换（NAI 直连 / OpenAI 兼容） =====
-  function initFormatToggle() {
-    formatToggleBtns = Array.from(
-      els.callFormat.querySelectorAll(".format-toggle-btn")
-    );
-    formatToggleBtns.forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        var fmt = btn.getAttribute("data-format");
-        if (fmt === currentCallFormat) return;
-        setCallFormat(fmt);
-        saveCache();
-      });
-    });
-  }
-
-  function setCallFormat(fmt) {
-    currentCallFormat = fmt;
-    formatToggleBtns.forEach(function (btn) {
-      var active = btn.getAttribute("data-format") === fmt;
-      btn.classList.toggle("active", active);
-    });
-    var openai = fmt === "openai";
-    if (openai) {
-      show(els.refUploadWrap);
-      show(els.refModeWrap);
-      show(els.openaiSeedWrap);
-      show(els.directorActionWrap);
-      show(els.charListWrap);
-      if (els.openaiConfigStatus) show(els.openaiConfigStatus);
-      els.callFormatHint.textContent =
-        "请求按 OpenAI 兼容格式发往配置的 /v1/images 端点，支持多张参考图、种子与图片处理动作。";
-      els.trialBtn.disabled = true;
-      els.trialBtn.title = "试用生成仅支持 NAI 直连格式";
-    } else {
-      hide(els.refUploadWrap);
-      hide(els.refStrengthWrap);
-      hide(els.refModeWrap);
-      hide(els.refNoiseWrap);
-      hide(els.openaiSeedWrap);
-      hide(els.directorActionWrap);
-      hide(els.charListWrap);
-      if (els.openaiConfigStatus) hide(els.openaiConfigStatus);
-      els.callFormatHint.textContent =
-        "直连 nai.sta1n.cn 原生接口生成。";
-      els.trialBtn.disabled = false;
-      els.trialBtn.title = "";
-      loadTrialStatus();
-    }
-    applyRefModeUI();
-    updateModelOptionsUI();
-    updateSizeOptionsUI();
-    updateCostBadge();
-  }
-
-  function handleReferenceFileChange() {
-    if (!els.refFile || !els.refFile.files) return;
-    addRefImages(els.refFile.files);
-    // 允许再次选择同一批文件
-    els.refFile.value = "";
-  }
-
-  // ===== 载入默认负面词 =====
-  async function loadDefaultNegative() {
-    try {
-      const bridge = await getBridge();
-      const resp = await bridge.apiGet("test_panel/config");
-      const config = (resp && resp.data) ? resp.data : resp;
-      if (config.default_negative) {
-        els.negative.value = config.default_negative;
-      } else {
-        fallbackDefaultNegative();
-      }
-    } catch (e) {
-      fallbackDefaultNegative();
-    }
-    saveCache();
-  }
-
-  function fallbackDefaultNegative() {
-    els.negative.value =
-      "{{bad anatomy}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped," +
-      "{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs," +
-      "{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,ink eyes,ink hair," +
-      "jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers}," +
-      "{{missing legs}},{{{more than 2 nipples}}},mutated hands,{{{mutation}}},normal quality,owres," +
-      "{{poorly drawn face}},{{poorly drawn hands}},reen eyes,signature,text,{{too many fingers}}," +
-      "{{{ugly}}},username,uta,watermark,worst quality,{{{more than 2 legs}}}";
-  }
-
-  // ===== 试用生成 =====
-  async function loadTrialStatus() {
-    try {
-      const bridge = await getBridge();
-      const resp = await bridge.apiGet("test_panel/trial_status");
-      const status = (resp && resp.data) ? resp.data : resp;
-      updateTrialUI(status);
-    } catch (err) {
-      hide(els.trialStatus);
-      els.trialBtn.disabled = true;
-    }
-  }
-
-  function updateTrialUI(status) {
-    if (!status) return;
-    const remaining = status.remaining || 0;
-    const used = status.used || 0;
-    const max = status.max_uses || 3;
-
-    if (status.available) {
-      els.trialBtn.disabled = false;
-      show(els.trialStatus);
-      els.trialStatusText.textContent = `🌟 试用生成可用 · 已用 ${used}/${max} 次 · 剩余 ${remaining} 次`;
-    } else if (status.key_loaded && used >= max) {
-      els.trialBtn.disabled = true;
-      show(els.trialStatus);
-      els.trialStatusText.textContent = `⚠ 试用次数已达上限（${max} 次）。请配置自己的密钥后使用正式生图。`;
-    } else {
-      els.trialBtn.disabled = true;
-      hide(els.trialStatus);
-    }
-  }
-
-  async function trialGenerate() {
-    if (isGenerating) return;
-
-    const body = buildRequestBody();
-    if (!body.nai_prompt && !body.nl_prompt) {
-      showError("请至少填写一个提示词框（NAI 风格或自然语言）。");
-      return;
-    }
-
-    body.n = 1;
-    lastRequestBody = body;
-    isGenerating = true;
-    setLoading(true);
-    hideError();
-    hideResults();
-    hideMergeInfo();
-    els.loadingText.textContent = "正在使用试用密钥转译 + 生成...";
-
-    try {
-      const bridge = await getBridge();
-      const resp = await bridge.apiPost("test_panel/trial_generate", body);
-
-      let images, mergeInfo, trialUsed, trialRemaining;
-      if (Array.isArray(resp)) {
-        images = resp;
-      } else if (resp && Array.isArray(resp.data)) {
-        images = resp.data;
-        mergeInfo = resp.merge_info;
-        trialUsed = resp.trial_used;
-        trialRemaining = resp.trial_remaining;
-      } else if (resp && resp.data && Array.isArray(resp.data.data)) {
-        images = resp.data.data;
-        mergeInfo = resp.data.merge_info;
-        trialUsed = resp.data.trial_used;
-        trialRemaining = resp.data.trial_remaining;
-      } else {
-        images = resp;
-      }
-
-      if (!images || !Array.isArray(images) || images.length === 0) {
-        const errMsg = (resp && resp.message) || (resp && resp.data && resp.data.message) || JSON.stringify(resp).slice(0, 200);
-        throw new Error(errMsg);
-      }
-
-      if (mergeInfo) displayMergeInfo(mergeInfo);
-      displayResults(images, body);
-
-      if (trialUsed != null && trialRemaining != null) {
-        updateTrialUI({ available: trialRemaining > 0, key_loaded: true, used: trialUsed, max_uses: 3, remaining: trialRemaining });
-      } else {
-        await loadTrialStatus();
-      }
-      await loadUsageStats();
-    } catch (err) {
-      const msg = err?.message || String(err);
-      showError(msg);
-      await loadTrialStatus();
-    } finally {
-      isGenerating = false;
-      setLoading(false);
-    }
-  }
-
-  // ===== 点数用量统计（05 卡片） =====
-
-  // 柱状图 + 趋势折线：rows 为 [{date, cost, count, failed}]，按日期升序。
-  function renderUsageChart(rows) {
-    if (!els.usageChart) return;
-    if (!rows || !rows.length) {
-      els.usageChart.innerHTML = "";
-      return;
-    }
-    const W = 720;
-    const H = 210;
-    const padL = 34;
-    const padR = 10;
-    const padT = 14;
-    const padB = 26;
-    const innerW = W - padL - padR;
-    const innerH = H - padT - padB;
-    const n = rows.length;
-    const peak = Math.max(
-      1,
-      ...rows.map((r) => Math.max(r.cost || 0, r.upstream_cost || 0))
-    );
-    const slot = innerW / n;
-    const barW = Math.max(1.5, Math.min(slot * 0.62, 26));
-    const yOf = (value) => padT + innerH - (value / peak) * innerH;
-
-    const parts = [];
-    // 网格线与 Y 轴刻度（4 档）
-    for (let i = 0; i <= 4; i += 1) {
-      const value = Math.round((peak * i) / 4);
-      const y = yOf((peak * i) / 4);
-      parts.push(
-        `<line class="usage-grid-line" x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" />`
-      );
-      parts.push(
-        `<text class="usage-axis-text" x="${padL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${value}</text>`
-      );
-    }
-
-    const centers = [];
-    const upstreamCenters = [];
-    rows.forEach((row, index) => {
-      const cx = padL + slot * (index + 0.5);
-      const cost = row.cost || 0;
-      const upstreamCost = row.upstream_cost || 0;
-      const y = yOf(cost);
-      centers.push([cx, y]);
-      upstreamCenters.push([cx, yOf(upstreamCost)]);
-      const barH = Math.max(cost > 0 ? 1.5 : 0, padT + innerH - y);
-      const title = `${row.date} · 估算 ${cost} 点 / ${row.count || 0} 张${
-        row.failed ? ` · 失败 ${row.failed} 次` : ""
-      }${upstreamCost ? ` · 上游实际 ${upstreamCost} 点` : ""}`;
-      if (barH > 0) {
-        parts.push(
-          `<rect class="usage-bar" x="${(cx - barW / 2).toFixed(2)}" y="${y.toFixed(
-            2
-          )}" width="${barW.toFixed(2)}" height="${barH.toFixed(2)}" rx="2"><title>${title}</title></rect>`
-        );
-      } else {
-        // 零消耗日：画一个贴地的占位点，保持日期轴连续
-        parts.push(
-          `<rect class="usage-bar" x="${(cx - barW / 2).toFixed(2)}" y="${(
-            padT +
-            innerH -
-            1.5
-          ).toFixed(2)}" width="${barW.toFixed(2)}" height="1.5" rx="0.75" opacity="0.45"><title>${title}</title></rect>`
-        );
-      }
-    });
-
-    if (centers.length > 1) {
-      const points = centers.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
-      parts.push(`<polyline class="usage-line" points="${points}" />`);
-    }
-    // 上游实际扣费（余额同步）：虚线叠加在估算值上，避免两个口径混在一起。
-    if (rows.some((row) => (row.upstream_cost || 0) > 0)) {
-      const upstreamPoints = upstreamCenters
-        .map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`)
-        .join(" ");
-      parts.push(
-        `<polyline class="usage-line usage-line-upstream" points="${upstreamPoints}" />`
-      );
-    }
-
-    // X 轴标签：最多 10 个，避免拥挤
-    const step = Math.max(1, Math.ceil(n / 10));
-    rows.forEach((row, index) => {
-      if (index % step !== 0 && index !== n - 1) return;
-      const cx = padL + slot * (index + 0.5);
-      parts.push(
-        `<text class="usage-axis-text" x="${cx.toFixed(2)}" y="${H - 8}" text-anchor="middle">${row.date.slice(
-          5
-        )}</text>`
-      );
-    });
-
-    els.usageChart.innerHTML =
-      `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="每日点数消耗">${parts.join("")}</svg>`;
-  }
-
-  function renderUsageSummary(payload) {
-    if (!els.usageSummary) return;
-    const window_ = (payload.windows || {})[String(usageDays)] || {};
-    const overall = payload.overall || {};
-    const today = payload.today || {};
-    const since = payload.first_day ? `自 ${payload.first_day}` : "暂无记录";
-    const cards = [
-      { label: "TODAY // 今日", value: today.cost || 0, unit: "点", sub: `${today.count || 0} 张` },
-      {
-        label: `LAST ${usageDays}D // 近 ${usageDays} 日`,
-        value: window_.cost || 0,
-        unit: "点",
-        sub: `${window_.count || 0} 张 · 日均 ${window_.avg_cost || 0}`,
-      },
-      {
-        label: "PEAK // 峰值",
-        value: window_.peak_cost || 0,
-        unit: "点",
-        sub: window_.peak_date || "—",
-      },
-      {
-        label: "TOTAL // 累计",
-        value: overall.cost || 0,
-        unit: "点",
-        sub: `${overall.count || 0} 张 · ${since}`,
-      },
-    ];
-    const upstream = payload.upstream || {};
-    const upstreamWindow = window_.upstream_cost || 0;
-    const upstreamOverall = overall.upstream_cost || 0;
-    if (
-      payload.upstream_enabled ||
-      upstreamWindow ||
-      upstreamOverall ||
-      upstream.balance != null
-    ) {
-      const syncedAt = upstream.checked_at
-        ? new Date(upstream.checked_at * 1000).toLocaleTimeString("zh-CN", {
-            hour: "2-digit",
-            minute: "2-digit",
-          })
-        : "—";
-      let sub = "等待余额同步";
-      if (upstream.balance != null) {
-        sub = `余额 ${upstream.balance} 点 · ${syncedAt} 同步`;
-      } else if (upstream.last_error) {
-        sub = "同步异常";
-      }
-      cards.push({
-        label: "UPSTREAM // 上游实际",
-        value: upstreamWindow,
-        unit: "点",
-        sub,
-      });
-    }
-    els.usageSummary.innerHTML = cards
-      .map(
-        (card) =>
-          `<div class="usage-stat"><span class="usage-stat-label">${card.label}</span>` +
-          `<span class="usage-stat-value">${card.value}<span class="usage-unit">${card.unit}</span></span>` +
-          `<span class="usage-stat-sub">${card.sub}</span></div>`
-      )
-      .join("");
-  }
-
-  function renderUsageBreakdown(payload) {
-    if (!els.usageBreakdown) return;
-    const groups = (payload.breakdowns || {})[String(usageDays)] || {};
-    const labels = { model: "MODEL", size: "SIZE", transport: "CHANNEL" };
-    const html = Object.keys(labels)
-      .map((field) => {
-        const items = groups[field] || [];
-        if (!items.length) return "";
-        const chips = items
-          .map((item) => `<span class="usage-bd-item">${item.name} · ${item.cost} 点</span>`)
-          .join("");
-        return `<div class="usage-bd-row"><span class="usage-bd-tag">${labels[field]}</span><span class="usage-bd-items">${chips}</span></div>`;
-      })
-      .filter(Boolean)
-      .join("");
-    els.usageBreakdown.innerHTML = html;
-  }
-
-  function renderUsage() {
-    if (!usageData) return;
-    const series = usageData.series || [];
-    const rows = series.slice(-usageDays);
-    const overall = usageData.overall || {};
-    const hasCost =
-      (overall.cost || 0) > 0 ||
-      (overall.upstream_cost || 0) > 0 ||
-      (usageData.upstream && usageData.upstream.balance != null);
-    if (els.usageEmpty) els.usageEmpty.classList.toggle("hidden", hasCost);
-    renderUsageSummary(usageData);
-    renderUsageChart(rows);
-    renderUsageBreakdown(usageData);
-  }
-
-  async function loadUsageStats() {
-    if (!els.usageChart) return;
-    try {
-      const bridge = await getBridge();
-      const resp = await bridge.apiGet("test_panel/usage");
-      // 宿主 Bridge 会自动解包 handler 返回 JSON 的 data 字段（response.data?.data ?? response.data），
-      // 因此 resp 可能已是数据本体；兼容两种形态，与 loadTokenStatus 的取值方式保持一致。
-      usageData = (resp && resp.data) ? resp.data : resp;
-      if (!usageData || typeof usageData !== "object") throw new Error("返回数据为空");
-      if (els.usageDisabled) {
-        els.usageDisabled.classList.toggle("hidden", usageData.enabled !== false);
-      }
-      if (els.usageError) els.usageError.classList.add("hidden");
-      if (usageData.enabled === false) {
-        if (els.usageSummary) els.usageSummary.innerHTML = "";
-        if (els.usageChart) els.usageChart.innerHTML = "";
-        if (els.usageBreakdown) els.usageBreakdown.innerHTML = "";
-        if (els.usageEmpty) els.usageEmpty.classList.add("hidden");
-        return;
-      }
-      renderUsage();
-    } catch (err) {
-      const msg = err?.message || String(err);
-      if (els.usageError) {
-        els.usageError.textContent = `用量统计加载失败：${msg}`;
-        els.usageError.classList.remove("hidden");
-      }
-    }
-  }
-
-  // ===== 事件绑定 =====
   function bindEvents() {
-    els.model.addEventListener("change", () => {
-      updateSizeOptionsUI();
-      updateCostBadge();
+    el.btnRefresh.addEventListener("click", loadAllContext);
+
+    // 修改槽位名称或绑定模型时，实时更新当前槽位标签并同步词库
+    el.inpSlotName.addEventListener("input", () => {
+      syncActiveSlotFromInputs();
+      renderSlotTabs();
     });
-    // 步数 / 画幅 / 张数变化时实时刷新点数预估
-    ["steps", "size", "count"].forEach((key) => {
-      const el = els[key];
-      if (!el) return;
-      el.addEventListener("input", updateCostBadge);
-      el.addEventListener("change", updateCostBadge);
+
+    el.selModel.addEventListener("change", () => {
+      syncActiveSlotFromInputs();
+      renderSlotTabs();
+      const newGroup = getModelGroupKey(el.selModel.value);
+      applyModelGroupUI(newGroup, false);
     });
-    els.style.addEventListener("change", toggleCustomArtists);
-    initFormatToggle();
-    els.refFile.addEventListener("change", handleReferenceFileChange);
-    els.refRemove.addEventListener("click", clearReferenceImage);
-    if (els.refMode) {
-      els.refMode.addEventListener("change", () => {
-        applyRefModeUI();
-        renderRefGrid();
-        saveCache();
-      });
-    }
-    if (els.charAdd) {
-      els.charAdd.addEventListener("click", () => {
-        addCharRow();
-        saveCache();
-      });
-    }
-    els.generateBtn.addEventListener("click", generate);
-    els.trialBtn.addEventListener("click", trialGenerate);
-    els.resetBtn.addEventListener("click", resetParams);
-    els.retryBtn.addEventListener("click", () => {
-      if (lastRequestBody) {
-        hideError();
-        generate();
+
+    el.inpArtists.addEventListener("input", () => {
+      syncActiveSlotFromInputs();
+    });
+
+    el.btnSaveSlot.addEventListener("click", () => saveSlotsToBackend(true));
+
+    el.btnAddSlot.addEventListener("click", () => {
+      syncActiveSlotFromInputs();
+      const nextId = state.slots.reduce((max, s) => Math.max(max, Number(s.id) || 0), 0) + 1;
+      const newSlot = {
+        id: nextId,
+        name: `自定义槽位 ${nextId}`,
+        model: el.selModel.value || "nai-diffusion-4-5-full",
+        artists: "",
+      };
+      state.slots.push(newSlot);
+      selectSlot(nextId, true);
+    });
+
+    el.btnDeleteSlot.addEventListener("click", () => {
+      if (state.slots.length <= 1) {
+        showToast("至少需要保留 1 个预设槽位");
+        return;
       }
-    });
-    els.loadDefaultNegative.addEventListener("click", loadDefaultNegative);
-    if (els.usageRefreshBtn) {
-      els.usageRefreshBtn.addEventListener("click", loadUsageStats);
-    }
-    if (els.usageRangeSwitch) {
-      els.usageRangeSwitch.addEventListener("click", (e) => {
-        const btn = e.target.closest(".usage-range-btn");
-        if (!btn) return;
-        usageDays = parseInt(btn.dataset.days, 10) || 7;
-        Array.from(els.usageRangeSwitch.querySelectorAll(".usage-range-btn")).forEach((b) => {
-          b.classList.toggle("is-active", b === btn);
-        });
-        renderUsage();
-      });
-    }
-
-    // 所有表单字段变更时自动缓存
-    getCachedFields().forEach((key) => {
-      const el = els[key];
-      if (el) {
-        el.addEventListener("input", saveCache);
-        el.addEventListener("change", saveCache);
-      }
+      const cur = getActiveSlot();
+      if (!window.confirm(`确定要删除「${cur ? cur.name : "当前槽位"}」吗？`)) return;
+      state.slots = state.slots.filter((s) => Number(s.id) !== Number(state.activeSlotId));
+      selectSlot(state.slots[0].id, true);
     });
 
-    // Ctrl+Enter 快捷生成
-    [els.naiPrompt, els.nlPrompt].forEach((ta) => {
-      ta.addEventListener("keydown", (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-          e.preventDefault();
-          generate();
-        }
-      });
+    el.naiPrompt.addEventListener("change", persistPanelCache);
+    el.nlPrompt.addEventListener("change", persistPanelCache);
+
+    el.btnClearPrompt.addEventListener("click", () => {
+      el.naiPrompt.value = "";
+      el.nlPrompt.value = "";
+      persistPanelCache();
+      showToast("当前模型组提示词已清空");
+    });
+
+    el.grimScope.addEventListener("change", () => searchGrimoire(el.grimQuery.value, true));
+    el.btnGrimSearch.addEventListener("click", () => searchGrimoire(undefined, true));
+    el.grimQuery.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") searchGrimoire(undefined, true);
+    });
+
+    el.btnGenerate.addEventListener("click", generateArtwork);
+    el.btnCopyFinalPrompt.addEventListener("click", () => {
+      navigator.clipboard.writeText(el.finalPromptPre.textContent || "");
+      showToast("已复制完整提示词");
     });
   }
 
-  // ===== 初始化 =====
-  async function init() {
-    console.log(
-      "%c ENDFIELD PROTOCOL %c NAI VISUAL SYNTHESIS SYSTEM 04 INITIALIZED ",
-      "background: #fff500; color: #101110; font-weight: bold; padding: 2px 4px; border-radius: 4px;",
-      "background: #e8e8e2; color: #101110; padding: 2px 4px; border-radius: 4px;"
-    );
-    // 启动高可见度等高线拓扑地形动画引擎
-    initContourEngine();
-
-    bindEvents();
-    // 从后端恢复面板状态
-    await loadCache();
-    updateSizeOptionsUI();
-    toggleCustomArtists();
-    setCallFormat(currentCallFormat);
-    updateCostBadge();
-    // 仅加载 token 状态 badge（不填表单）
-    await loadTokenStatus();
-    // 加载试用状态
-    await loadTrialStatus();
-    // 加载点数用量台账
-    await loadUsageStats();
-  }
-
-  // DOM 就绪后启动
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
-  } else {
-    init();
-  }
+  bindEvents();
+  loadAllContext();
 })();

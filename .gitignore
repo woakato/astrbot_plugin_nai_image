@@ -26,3 +26,6 @@ data/
 
 # Trial key encryption temp
 .trial_key_enc
+# Keep compressed grimoire.db.gz, ignore unpacked runtime db
+data/grimoire.db
+!data/grimoire.db.gz

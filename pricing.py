@@ -61,7 +61,11 @@ def effective_steps(steps: int, transport: str) -> int:
     """按通道返回对生成与计价实际生效的步数（钳制到通道上限）。"""
 
     steps = int(steps)
-    cap = DIRECT_URL_STEPS_MAX if transport == TRANSPORT_GET else WEB_JOB_STEPS_MAX
+    cap = (
+        DIRECT_URL_STEPS_MAX
+        if transport == TRANSPORT_GET
+        else WEB_JOB_STEPS_MAX
+    )
     return max(1, min(steps, cap))
 
 
@@ -107,29 +111,20 @@ def direct_url_generation_cost(size: str, model: str) -> int:
 
 
 # OpenAI 兼容端点以像素分辨率（如 ``1024x1536``）表达画幅，无法直接套用
-# 上游的中文分档名，这里按最长边/面积回推档位，仅用于用量统计的估算。
-_PIXEL_SIZE_RE = re.compile(r"^\s*(\d{2,5})\s*[xX×*]\s*(\d{2,5})\s*$")
-# 2K 方图在 OpenAI 契约下是 1472x1472（最长边不到 1800），但面积
-# 2,166,784 明显高于标准 1024x1536（1,572,864），需要按面积识别为 2K。
-_OPENAI_2K_MIN_AREA = 1_700_000
+# 上游的中文分档名，这里按最长边回推档位，仅用于用量统计的估算。
+_PIXEL_SIZE_RE = re.compile(r"^\s*(\d{2,5})\s*[xX×]\s*(\d{2,5})\s*$")
 
 
 def pixel_size_cost(size: str) -> int:
-    """按像素分辨率推断画幅档位点数。
-
-    ≥3000px 记 4K(25)；最长边 ≥1800px 或面积 ≥1,700,000 记 2K(15)；
-    其余按标准画幅(1)。这样 1472x1472 的 2K 方图不会被误判为标准档。
-    """
+    """按像素分辨率推断画幅档位点数：≥3000px 记 4K(25)，≥1800px 记 2K(15)。"""
 
     match = _PIXEL_SIZE_RE.match(str(size or ""))
     if not match:
         return 1
-    width = int(match.group(1))
-    height = int(match.group(2))
-    longest = max(width, height)
+    longest = max(int(match.group(1)), int(match.group(2)))
     if longest >= 3000:
         return 25
-    if longest >= 1800 or width * height >= _OPENAI_2K_MIN_AREA:
+    if longest >= 1800:
         return 15
     return 1
 
@@ -162,11 +157,9 @@ def price_table_lines() -> list[str]:
     for label, sample_steps in tiers:
         v45 = web_job_generation_cost("方图", "nai-diffusion-4-5-full", sample_steps)
         v5 = web_job_generation_cost("方图", "nai-diffusion-5-full", sample_steps)
-        two_k = web_job_generation_cost(
-            "2K方图", "nai-diffusion-4-5-full", sample_steps
+        two_k = web_job_generation_cost("2K方图", "nai-diffusion-4-5-full", sample_steps)
+        four_k = web_job_generation_cost("4K方图", "nai-diffusion-4-5-full", sample_steps)
+        lines.append(
+            f"| {label} | {v45} | {v5} | {two_k} | {four_k} |"
         )
-        four_k = web_job_generation_cost(
-            "4K方图", "nai-diffusion-4-5-full", sample_steps
-        )
-        lines.append(f"| {label} | {v45} | {v5} | {two_k} | {four_k} |")
     return lines
