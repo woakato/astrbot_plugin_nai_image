@@ -87,7 +87,7 @@
         ],
         "labels": [
             "原有 OpenAI 兼容接口",
-            "星桥（NAI 原生接口）"
+            "星桥（Almoon）"
         ],
         "condition": {
             "call_mode": "openai"

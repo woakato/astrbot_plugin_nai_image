@@ -14,7 +14,7 @@
 使用星桥时，在插件设置中选择：
 
 1. **调用模式**：`OpenAI 兼容（/v1/images）`。
-2. **生图接口适配**：`星桥（NAI 原生接口）`。
+2. **生图接口适配**：`星桥（Almoon）`。
 3. **接口地址**：`https://api.almoons.xyz` 或 `https://aiapi.almoons.xyz`，密钥填本站 NewAPI Key。
 4. **模型**：选择 `nai-diffusion-5-full`、`nai-diffusion-5-curated`、`nai-diffusion-4-5-full` 或 `nai-diffusion-4-5-curated`。
 
