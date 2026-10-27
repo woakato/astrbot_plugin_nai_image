@@ -59,6 +59,12 @@ if __package__:
         normalize_prompt,
         normalize_translate_mode,
     )
+    from .starbridge import (
+        StarbridgeError,
+        native_error,
+        normalize_starbridge_response,
+        prepare_starbridge_request,
+    )
     from .usage_stats import (
         STATS_FILE_NAME,
         UsageStatsStore,
@@ -99,6 +105,12 @@ else:
         merge_translated_prompt,
         normalize_prompt,
         normalize_translate_mode,
+    )
+    from starbridge import (
+        StarbridgeError,
+        native_error,
+        normalize_starbridge_response,
+        prepare_starbridge_request,
     )
     from usage_stats import (
         STATS_FILE_NAME,
@@ -524,6 +536,8 @@ def _format_generate_error(reason: str) -> str:
     # 精确匹配
     if reason in _map:
         return _map[reason]
+    if reason.startswith("starbridge | "):
+        return "🚫 星桥：" + reason.split(" | ", 1)[1]
     # 精准参考（§6）被上游拒绝：参数已按文档格式提交，多为能力未开通
     if reason.startswith("director_ref_rejected"):
         detail = reason.split(" | ", 1)[1] if " | " in reason else ""
@@ -839,6 +853,10 @@ class NAIGenerateImagePlugin(Star):
             (config.get("openai_api_base_url") or "").strip().rstrip("/")
         )
         self.openai_api_key: str = (config.get("openai_api_key") or "").strip()
+        # Explicit opt-in: existing configurations retain their original wire format.
+        self.openai_api_profile: str = (
+            config.get("openai_api_profile") or "compatible"
+        ).strip().casefold()
         # model 为接口必填字段，留空时回退文档推荐的 nai-diffusion-5-full。
         self.openai_api_model: str = (
             config.get("openai_api_model") or "nai-diffusion-5-full"
@@ -2489,6 +2507,12 @@ class NAIGenerateImagePlugin(Star):
 
         # director-tools 图片处理：model / action 由动作唯一决定（§8）
         is_director = director_action in OPENAI_DIRECTOR_ACTIONS
+        starbridge = getattr(self, "openai_api_profile", "compatible") == "starbridge"
+        starbridge_tool_model = (
+            (model or self._slot_model() or self.openai_api_model or "").strip()
+            if starbridge and is_director
+            else None
+        )
         model = (
             "director-tools"
             if is_director
@@ -2775,7 +2799,10 @@ class NAIGenerateImagePlugin(Star):
             payload["action"] = "generate"
             # 精准参考仅支持 NAI 4.5 / NAI 5 模型（实测），其余模型会被服务端
             # 拒绝；当前模型不满足时自动切换到 4-5-full 以保证能力可用。
-            if (model or "").strip().casefold() not in OPENAI_DIRECTOR_MODELS:
+            if (
+                not starbridge
+                and (model or "").strip().casefold() not in OPENAI_DIRECTOR_MODELS
+            ):
                 logger.info(
                     f"{LOG_TAG} [openai_generate] 精准参考不支持当前模型 {model or '(none)'}"
                     "（仅 4.5 / 5 系列），自动切换为 nai-diffusion-4-5-full"
@@ -2838,6 +2865,27 @@ class NAIGenerateImagePlugin(Star):
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        requested_count = payload["n"]
+        request_options = {}
+        if starbridge:
+            try:
+                prepared = await prepare_starbridge_request(
+                    self._session,
+                    base,
+                    payload,
+                    headers=headers,
+                    timeout=timeout,
+                    image_model=starbridge_tool_model,
+                )
+            except asyncio.TimeoutError:
+                return [], "starbridge | 参考图编码超时，未继续生图；编码可能已计费，请确认后再试。"
+            except StarbridgeError as exc:
+                return [], "starbridge | " + str(exc)
+            except (aiohttp.ClientError, OSError):
+                return [], "starbridge | 参考图处理请求中断，未自动重试；请确认编码费用后再试。"
+            endpoint, payload = prepared.endpoint, prepared.payload
+            headers["Accept"] = "application/json"
+            request_options["allow_redirects"] = False
 
         if is_director:
             mode_desc = f"director/{director_action}"
@@ -2851,7 +2899,7 @@ class NAIGenerateImagePlugin(Star):
             mode_desc = "t2i"
         logger.info(
             f"{LOG_TAG} [openai_generate] endpoint={endpoint} model={model or '(none)'} "
-            f"mode={mode_desc} size={size} n={payload['n']} steps={_steps} scale={_scale} "
+            f"mode={mode_desc} size={size} n={requested_count} steps={_steps} scale={_scale} "
             f"seed={_seed if _seed >= 0 else 'random'} chars={len(char_entries)} "
             f"refs={len(ref_uris)} ref_bytes={sum(len(b) for b in ref_bytes_list)}"
         )
@@ -2859,7 +2907,9 @@ class NAIGenerateImagePlugin(Star):
         # ==== 发送请求：可重试状态码按 2/4/8 秒指数退避（§14）；超时不重试 ====
         status = 0
         text = ""
-        max_attempts = self.openai_max_retries + 1
+        # Native generation and Vibe encoding are billable POSTs. A failed
+        # delivery must not silently submit another paid request.
+        max_attempts = 1 if starbridge else self.openai_max_retries + 1
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 delay = OPENAI_RETRY_DELAYS[
@@ -2872,7 +2922,11 @@ class NAIGenerateImagePlugin(Star):
                 await asyncio.sleep(delay)
             try:
                 async with self._session.post(
-                    endpoint, json=payload, headers=headers, timeout=timeout
+                    endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=timeout,
+                    **request_options,
                 ) as resp:
                     text = await resp.text()
                     status = resp.status
@@ -2913,6 +2967,8 @@ class NAIGenerateImagePlugin(Star):
 
         if status == 0:
             return [], "timeout"
+        if starbridge and 300 <= status < 400:
+            return [], "starbridge | 接口发生重定向，请填写最终的 HTTPS 站点地址。"
         if status >= 400:
             # 尽量提取上游 error.message，透传给用户（如"降低尺寸、步数"建议）
             err_msg = ""
@@ -2924,6 +2980,8 @@ class NAIGenerateImagePlugin(Star):
                         err_msg = str(_err_item.get("message") or "").strip()
                     elif isinstance(_err_item, str):
                         err_msg = _err_item.strip()
+                    if starbridge:
+                        err_msg = native_error(_err, status)
             except Exception:
                 pass
             reason = f"http_{status}"
@@ -2936,6 +2994,7 @@ class NAIGenerateImagePlugin(Star):
                 and ref_uris
                 and ref_mode == "director"
                 and not director_action
+                and not starbridge
             ):
                 reason = "director_ref_rejected"
                 if err_msg:
@@ -2956,6 +3015,8 @@ class NAIGenerateImagePlugin(Star):
             )
             return [], "invalid_response"
 
+        if starbridge:
+            _data = normalize_starbridge_response(_data)
         items = _data.get("data") if isinstance(_data, dict) else []
         if not isinstance(items, list) or not items:
             return [], "empty_response"
@@ -3037,6 +3098,11 @@ class NAIGenerateImagePlugin(Star):
                 "transport": "openai",
                 "estimated_cost": _estimated_cost,
             }
+            if starbridge:
+                generation_parameters["api_profile"] = "starbridge"
+                generation_parameters["seed"] = payload.get("parameters", {}).get(
+                    "seed", "random"
+                )
             if ref_uris:
                 if is_director:
                     reference_mode_label = f"director-tools/{director_action}"

@@ -76,6 +76,23 @@
             "enable_upstream_billing_sync": true
         }
     },
+    "openai_api_profile": {
+        "type": "string",
+        "default": "compatible",
+        "description": "生图接口适配",
+        "hint": "默认保留现有 OpenAI 兼容接口行为。星桥适配使用本站 NAI 原生接口：地址填写 https://api.almoons.xyz 或 https://aiapi.almoons.xyz，密钥使用 NewAPI Key。Vibe 参考会逐图进行付费编码；已提交的编码和生图请求不自动重试。",
+        "options": [
+            "compatible",
+            "starbridge"
+        ],
+        "labels": [
+            "原有 OpenAI 兼容接口",
+            "星桥（NAI 原生接口）"
+        ],
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
     "openai_api_base_url": {
         "type": "string",
         "default": "",
@@ -98,7 +115,7 @@
         "type": "string",
         "default": "nai-diffusion-5-full",
         "description": "OpenAI 兼容接口模型名",
-        "hint": "接口必填字段。nai-diffusion-5-full 为文档推荐的通用动漫插画模型；精准参考支持 nai-diffusion-4-5 与 nai-diffusion-5 系列，其他模型会自动回退 4.5。director-tools（图片处理）由面板动作自动选用，无需在此配置。",
+        "hint": "接口必填字段。nai-diffusion-5-full 为文档推荐的通用动漫插画模型；精准参考支持 nai-diffusion-4-5 与 nai-diffusion-5 系列，其他模型会自动回退 4.5。director-tools（图片处理）由面板动作自动选用，无需在此配置。 星桥适配仅支持 V4.5/V5 的 Full/Curated；Vibe 和精准参考仅限 V4.5。",
         "options": [
             "nai-diffusion-5-full",
             "nai-diffusion-5-curated",
@@ -322,7 +339,7 @@
         "type": "string",
         "default": "vibe",
         "description": "参考图使用模式",
-        "hint": "决定聊天/陪伴发来的参考图如何使用（最多 8 张，面板可逐图设强度）。Vibe 参考：把参考图作为风格/角色氛围参考，适合「照着这张的感觉画」；img2img：以第一张参考图为底图重绘，适合「在这张图基础上改」；精准参考：从参考图精确提取角色/画风信息（仅 V4.5/V5 系列模型），适合「保持这个角色不变」。",
+        "hint": "决定聊天/陪伴发来的参考图如何使用（最多 8 张，面板可逐图设强度）。Vibe 参考：把参考图作为风格/角色氛围参考，适合「照着这张的感觉画」；img2img：以第一张参考图为底图重绘，适合「在这张图基础上改」；精准参考：从参考图精确提取角色/画风信息（仅 V4.5/V5 系列模型），适合「保持这个角色不变」。 星桥适配时，V5 仅可使用图生图，Vibe/精准参考须明确选择 V4.5。",
         "options": [
             "vibe",
             "img2img",
@@ -413,7 +430,7 @@
         "type": "int",
         "default": 2,
         "description": "失败重试次数",
-        "hint": "对 408/429/502/503/504 及上游繁忙类瞬时错误按 2/4/8 秒指数退避重试；400/401/403 与请求超时不重试（超时可能仍在生成并扣费，避免重复扣费）。设为 0 不重试。",
+        "hint": "对 408/429/502/503/504 及上游繁忙类瞬时错误按 2/4/8 秒指数退避重试；400/401/403 与请求超时不重试（超时可能仍在生成并扣费，避免重复扣费）。设为 0 不重试。 星桥原生适配的付费 POST 不自动重试，此项仅作用于原有兼容接口。",
         "min": 0,
         "max": 3,
         "condition": {
