@@ -21,7 +21,7 @@ from astrbot.api import logger
 from astrbot.api.star import StarTools
 
 from .command_args import normalize_image_size, normalize_image_style
-from .prompt_processing import extract_mixed_prompt, normalize_prompt
+from .prompt_processing import normalize_prompt
 
 if TYPE_CHECKING:
     from .main import NAIGenerateImagePlugin
@@ -90,7 +90,6 @@ class NAIImageCompanionExtensionAPI:
         )
         return {
             "enabled": bool(getattr(plugin, "enable_companion_link", True)),
-            "companion_prompt_contract_version": 1,
             "plugin": "astrbot_plugin_nai_image",
             "call_mode": call_mode,
             "api_profile": getattr(plugin, "openai_api_profile", "compatible"),
@@ -215,74 +214,6 @@ class NAIImageCompanionExtensionAPI:
 
     # ==== 生图 ====
 
-    def validate_companion_prompt(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Check prompt format and identity references without upstream I/O.
-
-        Args:
-            request: Companion image requirements and optional reference roles.
-
-        Returns:
-            A local validation result with a stable reason when invalid.
-        """
-        req = dict(request) if isinstance(request, dict) else {}
-        if (
-            "identity" in (req.get("reference_roles") or [])
-            and getattr(self._plugin, "call_mode", "direct") == "openai"
-            and getattr(self._plugin, "openai_reference_mode", "vibe") == "vibe"
-        ):
-            return {
-                "valid": False,
-                "reason": "nai_identity_reference_mode",
-                "message": "NAI 当前是氛围参考，只学习参考图的感觉，不能作为人物身份参考。"
-                "请在 NAI 插件将「参考图使用模式」改为精准参考或图生图后再试。",
-            }
-        mode = self._resolve_prompt_format(req)
-        if mode == _PROMPT_FORMAT_NAI:
-            background, section_negative = self._collect_prompt_sections(
-                req.get("prompt_sections")
-            )
-            positive = self._compose_companion_prompt(
-                _first_text(req.get("prompt_text"), req.get("prompt")),
-                background,
-                prompt_format=_PROMPT_FORMAT_NAI,
-            )
-            negative = _first_text(req.get("negative"), section_negative)
-            for text in (positive, negative):
-                if any(
-                    (
-                        segment.kind == "natural"
-                        or re.search(r"[\u3400-\u9fff]", segment.text)
-                    )
-                    and not segment.text.casefold().startswith("text:")
-                    for segment in extract_mixed_prompt(text).segments
-                ):
-                    return {
-                        "valid": False,
-                        "reason": "nai_prompt_format_invalid",
-                        "message": "NAI 当前使用英文标签模式；请将人物、动作、场景与排除要求改写为英文 NAI 标签后重新调用。"
-                        "角色本人出镜时须保留本轮人设中的发型发色、瞳色、种族和其他已知外貌特征。"
-                        "本次尚未提交生图请求。",
-                    }
-        else:
-            background, section_negative = self._collect_prompt_sections(
-                req.get("prompt_sections")
-            )
-            text = " ".join(
-                (
-                    *background,
-                    _first_text(req.get("prompt_text"), req.get("prompt")),
-                    _first_text(req.get("negative"), section_negative),
-                )
-            )
-            if re.search(r"[\u3400-\u9fff]", text):
-                return {
-                    "valid": False,
-                    "reason": "nai_prompt_language_invalid",
-                    "message": "NAI 当前使用英文自然语言模式，请将本次画面和排除要求改写为英文后重新调用。"
-                    "本次尚未提交生图请求。",
-                }
-        return {"valid": True}
-
     async def generate_for_companion(
         self, owner: Any, request: dict[str, Any]
     ) -> dict[str, Any]:
@@ -307,16 +238,6 @@ class NAIImageCompanionExtensionAPI:
         if not bool(getattr(plugin, "enable_companion_link", True)):
             return {"handled": False, "reason": "disabled"}
         req = dict(request) if isinstance(request, dict) else {}
-        validation = self.validate_companion_prompt(req)
-        if not validation["valid"]:
-            return {
-                "handled": True,
-                "backend": "NAI 生图",
-                "image_path": "",
-                "reason": validation["reason"],
-                "note": validation["message"],
-                "metadata": {},
-            }
         # prompt_text 是需求正文；prompt_sections 是陪伴插件整理的背景信息
         # （穿搭、场景、视觉记忆、构图要求等，正/负向分开）。
         raw_prompt = _first_text(req.get("prompt_text"), req.get("prompt"))
