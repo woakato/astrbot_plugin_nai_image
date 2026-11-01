@@ -21,6 +21,7 @@ from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, json_response
 from astrbot.api.web import request as web_request
+from astrbot.core.agent.tool import ToolSet
 
 if __package__:
     from .command_args import (
@@ -737,7 +738,7 @@ def migrate_invalid_call_mode(config: dict) -> str | None:
     "astrbot_plugin_nai_image",
     "缪缪的小水泡",
     "基于 nai.sta1n.cn 的 NovelAI 生图插件",
-    "2.10.0",
+    "2.10.1",
 )
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -2420,6 +2421,7 @@ class NAIGenerateImagePlugin(Star):
         custom_artists: str | None = None,
         enable_template: bool | None = None,
         enable_translate: bool | str | None = None,
+        apply_outfit: bool = True,
     ) -> tuple[str, str, str]:
         """按与直连模式一致的流程准备 OpenAI 兼容模式的最终提示词。
 
@@ -2434,6 +2436,7 @@ class NAIGenerateImagePlugin(Star):
             custom_artists: 单次自定义画师串，仅 ``custom`` 风格生效。
             enable_template: 单次模板开关；None 时使用插件配置。
             enable_translate: 单次转译模式；None 时使用插件配置。
+            apply_outfit: Whether to inherit standalone outfit defaults and cache.
 
         Returns:
             ``(full_prompt, outfit_source, prompt_kind)``，后两项仅用于日志。
@@ -2449,7 +2452,7 @@ class NAIGenerateImagePlugin(Star):
         ) = await self._prepare_translated_prompt(
             prompt,
             translate_mode=_translate_mode,
-            apply_outfit=True,
+            apply_outfit=apply_outfit,
         )
         full_prompt = self._build_full_prompt(
             translated_prompt,
@@ -4918,6 +4921,7 @@ class NAIGenerateImagePlugin(Star):
         custom_artists: str | None = None,
         enable_template: bool | None = None,
         enable_translate: bool | str | None = None,
+        apply_outfit: bool = True,
     ) -> tuple[bytes | None, str]:
         """使用最终参数生成单张图片。
 
@@ -4980,7 +4984,7 @@ class NAIGenerateImagePlugin(Star):
         ) = await self._prepare_translated_prompt(
             prompt,
             translate_mode=_translate_mode,
-            apply_outfit=True,
+            apply_outfit=apply_outfit,
         )
 
         # 2) 与预设模板合并
@@ -6021,6 +6025,22 @@ class NAIGenerateImagePlugin(Star):
         except Exception as exc:
             logger.warning(f"{LOG_TAG} [cmd:interrogate] failed: {exc!r}")
             yield event.plain_result(f"图片反推失败：{type(exc).__name__}: {exc}")
+
+    @filter.on_llm_request()
+    async def filter_disabled_image_tools(self, event: AstrMessageEvent, request: Any) -> None:
+        """Remove disabled standalone tools from this request's private catalog.
+
+        Args:
+            event: The current AstrBot event.
+            request: The model request whose catalog may contain standalone tools.
+        """
+        if getattr(self, "enable_llm_tool", False):
+            return
+        tools = getattr(request, "func_tool", None)
+        if isinstance(tools, ToolSet):
+            request.func_tool = ToolSet(tools=[
+                tool for tool in tools
+                if tool.name not in {"NAI_Generate_Image", "NAI_Search_Grimoire"}])
 
     def _refresh_llm_tool_schema(self) -> None:
         """按当前插件配置改写 NAI_Generate_Image 的参数 schema。

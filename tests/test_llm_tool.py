@@ -64,6 +64,40 @@ def make_openai_plugin(generate_result):
     return plugin
 
 
+def test_disabled_standalone_tools_are_removed_only_from_the_current_request():
+    plugin = make_plugin((None, "unused"))
+    plugin.enable_llm_tool = False
+    original = ToolSet(
+        tools=[
+            FunctionTool(name="NAI_Generate_Image", description="", parameters={}),
+            FunctionTool(name="NAI_Search_Grimoire", description="", parameters={}),
+            FunctionTool(
+                name="companion_v2_image_generate", description="", parameters={}
+            ),
+            FunctionTool(name="other_tool", description="", parameters={}),
+        ]
+    )
+    request = ProviderRequest(func_tool=original)
+    asyncio.run(plugin.filter_disabled_image_tools(FakeEvent(), request))
+    assert request.func_tool.names() == ["companion_v2_image_generate", "other_tool"]
+    assert original.names() == [
+        "NAI_Generate_Image",
+        "NAI_Search_Grimoire",
+        "companion_v2_image_generate",
+        "other_tool",
+    ]
+
+
+def test_enabled_standalone_tools_keep_the_original_catalog():
+    plugin = make_plugin((None, "unused"))
+    original = ToolSet(
+        tools=[FunctionTool(name="NAI_Generate_Image", description="", parameters={})]
+    )
+    request = ProviderRequest(func_tool=original)
+    asyncio.run(plugin.filter_disabled_image_tools(FakeEvent(), request))
+    assert request.func_tool is original
+
+
 async def collect_results(generator):
     return [result async for result in generator]
 
@@ -139,7 +173,9 @@ def test_llm_tool_sends_image_and_returns_one_text_result():
     assert isinstance(event.sent_messages[0].chain[0], Image)
     assert len(event.sent_messages[0].chain) == 1
     assert event.sent_messages[0].chain[0].file.startswith("base64://")
-    plugin._generate_one.assert_awaited_once_with("1girl", "anime", "方图", model=None, custom_artists=None)
+    plugin._generate_one.assert_awaited_once_with(
+        "1girl", "anime", "方图", model=None, custom_artists=None
+    )
 
 
 def test_llm_tool_passes_supported_sizes_to_api_unchanged():
@@ -162,7 +198,9 @@ def test_llm_tool_passes_supported_sizes_to_api_unchanged():
         )
 
         assert results == ["图片已生成并发送给用户，请根据本次请求继续回复。"]
-        plugin._generate_one.assert_awaited_once_with("1girl", "anime", size_cn, model=None, custom_artists=None)
+        plugin._generate_one.assert_awaited_once_with(
+            "1girl", "anime", size_cn, model=None, custom_artists=None
+        )
 
 
 def test_llm_tool_openai_mode_uses_pixel_resolution():
@@ -217,7 +255,9 @@ def test_llm_tool_direct_mode_maps_pixel_size_to_tier():
     )
 
     assert results == ["图片已生成并发送给用户，请根据本次请求继续回复。"]
-    plugin._generate_one.assert_awaited_once_with("1girl", "anime", "竖图", model=None, custom_artists=None)
+    plugin._generate_one.assert_awaited_once_with(
+        "1girl", "anime", "竖图", model=None, custom_artists=None
+    )
 
 
 def test_llm_tool_defaults_style_and_size_from_plugin_config():
@@ -229,7 +269,9 @@ def test_llm_tool_defaults_style_and_size_from_plugin_config():
     results = asyncio.run(collect_results(plugin.NAI_Generate_Image(event, "1girl")))
 
     assert results == ["图片已生成并发送给用户，请根据本次请求继续回复。"]
-    plugin._generate_one.assert_awaited_once_with("1girl", "galgame", "2K横图", model=None, custom_artists=None)
+    plugin._generate_one.assert_awaited_once_with(
+        "1girl", "galgame", "2K横图", model=None, custom_artists=None
+    )
 
 
 def test_llm_tool_style_disabled_forces_plugin_default_style():
@@ -244,7 +286,9 @@ def test_llm_tool_style_disabled_forces_plugin_default_style():
     )
 
     assert results == ["图片已生成并发送给用户，请根据本次请求继续回复。"]
-    plugin._generate_one.assert_awaited_once_with("1girl", "galgame", "方图", model=None, custom_artists=None)
+    plugin._generate_one.assert_awaited_once_with(
+        "1girl", "galgame", "方图", model=None, custom_artists=None
+    )
 
 
 def test_refresh_llm_tool_schema_hides_style_and_switches_size_format():
@@ -528,7 +572,9 @@ def test_llm_tool_returns_results_for_repeated_calls_but_generates_once():
         if message.role == "tool"
     ] == ["call_nai_image_1", "call_nai_image_2"]
     assert len(event.sent_messages) == 1
-    plugin._generate_one.assert_awaited_once_with("1girl", "anime", "方图", model=None, custom_artists=None)
+    plugin._generate_one.assert_awaited_once_with(
+        "1girl", "anime", "方图", model=None, custom_artists=None
+    )
 
 
 def test_llm_tool_returns_one_error_result():
