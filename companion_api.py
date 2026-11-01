@@ -82,10 +82,18 @@ class NAIImageCompanionExtensionAPI:
             credential_configured = bool(getattr(plugin, "openai_api_base_url", ""))
         else:
             credential_configured = bool(plugin.image_gen_key)
+        slot_model = getattr(plugin, "_slot_model", lambda: "")()
         return {
             "enabled": bool(getattr(plugin, "enable_companion_link", True)),
             "plugin": "astrbot_plugin_nai_image",
             "call_mode": call_mode,
+            "api_profile": getattr(plugin, "openai_api_profile", "compatible"),
+            "default_model": slot_model
+            or (
+                getattr(plugin, "openai_api_model", "")
+                if call_mode == "openai"
+                else getattr(plugin, "model", "")
+            ),
             # token_configured 保持原有语义（直连 token）；OpenAI 兼容模式
             # 是否就绪看 credential_configured。
             "token_configured": bool(plugin.image_gen_key),
@@ -95,7 +103,7 @@ class NAIImageCompanionExtensionAPI:
             "default_size": plugin.image_size,
             "prompt_format": getattr(plugin, "companion_prompt_format", "")
             or "自然语言模式（en）",
-            "reference_supported": True,
+            "reference_supported": call_mode == "openai",
             "proxy_enabled": bool(getattr(plugin, "enable_proxy", True)),
             "bypass_system_proxy": bool(getattr(plugin, "bypass_system_proxy", True)),
             "proxy_online": plugin.proxy_runner is not None,

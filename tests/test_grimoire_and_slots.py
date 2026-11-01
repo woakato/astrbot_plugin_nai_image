@@ -8,17 +8,19 @@
 3. 增强功能开关——默认关闭时不改变升级前的任何行为。
 """
 
+import asyncio
 import json
 from pathlib import Path
-
-import pytest
+from unittest.mock import AsyncMock
 
 import grimoire_service as grimoire
+import pytest
 from grimoire_service import (
     expand_grimoire_macros,
     normalize_model_ver,
     search_grimoire,
 )
+
 from main import NAIGenerateImagePlugin
 
 
@@ -452,3 +454,139 @@ def test_v5_prefers_own_volume_on_duplicate_titles():
     v45_first = search_grimoire(title, 5, "nai-diffusion-4-5-full")[0]
     assert v5_first["model_ver"] == "NAI5", "同名时 V5 模型应优先自己那卷"
     assert v45_first["model_ver"] == "NAI4.5"
+
+
+# ---------------------------------------------------------------------------
+# 面板套用画风槽位
+# ---------------------------------------------------------------------------
+def test_slot_by_id_finds_slot_and_rejects_bad_input(tmp_path, monkeypatch):
+    plugin = _make_slot_plugin(tmp_path, monkeypatch, enabled=True)
+    plugin._save_artist_slots(
+        [
+            {"name": "韩漫小清新风", "model": "m1", "artists": "a1"},
+            {"name": "本子里番风", "model": "m2", "artists": "a2"},
+        ]
+    )
+
+    assert plugin._slot_by_id("2")["name"] == "本子里番风"
+    assert plugin._slot_by_id(1)["model"] == "m1"
+    assert plugin._slot_by_id("9") is None
+    assert plugin._slot_by_id("abc") is None
+    assert plugin._slot_by_id(None) is None
+
+
+def test_slot_by_id_disabled_when_slots_off(tmp_path, monkeypatch):
+    plugin = _make_slot_plugin(tmp_path, monkeypatch, enabled=False)
+    plugin._save_artist_slots([{"name": "A", "model": "m1", "artists": "a1"}])
+    assert plugin._slot_by_id("1") is None
+
+
+class _FakeWebRequest:
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self, default=None):
+        return self._body
+
+
+def _panel_plugin(tmp_path, monkeypatch):
+    plugin = _make_slot_plugin(tmp_path, monkeypatch, enabled=True)
+    plugin._save_artist_slots(
+        [
+            {
+                "name": "默认画风",
+                "model": "nai-diffusion-4-5-full",
+                "artists": "artist:a",
+            },
+            {"name": "科幻风", "model": "nai-diffusion-5-full", "artists": "artist:b"},
+        ]
+    )
+    plugin.image_size = "竖图"
+    plugin.image_style = "vertical"
+    plugin._generate_one_custom = AsyncMock(return_value=(b"img", "ok"))
+    return plugin
+
+
+def test_panel_generate_applies_selected_slot(tmp_path, monkeypatch):
+    plugin = _panel_plugin(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "main.web_request",
+        _FakeWebRequest(
+            {
+                "nai_prompt": "1girl",
+                "style": "vertical",
+                "model": "panel-model",
+                "slot_id": 2,
+            }
+        ),
+    )
+
+    asyncio.run(plugin._test_panel_generate())
+
+    kwargs = plugin._generate_one_custom.await_args.kwargs
+    assert kwargs["model"] == "nai-diffusion-5-full"
+    assert kwargs["custom_artists"] == "artist:b"
+    # 套用槽位时统一走 custom 分支，让槽位画师串（含空串）说了算
+    assert plugin._generate_one_custom.await_args.args[1] == "custom"
+
+
+def test_panel_generate_without_slot_keeps_panel_values(tmp_path, monkeypatch):
+    plugin = _panel_plugin(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "main.web_request",
+        _FakeWebRequest(
+            {"nai_prompt": "1girl", "style": "vertical", "model": "panel-model"}
+        ),
+    )
+
+    asyncio.run(plugin._test_panel_generate())
+
+    kwargs = plugin._generate_one_custom.await_args.kwargs
+    assert kwargs["model"] == "panel-model"
+    assert kwargs["custom_artists"] is None
+    assert plugin._generate_one_custom.await_args.args[1] == "vertical"
+
+
+def test_panel_generate_ignores_slot_when_feature_off(tmp_path, monkeypatch):
+    plugin = _panel_plugin(tmp_path, monkeypatch)
+    plugin.enable_artist_slots = False
+    monkeypatch.setattr(
+        "main.web_request",
+        _FakeWebRequest({"nai_prompt": "1girl", "model": "panel-model", "slot_id": 2}),
+    )
+
+    asyncio.run(plugin._test_panel_generate())
+
+    kwargs = plugin._generate_one_custom.await_args.kwargs
+    assert kwargs["model"] == "panel-model"
+
+
+def test_panel_generate_keeps_explicit_empty_artists(tmp_path, monkeypatch):
+    plugin = _panel_plugin(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "main.web_request",
+        _FakeWebRequest(
+            {"nai_prompt": "1girl", "style": "custom", "custom_artists": ""}
+        ),
+    )
+
+    asyncio.run(plugin._test_panel_generate())
+
+    assert plugin._generate_one_custom.await_args.kwargs["custom_artists"] == ""
+
+
+def test_openai_prompt_skips_global_slot_when_flag_off(tmp_path, monkeypatch):
+    """面板已按选中的槽位传画师串时，不再回退到设置页的生效槽位。"""
+
+    plugin = _make_slot_plugin(tmp_path, monkeypatch, enabled=True)
+    plugin._save_artist_slots(
+        [{"name": "全局画风", "model": "m1", "artists": "artist:global"}]
+    )
+
+    # 默认行为：没有显式画师串时回退到生效槽位
+    assert "artist:global" in plugin._openai_prompt("1girl", "custom")
+
+    # 面板已套用槽位（画师串可能为空）时关闭回退
+    assert "artist:global" not in plugin._openai_prompt(
+        "1girl", "custom", "", use_slot_artists=False
+    )

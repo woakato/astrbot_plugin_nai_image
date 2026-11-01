@@ -406,6 +406,13 @@
       getCachedFields().forEach((key) => {
         const el = els[key];
         if (el && data[key] != null) {
+          if (key === "style" && String(data[key]).startsWith("slot:")) {
+            const option = document.createElement("option");
+            option.dataset.slotOption = "true";
+            option.value = data[key];
+            option.textContent = "正在读取画风槽位";
+            el.appendChild(option);
+          }
           el.value = data[key];
           restored = true;
         }
@@ -656,7 +663,7 @@
 
   // ===== 表单交互 =====
   function toggleCustomArtists() {
-    if (els.style.value === "custom") {
+    if (els.style.value === "custom" || els.style.value.startsWith("slot:")) {
       show(els.customArtistsWrapper);
     } else {
       hide(els.customArtistsWrapper);
@@ -671,7 +678,7 @@
     const body = {
       nai_prompt: els.naiPrompt.value.trim(),
       nl_prompt: els.nlPrompt.value.trim(),
-      style: els.style.value,
+      style: els.style.value.startsWith("slot:") ? "custom" : els.style.value,
       size: els.size.value,
       sampler: els.sampler.value,
       steps: safeInt(els.steps.value, 24),
@@ -1685,7 +1692,13 @@
 
   // ===== 事件绑定 =====
   function bindEvents() {
-    els.model.addEventListener("change", () => {
+    els.model.addEventListener("change", (event) => {
+      if (event.isTrusted && slotState.appliedId) {
+        slotState.appliedId = null;
+        els.style.value = "custom";
+        toggleCustomArtists();
+        refreshSlotStatus();
+      }
       updateSizeOptionsUI();
       updateCostBadge();
     });
@@ -1696,7 +1709,22 @@
       el.addEventListener("input", updateCostBadge);
       el.addEventListener("change", updateCostBadge);
     });
-    els.style.addEventListener("change", toggleCustomArtists);
+    els.style.addEventListener("change", () => {
+      const slot = slotState.slots.find((item) => `slot:${item.id}` === els.style.value);
+      if (slot) applySlotToPanel(slot);
+      else {
+        slotState.appliedId = null;
+        toggleCustomArtists();
+        refreshSlotStatus();
+      }
+    });
+    els.customArtists.addEventListener("input", (event) => {
+      if (event.isTrusted && slotState.appliedId) {
+        slotState.appliedId = null;
+        els.style.value = "custom";
+        refreshSlotStatus();
+      }
+    });
     initFormatToggle();
     els.refFile.addEventListener("change", handleReferenceFileChange);
     els.refRemove.addEventListener("click", clearReferenceImage);
@@ -1759,7 +1787,7 @@
   }
 
   // ===== 画风槽位与法典 =====
-  const slotState = { slots: [], activeId: "1", models: [], enabled: false };
+  const slotState = { slots: [], activeId: "1", models: [], enabled: false, appliedId: null, autoApplied: false };
 
   function slotEls() {
     return {
@@ -1794,6 +1822,7 @@
       ? slotState.models
       : ["nai-diffusion-4-5-full", "nai-diffusion-5-full"];
 
+    renderSlotOptions();
     slotState.slots.forEach((slot) => {
       const row = document.createElement("div");
       row.className = "slot-row";
@@ -1805,6 +1834,8 @@
       name.value = slot.name || "";
       name.addEventListener("input", () => {
         slot.name = name.value;
+        renderSlotOptions();
+        refreshSlotStatus();
       });
 
       const model = document.createElement("select");
@@ -1825,6 +1856,7 @@
       }
       model.addEventListener("change", () => {
         slot.model = model.value;
+        if (String(slotState.appliedId) === String(slot.id)) applySlotToPanel(slot);
       });
 
       const artists = document.createElement("input");
@@ -1834,7 +1866,18 @@
       artists.value = slot.artists || "";
       artists.addEventListener("input", () => {
         slot.artists = artists.value;
+        if (String(slotState.appliedId) === String(slot.id)) applySlotToPanel(slot);
       });
+
+      const actions = document.createElement("div");
+      actions.className = "slot-row-actions";
+
+      const apply = document.createElement("button");
+      apply.type = "button";
+      apply.className = "btn btn-primary";
+      apply.textContent = "应用";
+      apply.title = "把该画风的模型与画师串套到本面板";
+      apply.addEventListener("click", () => applySlotToPanel(slot));
 
       const del = document.createElement("button");
       del.type = "button";
@@ -1842,12 +1885,73 @@
       del.textContent = "删除";
       del.addEventListener("click", () => {
         slotState.slots = slotState.slots.filter((s) => s.id !== slot.id);
+        if (String(slotState.appliedId) === String(slot.id)) {
+          slotState.appliedId = null;
+          els.style.value = "custom";
+        }
         renderSlotRows();
+        refreshSlotStatus();
       });
 
-      row.append(name, model, artists, del);
+      actions.append(apply, del);
+      row.append(name, model, artists, actions);
       e.rows.appendChild(row);
     });
+  }
+
+  function renderSlotOptions() {
+    const selected = els.style.value;
+    els.style.querySelectorAll('[data-slot-option]').forEach((option) => option.remove());
+    if (slotState.enabled) {
+      slotState.slots.forEach((slot) => {
+        const option = document.createElement("option");
+        option.dataset.slotOption = "true";
+        option.value = `slot:${slot.id}`;
+        option.textContent = slot.name || `槽位 ${slot.id}`;
+        els.style.appendChild(option);
+      });
+    }
+    els.style.value = selected;
+  }
+
+  // Keep the selected slot and the visible generation fields in sync.
+  function applySlotToPanel(slot) {
+    const e = slotEls();
+    if (!slot) return;
+    if (!slotState.enabled) {
+      if (e.status) {
+        e.status.textContent =
+          "「启用画风槽位」当前关闭，槽位不参与生图；请到插件设置里打开后再应用。";
+      }
+      return;
+    }
+    const modelValue = String(slot.model || "").trim();
+    if (els.model && modelValue) {
+      if (!Array.from(els.model.options).some((o) => o.value === modelValue)) {
+        const opt = document.createElement("option");
+        opt.value = modelValue;
+        opt.textContent = modelValue;
+        els.model.appendChild(opt);
+      }
+      els.model.value = modelValue;
+    }
+    if (els.style) els.style.value = `slot:${slot.id}`;
+    if (els.customArtists) {
+      els.customArtists.value = String(slot.artists || "");
+      els.customArtists.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    toggleCustomArtists();
+    updateSizeOptionsUI();
+    updateCostBadge();
+    slotState.appliedId = String(slot.id);
+    refreshSlotStatus();
+    if (e.status) {
+      const name = slot.name || `槽位 ${slot.id}`;
+      e.status.textContent =
+        `已套用画风「${name}」：模型 ${modelValue || "默认"}，画师串 ${
+          String(slot.artists || "").trim() ? "已填入" : "为空（不拼画师串）"
+        }。改动上方「画风 / 画师串」即脱离该槽位。`;
+    }
   }
 
   function refreshSlotStatus() {
@@ -1863,9 +1967,15 @@
       (s) => String(s.id) === String(slotState.activeId)
     );
     const activeName = active ? active.name || `槽位 ${active.id}` : slotState.activeId;
+    const applied = slotState.slots.find(
+      (s) => String(s.id) === String(slotState.appliedId)
+    );
+    const appliedText = applied
+      ? `本面板已套用「${applied.name || `槽位 ${applied.id}`}」。`
+      : "点槽位右侧「应用」即可用该画风出图。";
     e.status.textContent =
-      `当前聊天生图画风：${activeName}（槽位 ${slotState.activeId}，共 ${slotState.slots.length} 个）。` +
-      "槽位开启时，这里的面板出图也用槽位画师串，上方「画风」下拉不参与；换画风请到插件设置里改「正式生图启用槽位」。";
+      `聊天生图使用槽位 ${slotState.activeId}（${activeName}），共 ${slotState.slots.length} 个。` +
+      appliedText;
   }
 
   async function loadSlots() {
@@ -1888,6 +1998,14 @@
       slotState.enabled = data.enabled === true;
       renderSlotRows();
       refreshSlotStatus();
+      if (slotState.enabled && !slotState.autoApplied) {
+        slotState.autoApplied = true;
+        const selected = slotState.slots.find((slot) => `slot:${slot.id}` === els.style.value);
+        const active = slotState.slots.find(
+          (s) => String(s.id) === String(slotState.activeId)
+        );
+        if (selected || active) applySlotToPanel(selected || active);
+      }
     } catch (err) {
       if (e.status) e.status.textContent = `读取槽位失败：${err && err.message ? err.message : err}`;
     }
@@ -1900,6 +2018,9 @@
       return;
     }
     try {
+      const appliedIndex = slotState.slots.findIndex(
+        (slot) => String(slot.id) === String(slotState.appliedId)
+      );
       const bridge = await getBridge();
       const resp = await bridge.apiPost("test_panel/slots_save", {
         slots: slotState.slots,
@@ -1913,6 +2034,9 @@
           artists: String(s.artists || ""),
         }));
         renderSlotRows();
+        if (appliedIndex >= 0 && slotState.slots[appliedIndex]) {
+          applySlotToPanel(slotState.slots[appliedIndex]);
+        }
       }
       if (e.status) e.status.textContent = "槽位已保存。";
     } catch (err) {
@@ -2028,6 +2152,9 @@
               artists: String(s.artists || ""),
             }));
             renderSlotRows();
+            slotState.appliedId = null;
+            els.style.value = "custom";
+            toggleCustomArtists();
             refreshSlotStatus();
           }
           if (e.status) e.status.textContent = "已恢复为内置画风。";

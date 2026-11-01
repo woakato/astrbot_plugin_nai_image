@@ -780,9 +780,9 @@ class NAIGenerateImagePlugin(Star):
         self.custom_artists: str = config.get("custom_artists") or ""
         self.model: str = config.get("model") or "nai-diffusion-4-5-full"
         # 正式生图启用的槽位（槽位表本身存在插件数据目录的 artist_slots.json）。
-        self.active_artist_slot: str = str(
-            config.get("active_artist_slot") or "1"
-        ).strip() or "1"
+        self.active_artist_slot: str = (
+            str(config.get("active_artist_slot") or "1").strip() or "1"
+        )
         self._slots_cache: list[dict[str, Any]] | None = None
         self._slots_cache_mtime: float = 0.0
         try:
@@ -1023,9 +1023,7 @@ class NAIGenerateImagePlugin(Star):
         # 法典词库：开启后才做检索、宏展开与转译参考注入。
         self.enable_grimoire: bool = bool(config.get("enable_grimoire", False))
         # 画风槽位：开启后槽位绑定的模型/画师串才覆盖原来的配置。
-        self.enable_artist_slots: bool = bool(
-            config.get("enable_artist_slots", False)
-        )
+        self.enable_artist_slots: bool = bool(config.get("enable_artist_slots", False))
 
         # ==== 陪伴插件直连（extension API）与本地代理开关 ====
         self.enable_companion_link: bool = bool(
@@ -1521,6 +1519,23 @@ class NAIGenerateImagePlugin(Star):
             return slots[0]
         return None
 
+    def _slot_by_id(self, slot_id: Any) -> dict[str, Any] | None:
+        """按编号取槽位；槽位功能关闭或编号非法/不存在时返回 None。"""
+
+        if not self._artist_slots_enabled():
+            return None
+        raw = str(slot_id if slot_id is not None else "").strip()
+        if not raw:
+            return None
+        try:
+            wanted = int(raw)
+        except (TypeError, ValueError):
+            return None
+        for slot in self._load_artist_slots():
+            if slot["id"] == wanted:
+                return slot
+        return None
+
     def _slot_model(self) -> str:
         """当前槽位绑定的模型（未启用槽位或未绑定则为空串）。"""
 
@@ -1579,6 +1594,7 @@ class NAIGenerateImagePlugin(Star):
             logger.info(f"{LOG_TAG} 正式生图槽位已切换为 {slot_id}")
         except Exception as exc:
             logger.warning(f"{LOG_TAG} 写入生效槽位失败: {exc!r}")
+
     def _migrate_legacy_data_dir(self) -> None:
         """把旧版工作目录下的数据整体迁移到 AstrBot 插件数据目录。"""
 
@@ -2356,6 +2372,7 @@ class NAIGenerateImagePlugin(Star):
         prompt: str,
         style: str,
         custom_artists: str | None = None,
+        use_slot_artists: bool = True,
     ) -> str:
         """把画师串作为风格前缀拼进 OpenAI 兼容格式的 prompt。
 
@@ -2367,6 +2384,7 @@ class NAIGenerateImagePlugin(Star):
             prompt: 已转译/合并后的主体提示词。
             style: NAI 风格键（vertical / custom / ...）。
             custom_artists: 自定义画师串覆盖（面板传入），可选。
+            use_slot_artists: Whether to inherit the active chat slot's artists.
 
         Returns:
             拼接了画师串的最终 prompt 文本。
@@ -2381,7 +2399,9 @@ class NAIGenerateImagePlugin(Star):
                 DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
             )
         # 槽位绑定的画师串优先级高于风格预设，但低于本次显式指定的画师串。
-        if custom_artists is None:
+        # 面板已按明确选中的槽位套用时传 use_slot_artists=False 关掉这层回退，
+        # 否则「该槽位画师串为空」会被全局生效槽位的画师串顶掉。
+        if use_slot_artists and custom_artists is None:
             try:
                 slot_artists = self._slot_artists()
             except Exception:
@@ -2914,11 +2934,17 @@ class NAIGenerateImagePlugin(Star):
                     image_model=starbridge_tool_model,
                 )
             except asyncio.TimeoutError:
-                return [], "starbridge | 参考图编码超时，未继续生图；编码可能已计费，请确认后再试。"
+                return (
+                    [],
+                    "starbridge | 参考图编码超时，未继续生图；编码可能已计费，请确认后再试。",
+                )
             except StarbridgeError as exc:
                 return [], "starbridge | " + str(exc)
             except (aiohttp.ClientError, OSError):
-                return [], "starbridge | 参考图处理请求中断，未自动重试；请确认编码费用后再试。"
+                return (
+                    [],
+                    "starbridge | 参考图处理请求中断，未自动重试；请确认编码费用后再试。",
+                )
             endpoint, payload = prepared.endpoint, prepared.payload
             headers["Accept"] = "application/json"
             request_options["allow_redirects"] = False
@@ -3488,12 +3514,16 @@ class NAIGenerateImagePlugin(Star):
         except Exception:
             return error_response("请求体解析失败", status_code=400)
 
-        nai_prompt = normalize_prompt(self._expand_grimoire(body.get("nai_prompt") or ""))
+        nai_prompt = normalize_prompt(
+            self._expand_grimoire(body.get("nai_prompt") or "")
+        )
         nl_prompt = normalize_prompt(self._expand_grimoire(body.get("nl_prompt") or ""))
         if not nai_prompt and not nl_prompt:
             return error_response("请至少填写一个提示词框", status_code=400)
 
-        style = body.get("style") or self.image_style
+        # 面板显式选中的画风槽位：直接用该槽位的模型与画师串
+        _slot = self._slot_by_id(body.get("slot_id"))
+        style = "custom" if _slot else (body.get("style") or self.image_style)
         size = self._resolve_direct_size(str(body.get("size") or self.image_size))
 
         # 解析可选覆盖参数（与正式生成一致）
@@ -3549,8 +3579,10 @@ class NAIGenerateImagePlugin(Star):
                 sampler=_opt_str("sampler"),
                 noise_schedule=_opt_str("noise_schedule"),
                 negative=_opt_str("negative"),
-                model=_opt_str("model"),
-                custom_artists=_opt_str("custom_artists"),
+                model=(_slot["model"] or None) if _slot else _opt_str("model"),
+                custom_artists=(
+                    _slot["artists"] if _slot else _opt_str("custom_artists")
+                ),
                 token_override=self._trial_key,
                 character_preset="",  # 面板独立，不合并 settings 的角色预设
                 enable_template=False,  # 面板独立，不套用 settings 的模板
@@ -3781,7 +3813,6 @@ class NAIGenerateImagePlugin(Star):
             }
         )
 
-
     async def _test_panel_get_config(self) -> Any:
         """Web API: 返回当前插件配置（脱敏 token）。"""
         return json_response(
@@ -3848,12 +3879,16 @@ class NAIGenerateImagePlugin(Star):
         except Exception:
             return error_response("请求体解析失败", status_code=400)
 
-        nai_prompt = normalize_prompt(self._expand_grimoire(body.get("nai_prompt") or ""))
+        nai_prompt = normalize_prompt(
+            self._expand_grimoire(body.get("nai_prompt") or "")
+        )
         nl_prompt = normalize_prompt(self._expand_grimoire(body.get("nl_prompt") or ""))
         if not nai_prompt and not nl_prompt:
             return error_response("请至少填写一个提示词框", status_code=400)
 
-        style = body.get("style") or self.image_style
+        # 面板显式选中的画风槽位：直接用该槽位的模型与画师串
+        _slot = self._slot_by_id(body.get("slot_id"))
+        style = "custom" if _slot else (body.get("style") or self.image_style)
         size = self._resolve_direct_size(str(body.get("size") or self.image_size))
 
         # 解析可选覆盖参数
@@ -3925,8 +3960,10 @@ class NAIGenerateImagePlugin(Star):
                     sampler=_opt_str("sampler"),
                     noise_schedule=_opt_str("noise_schedule"),
                     negative=_opt_str("negative"),
-                    model=_opt_str("model"),
-                    custom_artists=_opt_str("custom_artists"),
+                    model=(_slot["model"] or None) if _slot else _opt_str("model"),
+                    custom_artists=(
+                        _slot["artists"] if _slot else _opt_str("custom_artists")
+                    ),
                     character_preset="",  # 面板独立，不合并 settings 的角色预设
                     enable_template=False,  # 面板独立，不套用 settings 的模板
                     enable_translate=False,  # 转译已在上方完成
@@ -3979,7 +4016,9 @@ class NAIGenerateImagePlugin(Star):
         except Exception:
             return error_response("请求体解析失败", status_code=400)
 
-        nai_prompt = normalize_prompt(self._expand_grimoire(body.get("nai_prompt") or ""))
+        nai_prompt = normalize_prompt(
+            self._expand_grimoire(body.get("nai_prompt") or "")
+        )
         nl_prompt = normalize_prompt(self._expand_grimoire(body.get("nl_prompt") or ""))
 
         # director-tools 图片处理动作（§8）：指定时强制使用 director-tools 模型，
@@ -4109,9 +4148,11 @@ class NAIGenerateImagePlugin(Star):
             scale = float(raw_scale) if raw_scale not in (None, "") else None
         except (TypeError, ValueError):
             scale = None
-        style = body.get("style") or self.image_style
-        custom_artists = _opt_str("custom_artists")
-        model = _opt_str("model")
+        # 面板显式选中的画风槽位：模型与画师串都取该槽位
+        _slot = self._slot_by_id(body.get("slot_id"))
+        style = "custom" if _slot else (body.get("style") or self.image_style)
+        custom_artists = _slot["artists"] if _slot else _opt_str("custom_artists")
+        model = (_slot["model"] or None) if _slot else _opt_str("model")
         director_caption = _opt_str("director_caption")
 
         # 逐图精准参考描述（§8.4）：面板传 base_caption 数组，与参考图按下标
@@ -4159,7 +4200,9 @@ class NAIGenerateImagePlugin(Star):
             ", ".join([p for p in [nai_prompt, translated_nl] if p])
         )
         # 画师串作为风格前缀拼进 OpenAI 兼容格式的 prompt
-        full_prompt = self._openai_prompt(base_prompt, style, custom_artists)
+        full_prompt = self._openai_prompt(
+            base_prompt, style, custom_artists, use_slot_artists=False
+        )
 
         merge_info = {
             "nai_prompt": nai_prompt,
@@ -4576,9 +4619,7 @@ class NAIGenerateImagePlugin(Star):
         语言片段交给 LLM，再按原位置和现有 NAI 标签合并。``apply_outfit``
         用于区分启用服装缓存逻辑的 Bot 流程与不启用该逻辑的 WebUI 流程。
         """
-        raw_prompt = normalize_prompt(
-            self._expand_grimoire(prompt)
-        )
+        raw_prompt = normalize_prompt(self._expand_grimoire(prompt))
         current_mode = getattr(self, "translate_mode", None)
         # 兼容只设置旧版 enable_translate 布尔属性的实例和测试桩。
         if current_mode is None:
@@ -6173,7 +6214,11 @@ class NAIGenerateImagePlugin(Star):
 
         if style_slot is None and style not in IMAGE_STYLES and style != "custom":
             logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 未知风格: {style}")
-            slot_names = [s["name"] for s in self._load_artist_slots()] if self._artist_slots_enabled() else []
+            slot_names = (
+                [s["name"] for s in self._load_artist_slots()]
+                if self._artist_slots_enabled()
+                else []
+            )
             choices = slot_names + list(IMAGE_STYLES.keys())
             yield f"未知风格: {style}\n可选: {', '.join(choices)}"
             return
@@ -6558,7 +6603,9 @@ class NAIGenerateImagePlugin(Star):
             query(string): 检索关键词（如：死库水、旗袍、自拍、丝袜、动画画风），支持空格分隔多个词。
         """
         if not self._grimoire_enabled():
-            return "内置法典词库未启用，请在插件设置中开启「启用内置法典词库」后再使用。"
+            return (
+                "内置法典词库未启用，请在插件设置中开启「启用内置法典词库」后再使用。"
+            )
         if not getattr(self, "enable_llm_tool", False):
             return "生图工具已被管理员禁用，法典检索当前不可用。"
         hits = await asyncio.to_thread(
@@ -6591,7 +6638,7 @@ class NAIGenerateImagePlugin(Star):
         raw = str(event.message_str or "").strip()
         for prefix in ("/法典", "法典", "/grimoire", "grimoire", "/查法典", "查法典"):
             if raw.startswith(prefix):
-                raw = raw[len(prefix):].strip()
+                raw = raw[len(prefix) :].strip()
                 break
         if not raw:
             yield event.plain_result(
@@ -6613,4 +6660,3 @@ class NAIGenerateImagePlugin(Star):
                 f"{h['clean_tags'][:260]}"
             )
         yield event.plain_result("\n".join(lines))
-
