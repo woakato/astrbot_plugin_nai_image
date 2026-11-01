@@ -13,12 +13,14 @@
 
 使用星桥时，在插件设置中选择：
 
-1. **调用模式**：`OpenAI 兼容（/v1/images）`。
-2. **生图接口适配**：`星桥（Almoon）`。
-3. **接口地址**：`https://api.almoons.xyz` 或 `https://aiapi.almoons.xyz`，密钥填本站 NewAPI Key。
+1. **生图接入方式**：`第三方接口（OpenAI / 星桥）`。
+2. **生图服务**：`星桥（Almoon）`。
+3. **星桥接口地址**：`https://api.almoons.xyz` 或 `https://aiapi.almoons.xyz`，**星桥 API Key** 填本站 NewAPI Key。
 4. **模型**：选择 `nai-diffusion-5-full`、`nai-diffusion-5-curated`、`nai-diffusion-4-5-full` 或 `nai-diffusion-4-5-curated`。
 
-`openai_api_profile` 默认是 `compatible`；已有配置不需要迁移，也不会根据域名自动切换协议。只有显式选择 `starbridge` 才使用原生 `/ai/` 接口。原有传统 GET、任务接口和其他 OpenAI 兼容站点继续使用原来的调用格式与重试规则。
+OpenAI 兼容接口与星桥分别保存地址和密钥。切换「生图服务」后只显示所选服务的配置，保存后聊天、陪伴联动和测试面板均使用该服务的凭据；另一套配置仍会保留。首次升级时，原先选用星桥的共享地址和密钥会自动移到星桥配置，OpenAI 用户的原有配置保持不变。切到未配置的服务会提示填写地址，不会使用另一套凭据或自动改用直连。
+
+`openai_api_profile` 默认是 `compatible`，不会根据域名自动切换协议。只有显式选择 `starbridge` 才使用原生 `/ai/` 接口。原有传统 GET、任务接口和其他 OpenAI 兼容站点继续使用原来的调用格式与重试规则。
 
 | 插件已有入口 | 星桥适配行为 |
 | --- | --- |

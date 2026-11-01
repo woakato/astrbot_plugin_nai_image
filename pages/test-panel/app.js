@@ -100,6 +100,7 @@
   let defaultDirectorStrength = 1;
   // 当前调用格式："direct" | "openai"
   let currentCallFormat = "direct";
+  let upstreamLabel = "OpenAI 兼容";
   // 分段切换按钮引用
   let formatToggleBtns = [];
   // OpenAI 兼容模型列表（后端配置接口下发，用于切换格式时替换模型下拉项）
@@ -473,16 +474,27 @@
         defaultDirectorStrength = directorStrength;
       }
       // OpenAI 兼容格式配置状态（仅在 OpenAI 模式下展示）
+      const starbridge = config.openai_api_profile === "starbridge";
+      upstreamLabel = starbridge ? "星桥（Almoon）" : "OpenAI 兼容";
+      const upstreamEndpoint = starbridge ? "/ai" : "/v1/images";
+      const upstreamButton = els.callFormat.querySelector('[data-format="openai"]');
+      if (upstreamButton) {
+        upstreamButton.querySelector(".format-toggle-label").textContent = upstreamLabel;
+        upstreamButton.querySelector(".format-toggle-sub").textContent =
+          upstreamEndpoint + " 端点";
+      }
       if (els.openaiConfigStatus && currentCallFormat === "openai") {
+        els.callFormatHint.textContent =
+          `使用插件设置中的 ${upstreamLabel} 地址和密钥。`;
         show(els.openaiConfigStatus);
         if (config.openai_available) {
           els.openaiConfigStatusText.textContent =
-            "OpenAI 接口已配置：" + (config.openai_api_base_url || "");
+            upstreamLabel + " 已配置：" + (config.openai_api_base_url || "");
           els.openaiConfigStatus.querySelector(".status-dot").className =
             "status-dot ok";
         } else {
           els.openaiConfigStatusText.textContent =
-            "OpenAI 接口未配置：请在插件设置填写 openai_api_base_url 与 openai_api_key";
+            upstreamLabel + " 未配置：请在插件设置填写该服务的接口地址和 API Key";
           els.openaiConfigStatus.querySelector(".status-dot").className =
             "status-dot error";
         }
@@ -1005,7 +1017,7 @@
     els.loadingText.textContent = body.director_action
       ? "正在以 director-tools 处理图片..."
       : body.call_format === "openai"
-        ? `正在以 OpenAI 兼容格式生成${refCountText}...`
+        ? `正在通过 ${upstreamLabel} 生成${refCountText}...`
         : "正在转译 + 生成图片...";
     setLoading(true);
     hideError();
@@ -1161,7 +1173,7 @@
       galgame: "GalGame风",
       custom: "自定义",
     };
-    const formatLabel = requestBody.call_format === "openai" ? "OpenAI" : "NAI直连";
+    const formatLabel = requestBody.call_format === "openai" ? upstreamLabel : "NAI直连";
     const metaText = `${styleNames[requestBody.style] || requestBody.style} · ${sizeDisplayName(requestBody.size)} · ${images.length} UNIT · ${formatLabel}`;
     setBadge(els.resultMeta, metaText, "badge-tech-success");
     show(els.resultMeta);
@@ -1288,7 +1300,7 @@
       show(els.charListWrap);
       if (els.openaiConfigStatus) show(els.openaiConfigStatus);
       els.callFormatHint.textContent =
-        "请求按 OpenAI 兼容格式发往配置的 /v1/images 端点，支持多张参考图、种子与图片处理动作。";
+        `使用插件设置中的 ${upstreamLabel} 地址和密钥。`;
       els.trialBtn.disabled = true;
       els.trialBtn.title = "试用生成仅支持 NAI 直连格式";
     } else {

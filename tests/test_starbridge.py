@@ -110,7 +110,9 @@ def test_native_base_url_rejects_embedded_credentials_and_non_http_urls(base):
 
 def test_existing_configuration_defaults_to_compatible_profile():
     schema = json.loads(
-        (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text()
+        (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert schema["openai_api_profile"]["default"] == "compatible"
     value = plugin("compatible")

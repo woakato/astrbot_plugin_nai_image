@@ -2,15 +2,15 @@
     "call_mode": {
         "type": "string",
         "default": "direct",
-        "description": "调用模式",
-        "hint": "决定聊天调用（指令 / 陪伴联动）走哪套生图后端。",
+        "description": "生图接入方式",
+        "hint": "聊天指令和陪伴联动使用此方式。选择第三方接口后，再选择 OpenAI 兼容或星桥。",
         "options": [
             "direct",
             "openai"
         ],
         "labels": [
-            "传统 GET（nai.sta1n.cn）",
-            "OpenAI 兼容（/v1/images）"
+            "nai.sta1n.cn 直连",
+            "第三方接口（OpenAI / 星桥）"
         ],
         "obvious": true
     },
@@ -79,14 +79,14 @@
     "openai_api_profile": {
         "type": "string",
         "default": "compatible",
-        "description": "生图接口适配",
-        "hint": "默认保留现有 OpenAI 兼容接口行为。星桥适配使用本站 NAI 原生接口：地址填写 https://api.almoons.xyz 或 https://aiapi.almoons.xyz，密钥使用 NewAPI Key。Vibe 参考会逐图进行付费编码；已提交的编码和生图请求不自动重试。",
+        "description": "生图服务",
+        "hint": "各服务分别保存接口地址和密钥，切换后使用所选服务的配置。",
         "options": [
             "compatible",
             "starbridge"
         ],
         "labels": [
-            "原有 OpenAI 兼容接口",
+            "OpenAI 兼容接口",
             "星桥（Almoon）"
         ],
         "condition": {
@@ -96,25 +96,53 @@
     "openai_api_base_url": {
         "type": "string",
         "default": "",
-        "description": "OpenAI 兼容生图接口地址",
-        "hint": "例如 https://api1.syuan.org。聊天调用 / 陪伴联动 / 面板「OpenAI 兼容」格式使用此地址。",
+        "description": "OpenAI 接口地址",
+        "hint": "填写服务商提供的地址，例如 https://api1.syuan.org/v1。仅供 OpenAI 兼容接口使用。",
         "condition": {
-            "call_mode": "openai"
+            "call_mode": "openai",
+            "openai_api_profile": "compatible"
         }
     },
     "openai_api_key": {
         "type": "string",
         "default": "",
-        "description": "OpenAI 兼容接口密钥",
-        "hint": "OpenAI 兼容格式的 Bearer Token。",
+        "description": "OpenAI API Key",
+        "hint": "填写该 OpenAI 兼容服务商提供的 API Key。",
         "condition": {
-            "call_mode": "openai"
+            "call_mode": "openai",
+            "openai_api_profile": "compatible"
         }
+    },
+    "starbridge_api_base_url": {
+        "type": "string",
+        "default": "",
+        "description": "星桥接口地址",
+        "hint": "填写 https://api.almoons.xyz 或 https://aiapi.almoons.xyz。仅供星桥使用。",
+        "condition": {
+            "call_mode": "openai",
+            "openai_api_profile": "starbridge"
+        }
+    },
+    "starbridge_api_key": {
+        "type": "string",
+        "default": "",
+        "description": "星桥 API Key",
+        "hint": "填写星桥的 NewAPI Key。Vibe 参考会逐图付费编码；编码与生图请求均不自动重试。",
+        "condition": {
+            "call_mode": "openai",
+            "openai_api_profile": "starbridge"
+        }
+    },
+    "_api_credentials_version": {
+        "type": "int",
+        "default": 0,
+        "description": "接口凭据配置版本",
+        "invisible": true
     },
     "openai_api_model": {
         "type": "string",
         "default": "nai-diffusion-5-full",
-        "description": "OpenAI 兼容接口模型名",
+        "description": "第三方接口生图模型",
         "hint": "接口必填字段。nai-diffusion-5-full 为文档推荐的通用动漫插画模型；精准参考支持 nai-diffusion-4-5 与 nai-diffusion-5 系列，其他模型会自动回退 4.5。director-tools（图片处理）由面板动作自动选用，无需在此配置。 星桥适配仅支持 V4.5/V5 的 Full/Curated；Vibe 和精准参考仅限 V4.5。",
         "options": [
             "nai-diffusion-5-full",
@@ -357,48 +385,57 @@
     "openai_director_caption": {
         "type": "string",
         "default": "character&style",
-        "description": "精准参考描述",
-        "hint": "精准参考（director 模式）的默认 base_caption（§6），决定从参考图保留哪些信息，常见取值：character&style、character、style；按顺序应用到全部参考图，面板可逐张覆盖。",
+        "description": "精准参考保留内容",
+        "hint": "选择从参考图保留角色、画风，或同时保留两者。测试面板可逐张调整。",
         "options": [
             "character&style",
             "character",
             "style"
         ],
+        "labels": [
+            "角色和画风",
+            "仅角色",
+            "仅画风"
+        ],
         "condition": {
-            "call_mode": "openai"
+            "call_mode": "openai",
+            "openai_reference_mode": "director"
         }
     },
     "openai_vibe_strength": {
         "type": "float",
         "default": 0.6,
         "description": "Vibe 参考权重",
-        "hint": "Vibe 参考模式下每张参考图的默认权重（reference_strength_multiple，0-1，§5）：越大越受参考图影响。面板逐图设置与 LLM 工具/陪伴联动未显式给强度时使用此值。",
+        "hint": "范围 0-1，越大越接近参考图。默认 0.6；测试面板可逐张调整。",
         "min": 0,
         "max": 1,
         "condition": {
-            "call_mode": "openai"
+            "call_mode": "openai",
+            "openai_reference_mode": "vibe"
         }
     },
     "openai_director_strength": {
         "type": "float",
         "default": 1.0,
         "description": "精准参考权重",
-        "hint": "精准参考（director）模式下每张参考图的默认主权重（director_reference_strength_values，0-1，§8）。保持角色建议 0.9-1.0；面板逐图设置与聊天/陪伴调用未显式给强度时使用此值。",
+        "hint": "范围 0-1，越大越接近参考图。保持角色外观建议 0.9-1.0。",
         "min": 0,
         "max": 1,
         "condition": {
-            "call_mode": "openai"
+            "call_mode": "openai",
+            "openai_reference_mode": "director"
         }
     },
     "openai_director_secondary_strength": {
         "type": "float",
         "default": 0.5,
         "description": "精准参考次级特征权重",
-        "hint": "精准参考的次级特征强度（director_reference_secondary_strength_values，0-1，§8 推荐区间 0.35-0.7）：越高越强地保留参考图的画风细节。",
+        "hint": "控制画风细节的保留程度，建议 0.35-0.7。不确定时保持默认 0.5。",
         "min": 0,
         "max": 1,
         "condition": {
-            "call_mode": "openai"
+            "call_mode": "openai",
+            "openai_reference_mode": "director"
         }
     },
     "openai_director_fallback_images": {
@@ -413,7 +450,8 @@
             "webp"
         ],
         "condition": {
-            "call_mode": "openai"
+            "call_mode": "openai",
+            "openai_reference_mode": "director"
         }
     },
     "openai_seed": {
@@ -434,7 +472,8 @@
         "min": 0,
         "max": 3,
         "condition": {
-            "call_mode": "openai"
+            "call_mode": "openai",
+            "openai_api_profile": "compatible"
         }
     },
     "enable_template": {

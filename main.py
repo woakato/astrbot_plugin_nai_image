@@ -521,8 +521,8 @@ def _format_generate_error(reason: str) -> str:
         "no_token": "❌ 插件未配置 image_gen_key，请先在插件管理面板填入 token。",
         "no_session": "❌ 插件 session 未初始化，请重载插件。",
         "openai_not_configured": (
-            "❌ 未配置 OpenAI 兼容生图接口地址（openai_api_base_url），"
-            "请先在插件设置中填写。"
+            "❌ 未配置当前生图服务的接口地址，"
+            "请在插件设置中选择对应的生图服务并填写地址。"
         ),
         "web_job_failed": (
             "🚫 上游生成任务失败（失败任务的点数会自动退回），请查看日志或稍后重试。"
@@ -558,7 +558,7 @@ def _format_generate_error(reason: str) -> str:
         detail = reason.split(" | ", 1)[1] if " | " in reason else ""
         _status_hints = {
             400: "参数错误（JSON / 模型 / 尺寸 / 步数 / 图片参数），请按提示修正字段",
-            401: "API Key 无效、缺失或过期，请检查 openai_api_key",
+            401: "API Key 无效、缺失或过期，请检查当前生图服务的 API Key",
             403: "当前 Key 没有使用权限，请联系服务管理员",
             408: "请求超时",
             429: "请求过于频繁或余额不足，请稍后重试或充值",
@@ -706,17 +706,25 @@ def migrate_legacy_translate_config(config: dict) -> str | None:
 
 
 def migrate_invalid_call_mode(config: dict) -> str | None:
-    """归一化非法或被污染的 call_mode 并写回 dict。
+    """Repair invalid modes and legacy defaults without overriding service selection.
 
-    call_mode 为 "openai" 但未配置 OpenAI 兼容接口地址时（新版本默认值
-    被污染的典型表现），回退为 "direct"，避免生图请求打到空地址；其余
-    非法值同样回退 "direct"，与运行时归一化行为一致。已完整配置 OpenAI
-    站点的配置不受影响。
+    Args:
+        config: Plugin configuration, updated in place if a repair is needed.
 
-    返回迁移后的字符串值；无需迁移返回 None。
+    Returns:
+        The repaired mode, or None when unchanged. Configurations with separated
+        credentials keep their selected mode even when its address is empty.
     """
     mode = str(config.get("call_mode") or "").strip()
-    if mode == "openai" and not str(config.get("openai_api_base_url") or "").strip():
+    profile = str(config.get("openai_api_profile") or "compatible").strip().casefold()
+    base_url = config.get("openai_api_base_url")
+    if profile == "starbridge":
+        base_url = config.get("starbridge_api_base_url") or base_url
+    if (
+        mode == "openai"
+        and not str(base_url or "").strip()
+        and not config.get("_api_credentials_version")
+    ):
         config["call_mode"] = "direct"
         return "direct"
     if mode not in ("direct", "openai"):
@@ -822,6 +830,28 @@ class NAIGenerateImagePlugin(Star):
         # 先归一化被污染/非法的 call_mode（如 openai 但未配置接口地址），再读取；
         # 迁移结果在 init 末尾统一持久化。
         healed_call_mode = migrate_invalid_call_mode(config)
+        self.openai_api_profile: str = (
+            str(config.get("openai_api_profile") or "compatible").strip().casefold()
+        )
+        if self.openai_api_profile not in ("compatible", "starbridge"):
+            self.openai_api_profile = "compatible"
+        credential_updates: dict[str, Any] = {}
+        if not config.get("_api_credentials_version"):
+            # Move the old shared pair once, before users can switch services.
+            if self.openai_api_profile == "starbridge" and not any(
+                str(config.get(key) or "").strip()
+                for key in ("starbridge_api_base_url", "starbridge_api_key")
+            ):
+                credential_updates.update(
+                    starbridge_api_base_url=config.get("openai_api_base_url") or "",
+                    starbridge_api_key=config.get("openai_api_key") or "",
+                    openai_api_base_url="",
+                    openai_api_key="",
+                )
+            credential_updates["_api_credentials_version"] = 1
+            config.update(credential_updates)
+        if healed_call_mode is not None:
+            credential_updates["call_mode"] = healed_call_mode
         self.call_mode: str = (config.get("call_mode") or "direct").strip()
         if self.call_mode not in ("direct", "openai"):
             self.call_mode = "direct"
@@ -848,15 +878,16 @@ class NAIGenerateImagePlugin(Star):
             self.upstream_billing_sync_interval = 10
         self._upstream_billing_task: asyncio.Task | None = None
         self._upstream_billing_last_error = ""
-        # OpenAI 兼容格式（可配置的第三方 OpenAI 兼容生图站点）
-        self.openai_api_base_url: str = (
-            (config.get("openai_api_base_url") or "").strip().rstrip("/")
+        # Keep the existing runtime attributes bound to the selected service.
+        credential_prefix = (
+            "starbridge" if self.openai_api_profile == "starbridge" else "openai"
         )
-        self.openai_api_key: str = (config.get("openai_api_key") or "").strip()
-        # Explicit opt-in: existing configurations retain their original wire format.
-        self.openai_api_profile: str = (
-            config.get("openai_api_profile") or "compatible"
-        ).strip().casefold()
+        self.openai_api_base_url: str = (
+            (config.get(f"{credential_prefix}_api_base_url") or "").strip().rstrip("/")
+        )
+        self.openai_api_key: str = (
+            config.get(f"{credential_prefix}_api_key") or ""
+        ).strip()
         # model 为接口必填字段，留空时回退文档推荐的 nai-diffusion-5-full。
         self.openai_api_model: str = (
             config.get("openai_api_model") or "nai-diffusion-5-full"
@@ -943,11 +974,12 @@ class NAIGenerateImagePlugin(Star):
         if (
             migrate_legacy_translate_config(config) is not None
             or healed_call_mode is not None
+            or credential_updates
         ):
             try:
-                self._persist_config_migrations()
+                self._persist_config_migrations(credential_updates)
             except Exception as exc:
-                logger.warning(f"{LOG_TAG} 插件配置迁移写回失败: {exc}")
+                logger.warning(f"{LOG_TAG} Failed to persist config migrations: {exc}")
         self.translate_mode: str = normalize_translate_mode(
             config.get("enable_translate", TRANSLATE_MODE_OFF)
         )
@@ -1105,11 +1137,11 @@ class NAIGenerateImagePlugin(Star):
             return ".webp"
         return ".img"
 
-    def _persist_config_migrations(self) -> None:
-        """把磁盘插件配置中的旧版/被污染配置项迁移为当前格式并保存。
+    def _persist_config_migrations(self, updates: dict[str, Any] | None = None) -> None:
+        """Persist credential separation and legacy configuration repairs.
 
-        目前包含：旧版布尔 enable_translate -> 字符串三态；被污染或非法的
-        call_mode -> direct。写回失败不影响本次运行。
+        Args:
+            updates: Credential migration values computed during initialization.
         """
         import json as _json
         import os as _os
@@ -1129,6 +1161,10 @@ class NAIGenerateImagePlugin(Star):
             schema=schema,
         )
         migrated = False
+        for key, value in (updates or {}).items():
+            if plugin_cfg.get(key) != value:
+                plugin_cfg[key] = value
+                migrated = True
         if isinstance(plugin_cfg.get("enable_translate"), bool):
             plugin_cfg["enable_translate"] = normalize_translate_mode(
                 plugin_cfg["enable_translate"]
@@ -3786,6 +3822,7 @@ class NAIGenerateImagePlugin(Star):
                 "image_size_options": IMAGE_SIZES,
                 "default_negative": DEFAULT_NEGATIVE,
                 "openai_api_base_url": self.openai_api_base_url or "未配置",
+                "openai_api_profile": getattr(self, "openai_api_profile", "compatible"),
                 "openai_api_model": self.openai_api_model or "未配置",
                 "openai_available": bool(
                     self.openai_api_base_url and self.openai_api_key
@@ -3958,7 +3995,7 @@ class NAIGenerateImagePlugin(Star):
 
         if not self.openai_api_base_url:
             return error_response(
-                "未配置 OpenAI 兼容格式地址（openai_api_base_url），请在插件设置中填写。",
+                "未配置当前生图服务的接口地址，请在插件设置中选择对应服务并填写地址。",
                 status_code=400,
             )
 
@@ -5134,7 +5171,7 @@ class NAIGenerateImagePlugin(Star):
         missing = ""
         if self.call_mode == "openai":
             if not self.openai_api_base_url:
-                missing = "openai_api_base_url"
+                missing = "当前生图服务的接口地址"
         else:
             if not self.image_gen_key:
                 missing = "image_gen_key"
@@ -5285,7 +5322,7 @@ class NAIGenerateImagePlugin(Star):
         missing = ""
         if self.call_mode == "openai":
             if not self.openai_api_base_url:
-                missing = "openai_api_base_url"
+                missing = "当前生图服务的接口地址"
         else:
             if not self.image_gen_key:
                 missing = "image_gen_key"
@@ -5601,7 +5638,7 @@ class NAIGenerateImagePlugin(Star):
             if not self.openai_api_base_url:
                 logger.warning(f"{LOG_TAG} [cmd:image] OpenAI 接口未配置")
                 yield event.plain_result(
-                    "未配置 OpenAI 兼容生图接口（openai_api_base_url），请先在插件配置中填写。"
+                    "未配置当前生图服务的接口地址，请在插件设置中选择对应服务并填写地址。"
                 )
                 return
         else:
@@ -6126,7 +6163,7 @@ class NAIGenerateImagePlugin(Star):
         if self.call_mode == "openai":
             if not self.openai_api_base_url:
                 logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] OpenAI 接口未配置")
-                yield "生成失败，未配置 OpenAI 兼容生图接口，请告知用户先在插件配置中填写 openai_api_base_url。"
+                yield "生成失败，未配置当前生图服务的接口地址，请告知用户在插件设置中选择对应服务并填写地址。"
                 return
         else:
             if not self.image_gen_key:
