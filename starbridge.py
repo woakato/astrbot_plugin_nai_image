@@ -1,4 +1,4 @@
-"""Opt-in adapter for Starbridge's native NovelAI image endpoints."""
+"""Native NovelAI adapter for the official service and Starbride."""
 
 import asyncio
 import base64
@@ -7,6 +7,7 @@ import io
 import json
 import math
 import secrets
+import zipfile
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -148,7 +149,7 @@ def _validate_generation(params: dict, prompt: str, width: int, height: int) -> 
     if width < 64 or height < 64 or width % 64 or height % 64:
         raise StarbridgeError("生图宽高必须至少为 64，且为 64 的整数倍。")
     if width * height > MAX_PIXELS:
-        raise StarbridgeError("星桥生图面积不能超过 3145728 像素，请减小尺寸。")
+        raise StarbridgeError("NovelAI 生图面积不能超过 3145728 像素，请减小尺寸。")
     if params.get("sampler", "k_euler_ancestral") not in SAMPLERS:
         raise StarbridgeError(
             "当前采样器不受 V4.5/V5 支持，请选择 Euler、DPM++、DPM2 或 LMS。"
@@ -192,7 +193,7 @@ async def prepare_starbridge_request(
     model = MODEL_ALIASES.get(model, model)
     if model not in MODELS:
         raise StarbridgeError(
-            "星桥适配仅支持 V4.5/V5 的 Full、Curated 生图型号，请检查模型设置。"
+            "NovelAI 原生接入仅支持 V4.5/V5 的 Full、Curated 生图型号，请检查模型设置。"
         )
     try:
         width, height = (int(value) for value in payload["size"].split("x", 1))
@@ -414,3 +415,30 @@ def normalize_starbridge_response(body: object) -> dict:
             and image["image"]
         ]
     }
+
+
+def decode_native_response(raw: bytes) -> dict:
+    """Accept both the official ZIP response and native JSON images."""
+    if not raw.startswith(b"PK"):
+        return json.loads(raw)
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            files = [
+                item
+                for item in archive.infolist()
+                if item.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+            ]
+            if (
+                not files
+                or len(files) > 6
+                or sum(item.file_size for item in files) > 128 * 1024 * 1024
+            ):
+                raise ValueError("Invalid image archive")
+            return {
+                "images": [
+                    {"image": base64.b64encode(archive.read(item)).decode("ascii")}
+                    for item in files
+                ]
+            }
+    except (zipfile.BadZipFile, ValueError, RuntimeError) as error:
+        raise StarbridgeError("NovelAI 返回的图片压缩包无效。") from error

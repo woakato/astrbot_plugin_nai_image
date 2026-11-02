@@ -77,7 +77,7 @@ class NAIImageCompanionExtensionAPI:
         """返回插件直连状态快照，供陪伴插件面板与状态查询使用。"""
         plugin = self._plugin
         call_mode = str(getattr(plugin, "call_mode", "direct") or "direct")
-        if call_mode == "openai":
+        if call_mode in ("openai", "novelai"):
             # OpenAI 兼容模式只需要接口地址；直连 token 不参与生图。
             credential_configured = bool(getattr(plugin, "openai_api_base_url", ""))
         else:
@@ -96,7 +96,7 @@ class NAIImageCompanionExtensionAPI:
             "default_model": slot_model
             or (
                 getattr(plugin, "openai_api_model", "")
-                if call_mode == "openai"
+                if call_mode in ("openai", "novelai")
                 else getattr(plugin, "model", "")
             ),
             # token_configured 保持原有语义（直连 token）；OpenAI 兼容模式
@@ -105,13 +105,13 @@ class NAIImageCompanionExtensionAPI:
             "credential_configured": credential_configured,
             "base_url": plugin.base_url,
             "default_style": plugin.image_style,
-            "artist_slot_name": str(slot.get("name", ""))
-            if isinstance(slot, dict)
-            else "",
+            "artist_slot_name": (
+                str(slot.get("name", "")) if isinstance(slot, dict) else ""
+            ),
             "default_size": plugin.image_size,
             "prompt_format": getattr(plugin, "companion_prompt_format", "")
             or "自然语言模式（en）",
-            "reference_supported": call_mode == "openai",
+            "reference_supported": call_mode in ("openai", "novelai"),
             "reference_mode": getattr(plugin, "openai_reference_mode", "vibe"),
             "proxy_enabled": bool(getattr(plugin, "enable_proxy", True)),
             "bypass_system_proxy": bool(getattr(plugin, "bypass_system_proxy", True)),
@@ -143,7 +143,7 @@ class NAIImageCompanionExtensionAPI:
         # 而陪伴插件会高频轮询本接口，预检会拖慢主动链路；真实失败会由
         # 生图结果以明确的错误信息返回。
         call_mode = str(getattr(plugin, "call_mode", "direct") or "direct")
-        if call_mode == "openai":
+        if call_mode in ("openai", "novelai"):
             # OpenAI 兼容模式不依赖直连 token，接口地址缺失才是未就绪。
             credential_ok = bool(getattr(plugin, "openai_api_base_url", ""))
             credential_reason = "openai_not_configured"
@@ -295,7 +295,7 @@ class NAIImageCompanionExtensionAPI:
         )
 
         try:
-            if getattr(plugin, "call_mode", "direct") == "openai":
+            if getattr(plugin, "call_mode", "direct") in ("openai", "novelai"):
                 # OpenAI 兼容模式：有参考图按插件「参考图使用模式」路由
                 # （vibe/img2img/director），否则文生图；画师串并入 prompt
                 if reference_paths:
@@ -406,7 +406,7 @@ class NAIImageCompanionExtensionAPI:
             _first_text(endpoint_dict.get("size"), endpoint_dict.get("ratio"))
         )
         try:
-            if getattr(plugin, "call_mode", "direct") == "openai":
+            if getattr(plugin, "call_mode", "direct") in ("openai", "novelai"):
                 openai_prompt, _, _ = await plugin._prepare_openai_prompt(
                     normalize_prompt(text), style
                 )

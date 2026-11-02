@@ -56,16 +56,18 @@ def test_legacy_openai_pair_is_preserved_and_migration_is_persisted(load_plugin)
     assert plugin.openai_api_base_url == "https://compatible.example/v1"
     assert plugin.openai_api_key == "compatible-key"
     assert saved["openai_api_key"] == "compatible-key"
-    assert saved["starbridge_api_key"] == ""
+    assert saved["starbride_api_key"] == ""
     assert saved["_api_credentials_version"] == 1
 
 
 def test_starbridge_reference_model_is_opt_in_and_persisted(load_plugin):
     plugin, saved = load_plugin()
     assert plugin.starbridge_reference_model == ""
-    plugin, saved = load_plugin({"starbridge_reference_model": "nai-diffusion-4-5-curated"})
+    plugin, saved = load_plugin(
+        {"novelai_reference_model": "nai-diffusion-4-5-curated"}
+    )
     assert plugin.starbridge_reference_model == "nai-diffusion-4-5-curated"
-    assert saved["starbridge_reference_model"] == "nai-diffusion-4-5-curated"
+    assert saved["novelai_reference_model"] == "nai-diffusion-4-5-curated"
 
 
 def test_legacy_starbridge_pair_is_moved_once(load_plugin):
@@ -78,11 +80,11 @@ def test_legacy_starbridge_pair_is_moved_once(load_plugin):
             "enable_translate": True,
         }
     )
-    assert plugin.call_mode == "openai"
+    assert plugin.call_mode == "novelai"
     assert plugin.openai_api_base_url == "https://starbridge.example"
     assert plugin.openai_api_key == "native-key"
-    assert saved["starbridge_api_base_url"] == "https://starbridge.example"
-    assert saved["starbridge_api_key"] == "native-key"
+    assert saved["starbride_api_base_url"] == "https://starbridge.example"
+    assert saved["starbride_api_key"] == "native-key"
     assert saved["openai_api_base_url"] == saved["openai_api_key"] == ""
     assert saved["enable_translate"] == "开启"
     assert saved["_api_credentials_version"] == 1
@@ -129,7 +131,13 @@ def test_switching_services_uses_matching_url_and_authorization(load_plugin):
             "compatible-key",
         ),
     ):
-        plugin, saved = load_plugin({**updates, "openai_api_profile": profile})
+        plugin, saved = load_plugin(
+            {
+                **updates,
+                "openai_api_profile": profile,
+                "call_mode": "novelai" if profile == "starbridge" else "openai",
+            }
+        )
         plugin._session = Session()
         images, reason = asyncio.run(
             plugin._openai_generate("a red apple", "1024x1024", n=1)
@@ -156,10 +164,16 @@ def test_unconfigured_service_does_not_borrow_credentials_or_change_mode(
         }
     )
     plugin._session = Session()
-    assert plugin.call_mode == saved["call_mode"] == "openai"
-    assert plugin.openai_api_base_url == plugin.openai_api_key == ""
+    assert (
+        plugin.call_mode
+        == saved["call_mode"]
+        == ("novelai" if profile == "starbridge" else "openai")
+    )
+    assert plugin.openai_api_key == ""
     images, reason = asyncio.run(plugin._openai_generate("apple", "1024x1024"))
-    assert images == [] and reason == "openai_not_configured"
+    assert images == [] and (
+        reason == "openai_not_configured" or reason.startswith("novelai | ")
+    )
     assert plugin._session.calls == []
 
 
@@ -171,11 +185,12 @@ def test_switch_to_unconfigured_starbridge_after_upgrade_preserves_openai(load_p
             "openai_api_key": "compatible-key",
         }
     )
-    plugin, saved = load_plugin({"openai_api_profile": "starbridge"})
-    assert plugin.call_mode == "openai"
-    assert plugin.openai_api_base_url == plugin.openai_api_key == ""
+    plugin, saved = load_plugin({"call_mode": "novelai"})
+    assert plugin.call_mode == "novelai"
+    assert plugin.openai_api_base_url == "https://api.almoons.xyz"
+    assert plugin.openai_api_key == ""
     assert saved["openai_api_key"] == "compatible-key"
-    assert saved["starbridge_api_key"] == ""
+    assert saved["starbride_api_key"] == ""
 
 
 def test_mode_repair_accepts_dedicated_starbridge_address():
@@ -189,19 +204,26 @@ def test_mode_repair_accepts_dedicated_starbridge_address():
 
 
 @pytest.mark.parametrize(
-    ("profile", "expected"),
+    "mode, service, expected",
     [
-        ("compatible", {"openai_api_base_url", "openai_api_key"}),
-        ("starbridge", {"starbridge_api_base_url", "starbridge_api_key"}),
+        ("openai", "starbride", {"openai_api_base_url", "openai_api_key"}),
+        ("novelai", "starbride", {"starbride_api_base_url", "starbride_api_key"}),
+        (
+            "novelai",
+            "official",
+            {"novelai_official_api_base_url", "novelai_official_api_key"},
+        ),
     ],
 )
-def test_only_selected_credential_fields_are_visible(profile, expected):
-    config = {"call_mode": "openai", "openai_api_profile": profile}
+def test_only_selected_credential_fields_are_visible(mode, service, expected):
+    config = {"call_mode": mode, "novelai_service": service}
     fields = {
         "openai_api_base_url",
         "openai_api_key",
-        "starbridge_api_base_url",
-        "starbridge_api_key",
+        "starbride_api_base_url",
+        "starbride_api_key",
+        "novelai_official_api_base_url",
+        "novelai_official_api_key",
     }
     visible = {
         key

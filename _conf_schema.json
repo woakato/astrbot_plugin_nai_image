@@ -3,14 +3,16 @@
         "type": "string",
         "default": "direct",
         "description": "生图接入方式",
-        "hint": "聊天指令和陪伴联动使用此方式。选择第三方接口后，再选择 OpenAI 兼容或星桥。",
+        "hint": "选择 OpenAI 兼容接口、NovelAI 原生接口或 nai.sta1n.cn。",
         "options": [
-            "direct",
-            "openai"
+            "openai",
+            "novelai",
+            "direct"
         ],
         "labels": [
-            "nai.sta1n.cn 直连",
-            "第三方接口（OpenAI / 星桥）"
+            "OpenAI",
+            "NovelAI",
+            "nai.sta1n.cn"
         ],
         "obvious": true
     },
@@ -36,7 +38,7 @@
         "type": "int",
         "default": 180,
         "description": "请求超时（秒）",
-        "hint": "两种调用模式共用：OpenAI 兼容模式为单次请求超时；直连模式为任务接口排队+生成的总等待上限与 GET 兜底的单请求超时。范围 30-600 秒，大尺寸或上游繁忙时可调大。旧配置的 openai_timeout 值会自动迁移。",
+        "hint": "三种接入方式共用：OpenAI 兼容模式为单次请求超时；直连模式为任务接口排队+生成的总等待上限与 GET 兜底的单请求超时。范围 30-600 秒，大尺寸或上游繁忙时可调大。旧配置的 openai_timeout 值会自动迁移。",
         "min": 30,
         "max": 600
     },
@@ -76,64 +78,114 @@
             "enable_upstream_billing_sync": true
         }
     },
-    "openai_api_profile": {
+    "novelai_service": {
         "type": "string",
-        "default": "compatible",
+        "default": "starbride",
         "description": "生图服务",
-        "hint": "各服务分别保存接口地址和密钥，切换后使用所选服务的配置。",
+        "hint": "NovelAI 原生协议服务，默认使用 Starbride。各服务分别保存生图地址和密钥。",
         "options": [
-            "compatible",
-            "starbridge"
+            "official",
+            "starbride"
         ],
         "labels": [
-            "OpenAI 兼容接口",
-            "星桥（Almoon）"
+            "NAI 官方",
+            "Starbride"
         ],
         "condition": {
-            "call_mode": "openai"
+            "call_mode": "novelai"
         }
     },
-    "openai_api_base_url": {
+    "starbride_api_base_url": {
+        "type": "string",
+        "default": "https://api.almoons.xyz",
+        "description": "生图地址",
+        "hint": "Starbride 默认地址 https://api.almoons.xyz，也可填写 https://aiapi.almoons.xyz。",
+        "condition": {
+            "call_mode": "novelai",
+            "novelai_service": "starbride"
+        }
+    },
+    "starbride_api_key": {
         "type": "string",
         "default": "",
-        "description": "OpenAI 接口地址",
-        "hint": "填写服务商提供的地址，例如 https://api1.syuan.org/v1。仅供 OpenAI 兼容接口使用。",
+        "description": "Starbride API Key",
+        "hint": "填写 Starbride 的 NewAPI Key。",
         "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "compatible"
+            "call_mode": "novelai",
+            "novelai_service": "starbride"
         }
     },
-    "openai_api_key": {
+    "novelai_official_api_base_url": {
+        "type": "string",
+        "default": "https://image.novelai.net",
+        "description": "生图地址",
+        "hint": "NAI 官方生图地址，已自动填写。",
+        "condition": {
+            "call_mode": "novelai",
+            "novelai_service": "official"
+        }
+    },
+    "novelai_official_api_key": {
         "type": "string",
         "default": "",
-        "description": "OpenAI API Key",
-        "hint": "填写该 OpenAI 兼容服务商提供的 API Key。",
+        "description": "NAI 官方 API Key",
+        "hint": "填写 NovelAI 官方账号的持久 API Token。",
         "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "compatible"
+            "call_mode": "novelai",
+            "novelai_service": "official"
         }
     },
-    "starbridge_api_base_url": {
+    "novelai_api_model": {
         "type": "string",
-        "default": "",
-        "description": "星桥接口地址",
-        "hint": "填写 https://api.almoons.xyz 或 https://aiapi.almoons.xyz。仅供星桥使用。",
+        "default": "nai-diffusion-5-full",
+        "description": "NovelAI 生图模型",
+        "hint": "选择 NAI 官方或 Starbride 支持的 V4.5 / V5 Full、Curated 型号。V5 使用 Vibe 或精准参考时可指定下方的 V4.5 参考模型。",
+        "options": [
+            "nai-diffusion-5-full",
+            "nai-diffusion-5-curated",
+            "nai-diffusion-4-5-full",
+            "nai-diffusion-4-5-curated"
+        ],
         "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "starbridge"
+            "call_mode": "novelai"
         }
     },
-    "starbridge_api_key": {
+    "novelai_image_size": {
         "type": "string",
-        "default": "",
-        "description": "星桥 API Key",
-        "hint": "填写星桥的 NewAPI Key。Vibe 参考会逐图付费编码；编码与生图请求均不自动重试。",
+        "default": "832x1216",
+        "description": "默认尺寸",
+        "hint": "采用 NovelAI 官方的标准、小、大尺寸和壁纸预设，标签标注实际宽 × 高；默认标准竖图 832 × 1216。",
+        "options": [
+            "832x1216",
+            "1216x832",
+            "1024x1024",
+            "512x768",
+            "768x512",
+            "640x640",
+            "1024x1536",
+            "1536x1024",
+            "1472x1472",
+            "1088x1920",
+            "1920x1088"
+        ],
+        "labels": [
+            "标准竖图 · 832 × 1216",
+            "标准横图 · 1216 × 832",
+            "标准方图 · 1024 × 1024",
+            "小竖图 · 512 × 768",
+            "小横图 · 768 × 512",
+            "小方图 · 640 × 640",
+            "大竖图 · 1024 × 1536",
+            "大横图 · 1536 × 1024",
+            "大方图 · 1472 × 1472",
+            "竖屏壁纸 · 1088 × 1920",
+            "横屏壁纸 · 1920 × 1088"
+        ],
         "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "starbridge"
+            "call_mode": "novelai"
         }
     },
-    "starbridge_reference_model": {
+    "novelai_reference_model": {
         "type": "string",
         "default": "不切换",
         "description": "V5 参考模型",
@@ -144,8 +196,31 @@
             "nai-diffusion-4-5-curated"
         ],
         "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "starbridge"
+            "call_mode": "novelai"
+        }
+    },
+    "_novelai_config_version": {
+        "type": "int",
+        "default": 0,
+        "description": "NovelAI 配置版本",
+        "invisible": true
+    },
+    "openai_api_base_url": {
+        "type": "string",
+        "default": "",
+        "description": "OpenAI 接口地址",
+        "hint": "填写服务商提供的地址，例如 https://api1.syuan.org/v1。仅供 OpenAI 兼容接口使用。",
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_api_key": {
+        "type": "string",
+        "default": "",
+        "description": "OpenAI API Key",
+        "hint": "填写该 OpenAI 兼容服务商提供的 API Key。",
+        "condition": {
+            "call_mode": "openai"
         }
     },
     "_api_credentials_version": {
@@ -157,8 +232,8 @@
     "openai_api_model": {
         "type": "string",
         "default": "nai-diffusion-5-full",
-        "description": "第三方接口生图模型",
-        "hint": "接口必填字段。nai-diffusion-5-full 为通用动漫插画模型。OpenAI 兼容站点的精准参考支持范围以服务商为准。星桥支持 V4.5/V5 的 Full/Curated；Vibe 和精准参考需要 V4.5，默认 V5 时可通过「V5 参考模型」指定 V4.5。director-tools 图片处理由面板动作自动选用。",
+        "description": "OpenAI 生图模型",
+        "hint": "填写 OpenAI 兼容服务商支持的模型。参考图能力以所选服务商为准。",
         "options": [
             "nai-diffusion-5-full",
             "nai-diffusion-5-curated",
@@ -205,7 +280,30 @@
             "4K竖图",
             "4K横图",
             "4K方图"
-        ]
+        ],
+        "condition": {
+            "call_mode": "direct"
+        }
+    },
+    "openai_image_size": {
+        "type": "string",
+        "default": "竖图",
+        "description": "默认尺寸",
+        "hint": "选择生成图片的尺寸和分辨率。基础计价：普通画幅（竖/横/方图）V4.5 1 点、V5 8 点；2K 一律 15 点；4K 一律 25 点。步数 29 起另按档位加价（29-35 +4，36-45 +6，46-50 +8）。",
+        "options": [
+            "竖图",
+            "横图",
+            "方图",
+            "2K竖图",
+            "2K横图",
+            "2K方图",
+            "4K竖图",
+            "4K横图",
+            "4K方图"
+        ],
+        "condition": {
+            "call_mode": "openai"
+        }
     },
     "image_count": {
         "type": "int",
@@ -352,7 +450,7 @@
     },
     "cfg": {
         "type": "float",
-        "default": 1.0,
+        "default": 1,
         "description": "CFG Rescale",
         "hint": "CFG 重缩放系数，上游有效范围 0-1（超出会被上游钳制，旧版设置页标注的 0-30 为错误说明）。0 关闭重缩放，1 最强。",
         "min": 0,
@@ -382,7 +480,7 @@
         "type": "string",
         "default": "vibe",
         "description": "参考图使用模式",
-        "hint": "决定聊天/陪伴发来的参考图如何使用（最多 8 张，面板可逐图设强度）。Vibe 参考：把参考图作为风格/角色氛围参考，适合「照着这张的感觉画」；img2img：以第一张参考图为底图重绘，适合「在这张图基础上改」；精准参考：从参考图精确提取角色/画风信息（仅 V4.5/V5 系列模型），适合「保持这个角色不变」。 星桥适配时，V5 仅可使用图生图，Vibe/精准参考须明确选择 V4.5。",
+        "hint": "决定聊天/陪伴发来的参考图如何使用（最多 8 张，面板可逐图设强度）。Vibe 参考：把参考图作为风格/角色氛围参考，适合「照着这张的感觉画」；img2img：以第一张参考图为底图重绘，适合「在这张图基础上改」；精准参考：从参考图精确提取角色/画风信息（仅 V4.5/V5 系列模型），适合「保持这个角色不变」。",
         "options": [
             "vibe",
             "img2img",
@@ -395,6 +493,25 @@
         ],
         "condition": {
             "call_mode": "openai"
+        }
+    },
+    "novelai_reference_mode": {
+        "type": "string",
+        "default": "vibe",
+        "description": "参考图使用模式",
+        "hint": "选择 Vibe 风格参考、img2img 图生图或精准参考，最多 8 张。V5 的 Vibe 和精准参考需要 V4.5，可通过「V5 参考模型」指定型号；图生图可继续使用 V5。",
+        "options": [
+            "vibe",
+            "img2img",
+            "director"
+        ],
+        "labels": [
+            "Vibe 参考（风格/角色参考）",
+            "img2img（图生图重绘）",
+            "精准参考（director）"
+        ],
+        "condition": {
+            "call_mode": "novelai"
         }
     },
     "openai_director_caption": {
@@ -417,6 +534,26 @@
             "openai_reference_mode": "director"
         }
     },
+    "novelai_director_caption": {
+        "type": "string",
+        "default": "character&style",
+        "description": "精准参考保留内容",
+        "hint": "选择从参考图保留角色、画风，或同时保留两者。测试面板可逐张调整。",
+        "options": [
+            "character&style",
+            "character",
+            "style"
+        ],
+        "labels": [
+            "角色和画风",
+            "仅角色",
+            "仅画风"
+        ],
+        "condition": {
+            "call_mode": "novelai",
+            "novelai_reference_mode": "director"
+        }
+    },
     "openai_vibe_strength": {
         "type": "float",
         "default": 0.6,
@@ -429,9 +566,21 @@
             "openai_reference_mode": "vibe"
         }
     },
+    "novelai_vibe_strength": {
+        "type": "float",
+        "default": 0.6,
+        "description": "Vibe 参考权重",
+        "hint": "范围 0-1，越大越接近参考图。默认 0.6；测试面板可逐张调整。",
+        "min": 0,
+        "max": 1,
+        "condition": {
+            "call_mode": "novelai",
+            "novelai_reference_mode": "vibe"
+        }
+    },
     "openai_director_strength": {
         "type": "float",
-        "default": 1.0,
+        "default": 1,
         "description": "精准参考权重",
         "hint": "范围 0-1，越大越接近参考图。保持角色外观建议 0.9-1.0。",
         "min": 0,
@@ -439,6 +588,18 @@
         "condition": {
             "call_mode": "openai",
             "openai_reference_mode": "director"
+        }
+    },
+    "novelai_director_strength": {
+        "type": "float",
+        "default": 1,
+        "description": "精准参考权重",
+        "hint": "范围 0-1，越大越接近参考图。保持角色外观建议 0.9-1.0。",
+        "min": 0,
+        "max": 1,
+        "condition": {
+            "call_mode": "novelai",
+            "novelai_reference_mode": "director"
         }
     },
     "openai_director_secondary_strength": {
@@ -451,6 +612,18 @@
         "condition": {
             "call_mode": "openai",
             "openai_reference_mode": "director"
+        }
+    },
+    "novelai_director_secondary_strength": {
+        "type": "float",
+        "default": 0.5,
+        "description": "精准参考次级特征权重",
+        "hint": "控制画风细节的保留程度，建议 0.35-0.7。不确定时保持默认 0.5。",
+        "min": 0,
+        "max": 1,
+        "condition": {
+            "call_mode": "novelai",
+            "novelai_reference_mode": "director"
         }
     },
     "openai_director_fallback_images": {
@@ -469,6 +642,22 @@
             "openai_reference_mode": "director"
         }
     },
+    "novelai_director_fallback_images": {
+        "type": "file",
+        "default": [],
+        "description": "精准参考兜底参考图",
+        "hint": "参考图使用模式为「精准参考」时，若请求没有携带参考图（聊天指令、陪伴插件联动等场景），自动按顺序使用这里的全部图片作为精准参考（最多 8 张）；留空则照旧提示需要参考图。支持 png/jpg/webp。",
+        "file_types": [
+            "png",
+            "jpg",
+            "jpeg",
+            "webp"
+        ],
+        "condition": {
+            "call_mode": "novelai",
+            "novelai_reference_mode": "director"
+        }
+    },
     "openai_seed": {
         "type": "int",
         "default": -1,
@@ -479,16 +668,25 @@
             "call_mode": "openai"
         }
     },
+    "novelai_seed": {
+        "type": "int",
+        "default": -1,
+        "description": "随机种子",
+        "hint": "-1 表示每次随机（不发送 seed 字段）；填入非负整数可固定种子复现画面。面板可临时覆盖。",
+        "min": -1,
+        "condition": {
+            "call_mode": "novelai"
+        }
+    },
     "openai_max_retries": {
         "type": "int",
         "default": 2,
         "description": "失败重试次数",
-        "hint": "对 408/429/502/503/504 及上游繁忙类瞬时错误按 2/4/8 秒指数退避重试；400/401/403 与请求超时不重试（超时可能仍在生成并扣费，避免重复扣费）。设为 0 不重试。 星桥原生适配的付费 POST 不自动重试，此项仅作用于原有兼容接口。",
+        "hint": "对 408/429/502/503/504 及上游繁忙类瞬时错误按 2/4/8 秒指数退避重试；400/401/403 与请求超时不重试（超时可能仍在生成并扣费，避免重复扣费）。设为 0 不重试。",
         "min": 0,
         "max": 3,
         "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "compatible"
+            "call_mode": "openai"
         }
     },
     "enable_template": {
@@ -692,5 +890,29 @@
         "default": true,
         "description": "绕过系统代理直连生图站",
         "hint": "默认开启：请求 nai.sta1n.cn 时强制直连，避免梯子拦截。仅在必须走代理才能访问生图站时关闭；Clash 等 TUN 模式请在梯子内为 nai.sta1n.cn 加 DIRECT 规则。"
+    },
+    "openai_api_profile": {
+        "type": "string",
+        "default": "compatible",
+        "description": "旧版接入配置（自动迁移）",
+        "invisible": true
+    },
+    "starbridge_api_base_url": {
+        "type": "string",
+        "default": "",
+        "description": "旧版接入配置（自动迁移）",
+        "invisible": true
+    },
+    "starbridge_api_key": {
+        "type": "string",
+        "default": "",
+        "description": "旧版接入配置（自动迁移）",
+        "invisible": true
+    },
+    "starbridge_reference_model": {
+        "type": "string",
+        "default": "不切换",
+        "description": "旧版接入配置（自动迁移）",
+        "invisible": true
     }
 }

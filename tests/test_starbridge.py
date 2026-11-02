@@ -263,7 +263,7 @@ def test_malformed_later_reference_is_rejected_before_paid_encoding():
         model="nai-diffusion-4-5-full",
         reference_image_bytes_list=[png(), b"invalid image"],
     )
-    assert images == [] and reason.startswith("starbridge | ")
+    assert images == [] and reason.startswith("novelai | ")
     assert value._session.calls == []
 
 
@@ -275,7 +275,7 @@ def test_v5_reference_modes_fail_before_encoding_or_model_fallback(model, mode):
         value, model=model, reference_mode=mode, reference_image_bytes=png()
     )
     assert images == [] and "V5" in reason
-    assert "星桥" in _format_generate_error(reason)
+    assert "NovelAI" in _format_generate_error(reason)
     assert value._session.calls == []
 
 

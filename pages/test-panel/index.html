@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NAI 生图控制终端 // ENDFIELD PROTOCOL</title>
-  <link rel="stylesheet" href="./app.css?v=4.9.6" />
+  <link rel="stylesheet" href="./app.css?v=4.10.0" />
 </head>
 <body>
   <!-- 终末地等高线动态地形 Canvas + 底部工业网格 -->
@@ -31,7 +31,7 @@
           <p class="header-subtitle">
             <span class="sub-lead">TALOS-II TOPOLOGY ENGINE</span>
             <span class="sub-sep">/</span>
-            <span>NAI.STA1N.CN NEURAL INTERFACE</span>
+            <span>IMAGE GENERATION INTERFACE</span>
           </p>
         </div>
       </div>
@@ -56,7 +56,7 @@
               <span class="card-sec-tag">FMT</span>
             </div>
             <div class="card-title-group">
-              <h2 class="card-title">调用格式 // CALL FORMAT</h2>
+              <h2 class="card-title">生图接入方式 // PROVIDER</h2>
               <span class="card-sub-code">TRANSPORT_SELECT</span>
             </div>
           </div>
@@ -64,15 +64,20 @@
           <div class="card-body">
             <!-- 分段式切换：传统 GET vs OpenAI 兼容 -->
             <div class="format-toggle-group" id="callFormat">
-              <button type="button" class="format-toggle-btn active" data-format="direct">
-                <span class="format-toggle-dot"></span>
-                <span class="format-toggle-label">NAI 直连</span>
-                <span class="format-toggle-sub">传统 GET 接口</span>
-              </button>
               <button type="button" class="format-toggle-btn" data-format="openai">
                 <span class="format-toggle-dot"></span>
-                <span class="format-toggle-label">OpenAI 兼容</span>
-                <span class="format-toggle-sub">/v1/images 端点</span>
+                <span class="format-toggle-label">OpenAI</span>
+                <span class="format-toggle-sub">/v1/images 接口</span>
+              </button>
+              <button type="button" class="format-toggle-btn" data-format="novelai">
+                <span class="format-toggle-dot"></span>
+                <span class="format-toggle-label">NovelAI</span>
+                <span class="format-toggle-sub">NAI 官方 / Starbride</span>
+              </button>
+              <button type="button" class="format-toggle-btn active" data-format="direct">
+                <span class="format-toggle-dot"></span>
+                <span class="format-toggle-label">nai.sta1n.cn</span>
+                <span class="format-toggle-sub">原有 GET / 任务接口</span>
               </button>
             </div>
             <div class="field-hint" style="margin-top: 10px;">
@@ -710,6 +715,6 @@
     </main>
   </div>
 
-  <script src="./app.js?v=4.9.6"></script>
+  <script src="./app.js?v=4.10.0"></script>
 </body>
 </html>
