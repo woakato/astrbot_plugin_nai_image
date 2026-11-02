@@ -60,6 +60,14 @@ def test_legacy_openai_pair_is_preserved_and_migration_is_persisted(load_plugin)
     assert saved["_api_credentials_version"] == 1
 
 
+def test_starbridge_reference_model_is_opt_in_and_persisted(load_plugin):
+    plugin, saved = load_plugin()
+    assert plugin.starbridge_reference_model == ""
+    plugin, saved = load_plugin({"starbridge_reference_model": "nai-diffusion-4-5-curated"})
+    assert plugin.starbridge_reference_model == "nai-diffusion-4-5-curated"
+    assert saved["starbridge_reference_model"] == "nai-diffusion-4-5-curated"
+
+
 def test_legacy_starbridge_pair_is_moved_once(load_plugin):
     plugin, saved = load_plugin(
         {

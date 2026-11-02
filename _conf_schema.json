@@ -133,6 +133,21 @@
             "openai_api_profile": "starbridge"
         }
     },
+    "starbridge_reference_model": {
+        "type": "string",
+        "default": "不切换",
+        "description": "V5 参考模型",
+        "hint": "当前 V5 不支持 Vibe 和精准参考。选定 V4.5 后，仅 V5 携带这两类参考图时使用该模型；文生图、图生图和图片处理继续使用原选模型。默认不切换，会提示选择 V4.5。历史归档记录实际模型与原选模型，实际费用以本站账单为准。",
+        "options": [
+            "不切换",
+            "nai-diffusion-4-5-full",
+            "nai-diffusion-4-5-curated"
+        ],
+        "condition": {
+            "call_mode": "openai",
+            "openai_api_profile": "starbridge"
+        }
+    },
     "_api_credentials_version": {
         "type": "int",
         "default": 0,
@@ -143,7 +158,7 @@
         "type": "string",
         "default": "nai-diffusion-5-full",
         "description": "第三方接口生图模型",
-        "hint": "接口必填字段。nai-diffusion-5-full 为文档推荐的通用动漫插画模型；精准参考支持 nai-diffusion-4-5 与 nai-diffusion-5 系列，其他模型会自动回退 4.5。director-tools（图片处理）由面板动作自动选用，无需在此配置。 星桥适配仅支持 V4.5/V5 的 Full/Curated；Vibe 和精准参考仅限 V4.5。",
+        "hint": "接口必填字段。nai-diffusion-5-full 为通用动漫插画模型。OpenAI 兼容站点的精准参考支持范围以服务商为准。星桥支持 V4.5/V5 的 Full/Curated；Vibe 和精准参考需要 V4.5，默认 V5 时可通过「V5 参考模型」指定 V4.5。director-tools 图片处理由面板动作自动选用。",
         "options": [
             "nai-diffusion-5-full",
             "nai-diffusion-5-curated",

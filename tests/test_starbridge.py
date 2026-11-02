@@ -279,6 +279,149 @@ def test_v5_reference_modes_fail_before_encoding_or_model_fallback(model, mode):
     assert value._session.calls == []
 
 
+@pytest.mark.parametrize("model", ["nai-diffusion-5-full", "nai-diffusion-5-curated"])
+@pytest.mark.parametrize(
+    "schedule", ["native", "karras", "exponential", "polyexponential"]
+)
+def test_v5_noise_schedules_are_forwarded_without_a_karras_only_gate(model, schedule):
+    value = plugin()
+    images, reason = generate(value, model=model, noise_schedule=schedule)
+    assert images and reason == "ok"
+    assert value._session.calls[0]["body"]["parameters"]["noise_schedule"] == schedule
+
+
+@pytest.mark.parametrize("model", ["nai-diffusion-5-full", "nai-diffusion-5-curated"])
+@pytest.mark.parametrize(
+    "reference_model", ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated"]
+)
+@pytest.mark.parametrize("mode", ["vibe", "director"])
+def test_configured_reference_model_is_used_for_encoding_generation_and_history(
+    model, reference_model, mode
+):
+    def handler(endpoint, body):
+        if endpoint.endswith("encode-vibe"):
+            return Response(raw=b"encoded-feature")
+        return Response({"images": [{"image": base64.b64encode(png()).decode()}]})
+
+    value = plugin(handler=handler)
+    value.starbridge_reference_model = reference_model
+    images, reason = generate(
+        value, model=model, reference_mode=mode, reference_image_bytes=png()
+    )
+    assert images and reason == "ok"
+    assert all(
+        call["body"]["model"] == reference_model for call in value._session.calls
+    )
+    history = value._archive_generated_image.await_args.args[1]
+    assert history["model"] == reference_model
+    assert history["requested_model"] == model
+    assert value._record_usage_stat.await_args.kwargs["model"] == reference_model
+
+
+@pytest.mark.parametrize("mode", ["vibe", "img2img"])
+def test_reference_model_does_not_change_plain_generation_or_img2img(mode):
+    value = plugin()
+    value.starbridge_reference_model = "nai-diffusion-4-5-full"
+    kwargs = {"reference_image_bytes": png()} if mode == "img2img" else {}
+    images, reason = generate(value, reference_mode=mode, **kwargs)
+    assert images and reason == "ok"
+    assert value._session.calls[0]["body"]["model"] == "nai-diffusion-5-full"
+
+
+def test_reference_model_setting_is_ignored_by_other_providers():
+    value = plugin(profile="compatible")
+    value.starbridge_reference_model = "nai-diffusion-4-5-full"
+    images, reason = generate(
+        value, reference_mode="director", reference_image_bytes=png()
+    )
+    assert images and reason == "ok"
+    assert value._session.calls[0]["body"]["model"] == "nai-diffusion-5-full"
+
+
+@pytest.mark.parametrize("reference_model", ["nai-diffusion-5-full", "unknown"])
+def test_invalid_reference_model_fails_without_paid_requests(reference_model):
+    value = plugin()
+    value.starbridge_reference_model = reference_model
+    images, reason = generate(value, reference_image_bytes=png())
+    assert images == [] and "参考模型" in reason
+    assert value._session.calls == []
+
+
+@pytest.mark.parametrize(
+    "size, overrides",
+    [
+        ("2048x2048", {}),
+        ("832x1216", {"sampler": "ddim"}),
+        ("832x1216", {"noise_schedule": "invalid"}),
+        ("832x1216", {"v4_prompt": {"caption": {"base_caption": "中" * 18000}}}),
+    ],
+)
+def test_invalid_generation_parameters_fail_before_vibe_encoding(size, overrides):
+    value = Session()
+    body = dict(
+        model="nai-diffusion-4-5-full",
+        prompt="apple",
+        action="generate",
+        size=size,
+        n=1,
+        parameters=dict(
+            reference_image_multiple=[base64.b64encode(png()).decode()],
+            reference_strength_multiple=[0.6],
+            reference_information_extracted_multiple=[0.7],
+            **overrides
+        ),
+    )
+    with pytest.raises(StarbridgeError):
+        asyncio.run(
+            prepare_starbridge_request(
+                value, "https://api.almoons.xyz", body, headers={}, timeout=None
+            )
+        )
+    assert value.calls == []
+
+
+@pytest.mark.parametrize("amount", [float("nan"), float("inf"), True, -0.1, 1.1])
+def test_invalid_vibe_strengths_fail_before_paid_encoding(amount):
+    value = Session()
+    body = dict(
+        model="nai-diffusion-4-5-full",
+        prompt="apple",
+        size="512x512",
+        parameters=dict(
+            reference_image_multiple=[base64.b64encode(png()).decode()],
+            reference_strength_multiple=[amount],
+            reference_information_extracted_multiple=[0.7],
+        ),
+    )
+    with pytest.raises(StarbridgeError):
+        asyncio.run(
+            prepare_starbridge_request(
+                value, "https://api.almoons.xyz", body, headers={}, timeout=None
+            )
+        )
+    assert value.calls == []
+
+
+def test_missing_vibe_strength_array_fails_before_paid_encoding():
+    value = Session()
+    body = dict(
+        model="nai-diffusion-4-5-full",
+        prompt="apple",
+        size="512x512",
+        parameters=dict(
+            reference_image_multiple=[base64.b64encode(png()).decode()],
+            reference_information_extracted_multiple=[0.7],
+        ),
+    )
+    with pytest.raises(StarbridgeError):
+        asyncio.run(
+            prepare_starbridge_request(
+                value, "https://api.almoons.xyz", body, headers={}, timeout=None
+            )
+        )
+    assert value.calls == []
+
+
 @pytest.mark.parametrize(
     "action", ["bg-removal", "lineart", "sketch", "colorize", "emotion", "declutter"]
 )

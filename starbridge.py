@@ -5,6 +5,7 @@ import base64
 import copy
 import io
 import json
+import math
 import secrets
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
@@ -21,6 +22,21 @@ MODEL_ALIASES = {
     "nai5": "nai-diffusion-5-full",
     "nai5-curated": "nai-diffusion-5-curated",
 }
+REFERENCE_MODELS = {"nai-diffusion-4-5-full", "nai-diffusion-4-5-curated"}
+SAMPLERS = {
+    "k_euler_ancestral",
+    "k_euler",
+    "k_dpmpp_2s_ancestral",
+    "k_dpmpp_2m_sde",
+    "k_dpmpp_2m",
+    "k_dpmpp_sde",
+    "k_dpm_2",
+    "k_dpm_2_ancestral",
+    "k_lms",
+}
+NOISE_SCHEDULES = {"native", "karras", "exponential", "polyexponential"}
+MAX_PIXELS = 3_145_728
+MAX_REFERENCE_BYTES = 20 * 1024 * 1024
 TOOL_ACTIONS = {"bg-removal", "lineart", "sketch", "colorize", "emotion", "declutter"}
 EMOTIONS = set(
     "neutral happy sad angry scared surprised tired excited nervous thinking confused shy disgusted smug bored laughing irritated aroused embarrassed worried love determined hurt playful".split()
@@ -72,9 +88,19 @@ def _image(value: str, size: tuple[int, int] | None = None, *, precise=False) ->
     try:
         if value.startswith("data:"):
             value = value.split(",", 1)[1]
-        with Image.open(io.BytesIO(base64.b64decode(value, validate=True))) as source:
+        if len(value) > ((MAX_REFERENCE_BYTES + 2) // 3) * 4:
+            raise ValueError("Reference exceeds 20 MB")
+        raw = base64.b64decode(value, validate=True)
+        if len(raw) > MAX_REFERENCE_BYTES:
+            raise ValueError("Reference exceeds 20 MB")
+        with Image.open(io.BytesIO(raw)) as source:
             if source.format not in {"PNG", "JPEG", "WEBP"}:
                 raise ValueError("Unsupported reference format")
+            if (
+                getattr(source, "n_frames", 1) != 1
+                or source.width * source.height > 36_000_000
+            ):
+                raise ValueError("Animated or oversized reference")
             source.load()
             image = source.convert("RGB")
         if precise:
@@ -101,6 +127,8 @@ def _image(value: str, size: tuple[int, int] | None = None, *, precise=False) ->
             image = image.resize(size, Image.Resampling.LANCZOS)
         output = io.BytesIO()
         image.save(output, format="PNG")
+        if output.tell() > MAX_REFERENCE_BYTES:
+            raise ValueError("Prepared reference exceeds 20 MB")
         return base64.b64encode(output.getvalue()).decode("ascii")
     except (
         ValueError,
@@ -110,7 +138,38 @@ def _image(value: str, size: tuple[int, int] | None = None, *, precise=False) ->
         AttributeError,
         Image.DecompressionBombError,
     ) as error:
-        raise StarbridgeError("参考图必须是有效的 PNG、JPEG 或 WebP 图片。") from error
+        raise StarbridgeError(
+            "参考图必须是有效的静态 PNG、JPEG 或 WebP 图片，且不超过 20 MB。"
+        ) from error
+
+
+def _validate_generation(params: dict, prompt: str, width: int, height: int) -> None:
+    """Check the site's generation contract before paid reference encoding."""
+    if width < 64 or height < 64 or width % 64 or height % 64:
+        raise StarbridgeError("生图宽高必须至少为 64，且为 64 的整数倍。")
+    if width * height > MAX_PIXELS:
+        raise StarbridgeError("星桥生图面积不能超过 3145728 像素，请减小尺寸。")
+    if params.get("sampler", "k_euler_ancestral") not in SAMPLERS:
+        raise StarbridgeError(
+            "当前采样器不受 V4.5/V5 支持，请选择 Euler、DPM++、DPM2 或 LMS。"
+        )
+    if params.get("noise_schedule", "karras") not in NOISE_SCHEDULES:
+        raise StarbridgeError(
+            "噪声计划请选择 native、karras、exponential 或 polyexponential。"
+        )
+    texts = [prompt, params.get("negative_prompt", "")]
+    for key in ("v4_prompt", "v4_negative_prompt"):
+        caption = params.get(key, {}).get("caption", {})
+        texts.append(caption.get("base_caption", ""))
+        texts.extend(
+            item.get("char_caption", "") for item in caption.get("char_captions", [])
+        )
+    if any(
+        isinstance(text, str) and len(text.encode("utf-8")) >= 51200 for text in texts
+    ):
+        raise StarbridgeError(
+            "每段正负提示词和角色提示词必须小于 51200 个 UTF-8 字节。"
+        )
 
 
 async def prepare_starbridge_request(
@@ -121,6 +180,7 @@ async def prepare_starbridge_request(
     headers: dict,
     timeout,
     image_model: str | None = None,
+    reference_model: str | None = None,
 ) -> StarbridgeRequest:
     """Validate all inputs before performing any billable Vibe encoding."""
     endpoint = native_endpoint(base_url, "generate-image")
@@ -134,7 +194,10 @@ async def prepare_starbridge_request(
         raise StarbridgeError(
             "星桥适配仅支持 V4.5/V5 的 Full、Curated 生图型号，请检查模型设置。"
         )
-    width, height = (int(value) for value in payload["size"].split("x", 1))
+    try:
+        width, height = (int(value) for value in payload["size"].split("x", 1))
+    except (KeyError, AttributeError, TypeError, ValueError) as error:
+        raise StarbridgeError("请使用有效的像素尺寸，例如 832x1216。") from error
     count = payload.get("n", 1)
     maximum = 6 if width * height <= 393216 else 4
     if (
@@ -184,34 +247,72 @@ async def prepare_starbridge_request(
     vibes = params.get("reference_image_multiple", [])
     if precise and vibes:
         raise StarbridgeError("精准参考和 Vibe 不能在同一次请求中使用。")
-    if model.startswith("nai-diffusion-5-"):
-        if precise or vibes:
+    if model.startswith("nai-diffusion-5-") and (precise or vibes):
+        if not reference_model:
             raise StarbridgeError(
-                "V5 暂不支持精准参考或 Vibe；请明确选择 V4.5，或使用图生图。"
+                "V5 暂不支持精准参考或 Vibe；请选择 V4.5，或在设置中指定「V5 参考模型」。图生图可继续使用 V5。"
             )
-        if params.get("noise_schedule", "karras") != "karras":
-            raise StarbridgeError("V5 仅支持 Karras 噪声计划，请调整设置。")
-    for keys in (
+        reference_model = MODEL_ALIASES.get(reference_model, reference_model)
+        if reference_model not in REFERENCE_MODELS:
+            raise StarbridgeError(
+                "V5 参考模型请选择 nai-diffusion-4-5-full 或 nai-diffusion-4-5-curated。"
+            )
+        model = reference_model
+    for required, optional in (
         (
-            "reference_image_multiple",
-            "reference_strength_multiple",
-            "reference_information_extracted_multiple",
+            (
+                "reference_image_multiple",
+                "reference_strength_multiple",
+                "reference_information_extracted_multiple",
+            ),
+            (),
         ),
         (
-            "director_reference_images",
-            "director_reference_descriptions",
-            "director_reference_strength_values",
-            "director_reference_secondary_strength_values",
-            "director_reference_information_extracted",
+            (
+                "director_reference_images",
+                "director_reference_descriptions",
+                "director_reference_strength_values",
+                "director_reference_information_extracted",
+            ),
+            ("director_reference_secondary_strength_values",),
         ),
     ):
+        keys = required + optional
         arrays = [params[key] for key in keys if key in params]
         if arrays and (
             any(not isinstance(value, list) for value in arrays)
             or len(arrays[0]) > 8
             or any(len(value) != len(arrays[0]) for value in arrays)
+            or bool(arrays[0])
+            and any(key not in params for key in required)
         ):
             raise StarbridgeError("参考图及逐图参数必须按顺序对应，且最多 8 张。")
+        for key in keys:
+            if "strength" in key or "information_extracted" in key:
+                for amount in params.get(key, []):
+                    if (
+                        isinstance(amount, bool)
+                        or not isinstance(amount, (int, float))
+                        or not math.isfinite(amount)
+                        or not 0 <= amount <= 1
+                    ):
+                        raise StarbridgeError(
+                            "参考图的信息提取和强度必须是 0 到 1 之间的有效数值。"
+                        )
+    for description in params.get("director_reference_descriptions", []):
+        caption = description.get("caption") if isinstance(description, dict) else None
+        if (
+            not isinstance(caption, dict)
+            or not isinstance(caption.get("base_caption"), str)
+            or not caption["base_caption"].strip()
+        ):
+            raise StarbridgeError("精准参考描述必须包含 caption.base_caption。")
+    if any(
+        amount != 1
+        for amount in params.get("director_reference_information_extracted", [])
+    ):
+        raise StarbridgeError("精准参考的信息提取参数必须为 1.0。")
+    _validate_generation(params, prompt, width, height)
 
     params.update(width=width, height=height, n_samples=count)
     params.setdefault("seed", secrets.randbits(32))

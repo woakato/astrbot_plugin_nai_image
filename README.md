@@ -17,6 +17,7 @@
 2. **生图服务**：`星桥（Almoon）`。
 3. **星桥接口地址**：`https://api.almoons.xyz` 或 `https://aiapi.almoons.xyz`，**星桥 API Key** 填本站 NewAPI Key。
 4. **模型**：选择 `nai-diffusion-5-full`、`nai-diffusion-5-curated`、`nai-diffusion-4-5-full` 或 `nai-diffusion-4-5-curated`。
+5. 默认使用 V5、同时需要 Vibe 或精准参考时，将 **V5 参考模型** 设为 `nai-diffusion-4-5-full` 或 `nai-diffusion-4-5-curated`。只有这两类带参考图的 V5 请求使用该模型，历史归档会记录原选模型和实际模型。默认「不切换」仍会在请求前提示选择 V4.5。
 
 OpenAI 兼容接口与星桥分别保存地址和密钥。切换「生图服务」后只显示所选服务的配置，保存后聊天、陪伴联动和测试面板均使用该服务的凭据；另一套配置仍会保留。首次升级时，原先选用星桥的共享地址和密钥会自动移到星桥配置，OpenAI 用户的原有配置保持不变。切到未配置的服务会提示填写地址，不会使用另一套凭据或自动改用直连。
 
@@ -31,7 +32,9 @@ OpenAI 兼容接口与星桥分别保存地址和密钥。切换「生图服务�
 | 抠图、线稿、草图、上色、表情、清理 | 使用原生 `/ai/augment-image`；单次处理一张图 |
 | 指令、LLM 工具、陪伴联动、本地代理、测试面板 | 复用已有提示词处理、画风槽位、转译、服装缓存、图片返回和历史归档流程 |
 
-截至 2026-10-27，星桥的 V5 不支持 Vibe 或精准参考。适配器会在发起付费请求前提示选择 V4.5，不会静默更换模型。原生大尺寸每次最多 4 张，面积不超过 393216 像素时最多 6 张；超限会明确报错，不会减少请求张数。V4.5 的单角色提示词会保留，但单角色不启用手动坐标定位。
+2026-11-02 实测：星桥的 V5 Full/Curated 精准参考和 Vibe 编码仍被上游拒绝，需使用 V4.5。配置「V5 参考模型」后，编码和生图会统一使用选定的 V4.5 型号；V5 文生图、图生图和图片处理继续使用原选模型。V5 的噪声计划可使用 `native`、`karras`、`exponential` 或 `polyexponential`，不再额外限制为 Karras。
+
+原生生图宽高须为 64 的整数倍，面积最多 3145728 像素。大尺寸每次最多 4 张，面积不超过 393216 像素时最多 6 张。适配器在付费 Vibe 编码前检查生成尺寸、采样器、噪声计划、提示词长度及逐图参数；不合规输入会明确报错。参考图须为不超过 20 MB 的静态 PNG/JPEG/WebP，精准参考自动缩放并填充为官方参考画布。V4.5 的单角色提示词会保留，但单角色不启用手动坐标定位。
 
 Vibe 编码独立计费，每次请求按参考图逐张编码；已经成功的编码，即使后续编码或生图失败，也可能已产生费用。星桥适配不会自动重试已提交的编码或生成请求，也不会跟随重定向重新发送密钥。插件用量图表继续使用原来的估算口径，**实际费用以本站账单为准**。
 
@@ -41,12 +44,12 @@ Vibe 编码独立计费，每次请求按参考图逐张编码；已经成功的
 
 > 🆕 **v2.4.0 OpenAI 兼容接口全面对齐**：`/v1/images/generations` 与 `/v1/images/edits` 按接口文档对齐——高级参数（`steps`/`scale`/`sampler`/`noise_schedule`/`seed`/`negative_prompt`）统一放入 `parameters` 对象；参考图支持 **Vibe 参考**（`reference_image_multiple` 数组）、**img2img 图生图** 与 **精准参考 director**（`director_reference_*`，§6）三种模式（配置项「参考图模式」+「精准参考描述」）；新增 **多角色坐标控制**（`use_coords`/`characterPrompts`/`v4_prompt`，§7），聊天指令用可重复的 `--char="提示词|x|y"`，面板可动态添加角色行；超限参考图自动等比缩小（最长边 1920 / 面积 3686400 内），参考图统一以 Data URI 提交；新增「随机种子」「请求超时」「失败重试次数」配置；仅对 408/429/502/503/504 及上游"服务繁忙"类瞬时错误按 2/4/8 秒退避重试（请求超时不重试，避免上游仍在生成时重复扣费）。本地代理的 `/v1/images/edits` 同时支持 JSON 与 multipart 请求。测试面板新增参考图模式、精准参考描述、噪声强度、种子、多角色坐标与 **director-tools 工具**（抠图/线稿/草图/上色/情绪/清理）入口。
 
-> 🆕 **v2.5.0 多张参考图**：Vibe 参考与精准参考（director）支持一次提交最多 **8 张**；**修复 NAI 5 系列被误判不支持精准参考的问题**（v4.5f / v5f 实测均可用，不再强制切换模型） 参考图（§5.2，超出自动截断），vibe 的 `reference_image_multiple` / `reference_strength_multiple` 与精准参考的五个 `director_reference_*` 数组均按提交顺序逐张对应：
+> 🆕 **v2.5.0 多张参考图**：OpenAI 兼容服务支持 Vibe 参考与精准参考（director）一次提交最多 **8 张**；NAI 5 精准参考的可用性以所选服务商为准，星桥的能力范围见上文。参考图（§5.2，超出自动截断），vibe 的 `reference_image_multiple` / `reference_strength_multiple` 与精准参考的五个 `director_reference_*` 数组均按提交顺序逐张对应：
 > - 测试面板：参考图选择框支持一次多选上传，缩略图列表可删除单张，并逐张设置强度；精准参考模式下每张还可单独指定 `base_caption`（character&style / character / style）。img2img 模式仍只使用第一张主输入图（§5.3），全局「重绘强度」「附加噪声」仅在 img2img 下显示。
 > - 插件设置：新增「Vibe 参考权重」（`openai_vibe_strength`，默认 0.6）、「精准参考权重」（`openai_director_strength`，默认 1.0）与「精准参考次级特征权重」（`openai_director_secondary_strength`，默认 0.5），作为聊天指令 / LLM 工具 / 陪伴联动及面板新参考图的默认权重；「精准参考兜底参考图」（`openai_director_fallback_images`）从"只取第一张"升级为按顺序使用全部已配置图片（最多 8 张）；「精准参考描述」（`openai_director_caption`）作为默认描述按顺序应用到全部兜底参考图。
 > - 陪伴直连：陪伴插件传来的 `reference_image_paths` 数组会被完整接收并按下标路由到 vibe / 精准参考数组，不再只取首项。
 
-> ⚠️ **精准参考使用说明**：精准参考（director）支持 nai-diffusion-4-5 与 nai-diffusion-5 全系列（实测 v4.5f / v5f 均可用；插件在其他模型下会自动切换到 4-5-full）；`director_reference_information_extracted` 必须为 `1.0`，其他取值会被上游参数校验拒绝（HTTP 400），插件已按此固定。
+> ⚠️ **精准参考使用说明**：OpenAI 兼容服务的精准参考支持范围以服务商为准；星桥仅支持 V4.5，可通过「V5 参考模型」为带参考图的 V5 请求指定 V4.5。`director_reference_information_extracted` 必须为 `1.0`，其他取值会被上游参数校验拒绝（HTTP 400），插件已按此固定。
 
 ## 指令
 

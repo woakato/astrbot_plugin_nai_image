@@ -836,6 +836,11 @@ class NAIGenerateImagePlugin(Star):
         )
         if self.openai_api_profile not in ("compatible", "starbridge"):
             self.openai_api_profile = "compatible"
+        self.starbridge_reference_model: str = str(
+            config.get("starbridge_reference_model") or ""
+        ).strip()
+        if self.starbridge_reference_model == "不切换":
+            self.starbridge_reference_model = ""
         credential_updates: dict[str, Any] = {}
         if not config.get("_api_credentials_version"):
             # Move the old shared pair once, before users can switch services.
@@ -2927,6 +2932,7 @@ class NAIGenerateImagePlugin(Star):
         requested_count = payload["n"]
         request_options = {}
         if starbridge:
+            starbridge_requested_model = starbridge_tool_model if is_director else model
             try:
                 prepared = await prepare_starbridge_request(
                     self._session,
@@ -2935,6 +2941,7 @@ class NAIGenerateImagePlugin(Star):
                     headers=headers,
                     timeout=timeout,
                     image_model=starbridge_tool_model,
+                    reference_model=getattr(self, "starbridge_reference_model", ""),
                 )
             except asyncio.TimeoutError:
                 return (
@@ -2949,6 +2956,7 @@ class NAIGenerateImagePlugin(Star):
                     "starbridge | 参考图处理请求中断，未自动重试；请确认编码费用后再试。",
                 )
             endpoint, payload = prepared.endpoint, prepared.payload
+            model = payload["model"]
             headers["Accept"] = "application/json"
             request_options["allow_redirects"] = False
 
@@ -3165,6 +3173,8 @@ class NAIGenerateImagePlugin(Star):
             }
             if starbridge:
                 generation_parameters["api_profile"] = "starbridge"
+                if model != starbridge_requested_model:
+                    generation_parameters["requested_model"] = starbridge_requested_model
                 generation_parameters["seed"] = payload.get("parameters", {}).get(
                     "seed", "random"
                 )
