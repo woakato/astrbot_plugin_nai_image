@@ -66,6 +66,7 @@
     refStrength: $("refStrength"),
     refModeWrap: $("refModeWrap"),
     refMode: $("refMode"),
+    refModelWarning: $("refModelWarning"),
     refNoiseWrap: $("refNoiseWrap"),
     refNoise: $("refNoise"),
     openaiSeedWrap: $("openaiSeedWrap"),
@@ -100,7 +101,11 @@
   let defaultDirectorStrength = 1;
   // 当前调用格式："direct" | "openai"
   let currentCallFormat = "direct";
-  let upstreamLabel = "OpenAI 兼容";
+  let upstreamLabel = "OpenAI";
+  let panelConfig = {};
+  let novelaiSizeOptions = [];
+  let hasCachedFormat = false;
+  const modeSelections = {};
   // 分段切换按钮引用
   let formatToggleBtns = [];
   // OpenAI 兼容模型列表（后端配置接口下发，用于切换格式时替换模型下拉项）
@@ -114,7 +119,7 @@
     "nai-diffusion-3",
     "nai-diffusion-furry-3",
   ];
-  // NAI 直连模式可用的模型下拉项
+  // nai.sta1n.cn模式可用的模型下拉项
   const DIRECT_MODEL_OPTIONS = [
     { value: "nai-diffusion-4-5-full", label: "V4.5 完整版 [4.5_FULL]" },
     { value: "nai-diffusion-5-full", label: "V5 完整版 [5.0_FULL]" },
@@ -403,6 +408,12 @@
       const data = (resp && resp.data) ? resp.data : resp;
       if (!data || typeof data !== "object") return false;
       let restored = false;
+      // 配置和选项已加载；先切到缓存的接口，再恢复其模型和尺寸。
+      if (["openai", "direct", "novelai"].includes(data.callFormat)) {
+        hasCachedFormat = true;
+        setCallFormat(data.callFormat);
+        restored = true;
+      }
       getCachedFields().forEach((key) => {
         const el = els[key];
         if (el && data[key] != null) {
@@ -413,15 +424,13 @@
             option.textContent = "正在读取画风槽位";
             el.appendChild(option);
           }
+          if (el.tagName === "SELECT" && !Array.from(el.options).some(option => option.value === String(data[key]))) return;
           el.value = data[key];
           restored = true;
         }
       });
-      if (data.callFormat === "openai" || data.callFormat === "direct") {
-        currentCallFormat = data.callFormat;
-        setCallFormat(currentCallFormat);
-        restored = true;
-      }
+      modeSelections[currentCallFormat] = {size: els.size.value, model: els.model.value};
+      applyRefModeUI();
       if (Array.isArray(data.characters) && data.characters.length) {
         clearCharRows();
         data.characters.slice(0, MAX_CHAR_ROWS).forEach((item) => {
@@ -447,6 +456,8 @@
       const bridge = await getBridge();
       const resp = await bridge.apiGet("test_panel/config");
       const config = (resp && resp.data) ? resp.data : resp;
+      panelConfig = config;
+      novelaiSizeOptions = Array.isArray(config.novelai_size_options) ? config.novelai_size_options : [];
       if (config.image_gen_key === "已配置") {
         setBadge(els.tokenBadge, "Token: 已配置", "badge-success");
       } else {
@@ -461,7 +472,7 @@
       // 后端下发的 OpenAI 兼容模型列表（对齐接口文档 §9）
       if (Array.isArray(config.openai_models) && config.openai_models.length) {
         openaiModels = config.openai_models;
-        if (currentCallFormat === "openai") updateModelOptionsUI();
+        if (currentCallFormat !== "direct") updateModelOptionsUI();
       }
       // 精准参考描述默认值：后端配置下发，新参考图卡片以此初始化
       if (config.openai_director_caption) {
@@ -480,37 +491,26 @@
       ) {
         defaultDirectorStrength = directorStrength;
       }
-      // OpenAI 兼容格式配置状态（仅在 OpenAI 模式下展示）
-      const starbridge = config.openai_api_profile === "starbridge";
-      upstreamLabel = starbridge ? "星桥（Almoon）" : "OpenAI 兼容";
-      const upstreamEndpoint = starbridge ? "/ai" : "/v1/images";
-      const upstreamButton = els.callFormat.querySelector('[data-format="openai"]');
-      if (upstreamButton) {
-        upstreamButton.querySelector(".format-toggle-label").textContent = upstreamLabel;
-        upstreamButton.querySelector(".format-toggle-sub").textContent =
-          upstreamEndpoint + " 端点";
-      }
-      if (els.openaiConfigStatus && currentCallFormat === "openai") {
-        els.callFormatHint.textContent =
-          `使用插件设置中的 ${upstreamLabel} 地址和密钥。`;
-        show(els.openaiConfigStatus);
-        if (config.openai_available) {
-          els.openaiConfigStatusText.textContent =
-            upstreamLabel + " 已配置：" + (config.openai_api_base_url || "");
-          els.openaiConfigStatus.querySelector(".status-dot").className =
-            "status-dot ok";
-        } else {
-          els.openaiConfigStatusText.textContent =
-            upstreamLabel + " 未配置：请在插件设置填写该服务的接口地址和 API Key";
-          els.openaiConfigStatus.querySelector(".status-dot").className =
-            "status-dot error";
-        }
-      } else if (els.openaiConfigStatus) {
-        hide(els.openaiConfigStatus);
-      }
+      if (!hasCachedFormat) {
+        setCallFormat(["direct", "openai", "novelai"].includes(config.call_mode) ? config.call_mode : "direct");
+      } else { updateSizeOptionsUI(); updateProviderStatus(); }
     } catch (err) {
       setBadge(els.tokenBadge, "配置加载失败", "badge-error");
     }
+  }
+
+  function updateProviderStatus() {
+    const native = currentCallFormat === "novelai";
+    upstreamLabel = native ? (panelConfig.novelai_service === "official" ? "NAI 官方" : "Starbride") : "OpenAI";
+    if (currentCallFormat === "direct") { hide(els.openaiConfigStatus); setBadge(els.tokenBadge, "Token: " + (panelConfig.image_gen_key || "未配置"), panelConfig.image_gen_key === "已配置" ? "badge-success" : "badge-error"); setBadge(els.baseUrlBadge, panelConfig.base_url || "--", "badge-info"); return; }
+    const configured = native ? panelConfig.novelai_available : panelConfig.openai_available;
+    const address = native ? panelConfig.novelai_api_base_url : panelConfig.openai_api_base_url;
+    setBadge(els.tokenBadge, configured ? "API Key: 已配置" : "API Key: 未配置", configured ? "badge-success" : "badge-error");
+    setBadge(els.baseUrlBadge, address || "--", "badge-info");
+    show(els.openaiConfigStatus);
+    els.callFormatHint.textContent = "使用插件设置中的 " + upstreamLabel + " 地址和密钥。";
+    els.openaiConfigStatusText.textContent = configured ? upstreamLabel + " 已配置：" + (address || "") : upstreamLabel + " 未配置：请在插件设置中填写该服务的 API Key。";
+    els.openaiConfigStatus.querySelector(".status-dot").className = configured ? "status-dot ok" : "status-dot error";
   }
 
   // ===== 尺寸与点数消耗映射 =====
@@ -539,8 +539,8 @@
 
   // 分档名 ↔ OpenAI 像素分辨率互查（结果徽标显示用）。
   function sizeDisplayName(value) {
-    const opt = OPENAI_SIZE_OPTIONS.find((o) => o.value === value);
-    return opt ? `${opt.value}（${opt.tier}）` : value;
+    const opt = (currentCallFormat === "novelai" ? novelaiSizeOptions : OPENAI_SIZE_OPTIONS).find((o) => o.value === value);
+    return opt ? (opt.label || `${opt.value}（${opt.tier}）`) : value;
   }
 
   // 任务接口（/api/web/jobs）步数上限。
@@ -584,7 +584,7 @@
   function updateCostBadge() {
     const badge = els.costBadge;
     if (!badge) return;
-    if (currentCallFormat === "openai") {
+    if (currentCallFormat !== "direct") {
       hide(badge);
       return;
     }
@@ -610,7 +610,9 @@
     const curModel = els.model.value;
     els.size.innerHTML = "";
     const options =
-      currentCallFormat === "openai"
+      currentCallFormat === "novelai"
+        ? novelaiSizeOptions.map((opt) => ({value: opt.value, text: opt.label, baseCost: 0}))
+        : currentCallFormat === "openai"
         ? OPENAI_SIZE_OPTIONS.map((opt) => ({
             value: opt.value,
             text: opt.value,
@@ -625,14 +627,14 @@
       const cost = Math.max(opt.baseCost, getModelCostFloor(curModel));
       const elOpt = document.createElement("option");
       elOpt.value = opt.value;
-      elOpt.textContent = `${opt.text}(-${cost})`;
+      elOpt.textContent = currentCallFormat === "novelai" ? opt.text : `${opt.text}(-${cost})`;
       if (opt.value === curSize) {
         elOpt.selected = true;
       }
       els.size.appendChild(elOpt);
     });
     if (!options.some((opt) => opt.value === curSize)) {
-      els.size.value = currentCallFormat === "openai" ? "832x1216" : "竖图";
+      els.size.value = currentCallFormat !== "direct" ? "832x1216" : "竖图";
     }
   }
 
@@ -641,8 +643,9 @@
   function updateModelOptionsUI() {
     const curModel = els.model.value;
     els.model.innerHTML = "";
-    if (currentCallFormat === "openai") {
-      openaiModels.forEach((name) => {
+    if (currentCallFormat !== "direct") {
+      const models = currentCallFormat === "novelai" ? (panelConfig.novelai_models || openaiModels.slice(0, 4)) : openaiModels;
+      models.forEach((name) => {
         const opt = document.createElement("option");
         opt.value = name;
         opt.textContent = name;
@@ -700,7 +703,7 @@
     // OpenAI 兼容格式：附带本地上传的多张参考图（§5.2 最多 8 张）、逐图
     // 强度/精准参考描述、img2img 重绘参数、种子、参考图使用模式与
     // director-tools 动作（对齐接口文档 §4-§8）
-    if (body.call_format === "openai") {
+    if (body.call_format !== "direct") {
       const refs = referenceImages;
       if (refs.length) {
         body.reference_image_b64_list = refs.map((r) => r.b64);
@@ -973,12 +976,34 @@
       if (referenceImages.length) show(els.refGridWrap);
       else hide(els.refGridWrap);
     }
+    updateReferenceWarning();
   }
 
   // 按参考图使用模式切换可见性：全局重绘强度/附加噪声仅 img2img 使用，
   // vibe / 精准参考改用逐图强度（CSS 按 mode-* 类控制卡片内控件显隐）
+  function openaiReferenceError(body) {
+    if (body.call_format !== "openai" || body.director_action ||
+        body.reference_mode !== "director" || !(body.reference_image_b64_list || []).length) return "";
+    const supported = panelConfig.openai_director_models || [
+      "nai-diffusion-4-5-full", "nai-diffusion-4-5-curated", "nai45", "nai45-curated",
+    ];
+    if (supported.includes(String(body.model || "").trim().toLowerCase())) return "";
+    return `当前模型 ${body.model || "（未选择）"} 不支持精准参考，V5 暂不支持此功能。请明确选择 V4.5 Full 或 Curated 后重新提交；不会自动替换模型。OpenAI 兼容仅表示传输协议，不代表模型能力。`;
+  }
+
+  function updateReferenceWarning() {
+    const message = openaiReferenceError({
+      call_format: currentCallFormat, model: els.model.value,
+      reference_mode: currentRefMode(), director_action: els.directorAction.value,
+      reference_image_b64_list: referenceImages,
+    });
+    els.refModelWarning.textContent = message;
+    if (message) show(els.refModelWarning);
+    else hide(els.refModelWarning);
+  }
+
   function applyRefModeUI() {
-    const openai = currentCallFormat === "openai";
+    const openai = currentCallFormat !== "direct";
     const mode = currentRefMode();
     if (els.refGrid) {
       els.refGrid.classList.remove("mode-vibe", "mode-img2img", "mode-director");
@@ -991,6 +1016,7 @@
       hide(els.refStrengthWrap);
       hide(els.refNoiseWrap);
     }
+    updateReferenceWarning();
   }
 
   // ===== 生成图片 =====
@@ -1002,7 +1028,7 @@
       showError("请至少填写一个提示词框（NAI 风格或自然语言）。");
       return;
     }
-    if (body.call_format === "openai") {
+    if (body.call_format !== "direct") {
       const refCount = (body.reference_image_b64_list || []).length;
       if (body.director_action && !refCount) {
         showError("图片处理动作需要先在「调用格式」卡片上传一张源图片。");
@@ -1015,6 +1041,11 @@
         return;
       }
     }
+    const capabilityError = openaiReferenceError(body);
+    if (capabilityError) {
+      showError(capabilityError);
+      return;
+    }
 
     lastRequestBody = body;
     isGenerating = true;
@@ -1023,7 +1054,7 @@
       : "";
     els.loadingText.textContent = body.director_action
       ? "正在以 director-tools 处理图片..."
-      : body.call_format === "openai"
+      : body.call_format !== "direct"
         ? `正在通过 ${upstreamLabel} 生成${refCountText}...`
         : "正在转译 + 生成图片...";
     setLoading(true);
@@ -1034,7 +1065,7 @@
     try {
       const bridge = await getBridge();
       const endpoint =
-        body.call_format === "openai"
+        body.call_format !== "direct"
           ? "test_panel/generate_openai"
           : "test_panel/generate";
       const resp = await bridge.apiPost(endpoint, body);
@@ -1180,7 +1211,7 @@
       galgame: "GalGame风",
       custom: "自定义",
     };
-    const formatLabel = requestBody.call_format === "openai" ? upstreamLabel : "NAI直连";
+    const formatLabel = requestBody.call_format !== "direct" ? upstreamLabel : "nai.sta1n.cn";
     const metaText = `${styleNames[requestBody.style] || requestBody.style} · ${sizeDisplayName(requestBody.size)} · ${images.length} UNIT · ${formatLabel}`;
     setBadge(els.resultMeta, metaText, "badge-tech-success");
     show(els.resultMeta);
@@ -1277,7 +1308,7 @@
     saveCache();
   }
 
-  // ===== 调用格式切换（NAI 直连 / OpenAI 兼容） =====
+  // ===== 调用格式切换（nai.sta1n.cn / OpenAI 兼容） =====
   function initFormatToggle() {
     formatToggleBtns = Array.from(
       els.callFormat.querySelectorAll(".format-toggle-btn")
@@ -1293,12 +1324,13 @@
   }
 
   function setCallFormat(fmt) {
+    if (fmt !== currentCallFormat) modeSelections[currentCallFormat] = {size: els.size.value, model: els.model.value};
     currentCallFormat = fmt;
     formatToggleBtns.forEach(function (btn) {
       var active = btn.getAttribute("data-format") === fmt;
       btn.classList.toggle("active", active);
     });
-    var openai = fmt === "openai";
+    var openai = fmt !== "direct";
     if (openai) {
       show(els.refUploadWrap);
       show(els.refModeWrap);
@@ -1309,7 +1341,7 @@
       els.callFormatHint.textContent =
         `使用插件设置中的 ${upstreamLabel} 地址和密钥。`;
       els.trialBtn.disabled = true;
-      els.trialBtn.title = "试用生成仅支持 NAI 直连格式";
+      els.trialBtn.title = "试用生成仅支持 nai.sta1n.cn格式";
     } else {
       hide(els.refUploadWrap);
       hide(els.refStrengthWrap);
@@ -1328,7 +1360,16 @@
     applyRefModeUI();
     updateModelOptionsUI();
     updateSizeOptionsUI();
+    const saved = modeSelections[fmt];
+    const defaults = fmt === "novelai" ? {size: panelConfig.novelai_image_size || "832x1216", model: panelConfig.novelai_api_model || "nai-diffusion-5-full"} : null;
+    const selected = saved || defaults;
+    if (selected) {
+      if (Array.from(els.size.options).some(opt => opt.value === selected.size)) els.size.value = selected.size;
+      if (Array.from(els.model.options).some(opt => opt.value === selected.model)) els.model.value = selected.model;
+    }
+    updateProviderStatus();
     updateCostBadge();
+    updateReferenceWarning();
   }
 
   function handleReferenceFileChange() {
@@ -1701,6 +1742,7 @@
       }
       updateSizeOptionsUI();
       updateCostBadge();
+      updateReferenceWarning();
     });
     // 步数 / 画幅 / 张数变化时实时刷新点数预估
     ["steps", "size", "count"].forEach((key) => {
@@ -1728,6 +1770,7 @@
     initFormatToggle();
     els.refFile.addEventListener("change", handleReferenceFileChange);
     els.refRemove.addEventListener("click", clearReferenceImage);
+    els.directorAction.addEventListener("change", updateReferenceWarning);
     if (els.refMode) {
       els.refMode.addEventListener("change", () => {
         applyRefModeUI();
@@ -1944,6 +1987,7 @@
     updateSizeOptionsUI();
     updateCostBadge();
     slotState.appliedId = String(slot.id);
+    updateReferenceWarning();
     refreshSlotStatus();
     if (e.status) {
       const name = slot.name || `槽位 ${slot.id}`;
@@ -2187,14 +2231,12 @@
     initContourEngine();
 
     bindEvents();
-    // 从后端恢复面板状态
-    await loadCache();
-    updateSizeOptionsUI();
-    toggleCustomArtists();
-    setCallFormat(currentCallFormat);
-    updateCostBadge();
-    // 仅加载 token 状态 badge（不填表单）
+    // 先加载服务配置和完整选项，再恢复用户缓存，避免默认值覆盖选择。
     await loadTokenStatus();
+    const cacheRestored = await loadCache();
+    slotState.autoApplied = cacheRestored;
+    toggleCustomArtists();
+    updateCostBadge();
     // 加载试用状态
     await loadTrialStatus();
     // 加载点数用量台账

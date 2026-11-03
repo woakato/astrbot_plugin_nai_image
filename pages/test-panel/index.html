@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NAI 生图控制终端 // ENDFIELD PROTOCOL</title>
-  <link rel="stylesheet" href="./app.css?v=4.9.6" />
+  <link rel="stylesheet" href="./app.css?v=4.10.0" />
 </head>
 <body>
   <!-- 终末地等高线动态地形 Canvas + 底部工业网格 -->
@@ -31,7 +31,7 @@
           <p class="header-subtitle">
             <span class="sub-lead">TALOS-II TOPOLOGY ENGINE</span>
             <span class="sub-sep">/</span>
-            <span>NAI.STA1N.CN NEURAL INTERFACE</span>
+            <span>IMAGE GENERATION INTERFACE</span>
           </p>
         </div>
       </div>
@@ -56,7 +56,7 @@
               <span class="card-sec-tag">FMT</span>
             </div>
             <div class="card-title-group">
-              <h2 class="card-title">调用格式 // CALL FORMAT</h2>
+              <h2 class="card-title">生图接入方式 // PROVIDER</h2>
               <span class="card-sub-code">TRANSPORT_SELECT</span>
             </div>
           </div>
@@ -64,15 +64,20 @@
           <div class="card-body">
             <!-- 分段式切换：传统 GET vs OpenAI 兼容 -->
             <div class="format-toggle-group" id="callFormat">
-              <button type="button" class="format-toggle-btn active" data-format="direct">
-                <span class="format-toggle-dot"></span>
-                <span class="format-toggle-label">NAI 直连</span>
-                <span class="format-toggle-sub">传统 GET 接口</span>
-              </button>
               <button type="button" class="format-toggle-btn" data-format="openai">
                 <span class="format-toggle-dot"></span>
-                <span class="format-toggle-label">OpenAI 兼容</span>
-                <span class="format-toggle-sub">/v1/images 端点</span>
+                <span class="format-toggle-label">OpenAI</span>
+                <span class="format-toggle-sub">/v1/images 接口</span>
+              </button>
+              <button type="button" class="format-toggle-btn" data-format="novelai">
+                <span class="format-toggle-dot"></span>
+                <span class="format-toggle-label">NovelAI</span>
+                <span class="format-toggle-sub">NAI 官方 / Starbride</span>
+              </button>
+              <button type="button" class="format-toggle-btn active" data-format="direct">
+                <span class="format-toggle-dot"></span>
+                <span class="format-toggle-label">nai.sta1n.cn</span>
+                <span class="format-toggle-sub">原有 GET / 任务接口</span>
               </button>
             </div>
             <div class="field-hint" style="margin-top: 10px;">
@@ -143,8 +148,9 @@
               </div>
               <div class="field-hint">
                 <span class="hint-icon">◈</span>
-                <span>vibe：reference_* 风格/角色参考（支持多张）；img2img：/v1/images/edits 重绘（仅取第一张）；director：精准参考（§6，支持 4.5 / 5 系列，可多张并逐图设权重）。未上传参考图时本项无效。</span>
+                <span>Vibe 学习风格/氛围；img2img 使用第一张图重绘，效果不同于精准参考。精准参考当前仅开放 V4.5 Full / Curated，可多张并逐图设权重；V5 不支持。OpenAI 兼容仅表示传输协议，不能证明模型支持精准参考。OpenAI 入口须自行选择 V4.5；NovelAI 入口可使用已明确配置的「V5 参考模型」。</span>
               </div>
+              <div id="refModelWarning" class="field-hint hidden" role="alert"></div>
             </div>
 
             <!-- img2img 附加噪声（仅 OpenAI 兼容格式 + img2img 模式显示） -->
@@ -710,6 +716,6 @@
     </main>
   </div>
 
-  <script src="./app.js?v=4.9.6"></script>
+  <script src="./app.js?v=4.10.2"></script>
 </body>
 </html>

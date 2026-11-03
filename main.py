@@ -60,9 +60,16 @@ if __package__:
         normalize_prompt,
         normalize_translate_mode,
     )
+    from .provider_config import (
+        NATIVE_MODELS,
+        NATIVE_SIZE_OPTIONS,
+        api_settings,
+        migrate_novelai_config,
+    )
     from .starbridge import (
         StarbridgeError,
         native_error,
+        decode_native_response,
         normalize_starbridge_response,
         prepare_starbridge_request,
     )
@@ -107,9 +114,16 @@ else:
         normalize_prompt,
         normalize_translate_mode,
     )
+    from provider_config import (
+        NATIVE_MODELS,
+        NATIVE_SIZE_OPTIONS,
+        api_settings,
+        migrate_novelai_config,
+    )
     from starbridge import (
         StarbridgeError,
         native_error,
+        decode_native_response,
         normalize_starbridge_response,
         prepare_starbridge_request,
     )
@@ -354,19 +368,26 @@ OPENAI_DIRECTOR_ACTIONS = {
 # 精准参考的 director_reference_* 数组均按此收敛。
 OPENAI_MAX_REFERENCE_IMAGES = 8
 
-# 支持精准参考（director_reference_*）的模型集合：NAI 4.5 与 NAI 5 全系
-# 实测均支持精准参考。其他模型携带精准参考字段会被服务端拒绝，仍自动切换
-# 为 nai-diffusion-4-5-full。
+# 精准参考按模型能力校验；OpenAI 兼容仅描述传输协议，不能证明模型支持。
+# 当前仅开放已确认的 V4.5 型号及别名，不自动替换用户选中的模型。
 OPENAI_DIRECTOR_MODELS = {
     "nai-diffusion-4-5-full",
     "nai-diffusion-4-5-curated",
     "nai45",
     "nai45-curated",
-    "nai-diffusion-5-full",
-    "nai-diffusion-5-curated",
-    "nai5",
-    "nai5-curated",
 }
+
+
+def _openai_precise_reference_error(model: str) -> str:
+    if model.strip().casefold() in OPENAI_DIRECTOR_MODELS:
+        return ""
+    return (
+        f"当前模型 {model or '（未选择）'} 不支持本插件的精准参考。"
+        "V5 暂不支持精准参考；OpenAI 兼容仅表示传输协议，不代表模型能力。"
+        "请明确选择 V4.5 Full 或 Curated 后重新提交；本次未发送生图请求，"
+        "不会自动替换模型。图生图（img2img）与精准参考效果不同。"
+    )
+
 
 # 精准参考 base_caption 仅允许的枚举值（新文档 §8.4）。
 OPENAI_DIRECTOR_CAPTIONS = ("character", "style", "character&style")
@@ -537,8 +558,10 @@ def _format_generate_error(reason: str) -> str:
     # 精确匹配
     if reason in _map:
         return _map[reason]
-    if reason.startswith("starbridge | "):
-        return "🚫 星桥：" + reason.split(" | ", 1)[1]
+    if reason.startswith(("starbridge | ", "novelai | ")):
+        return "🚫 NovelAI：" + reason.split(" | ", 1)[1]
+    if reason.startswith("reference_model_unsupported | "):
+        return "🚫 " + reason.split(" | ", 1)[1]
     # 精准参考（§6）被上游拒绝：参数已按文档格式提交，多为能力未开通
     if reason.startswith("director_ref_rejected"):
         detail = reason.split(" | ", 1)[1] if " | " in reason else ""
@@ -728,7 +751,7 @@ def migrate_invalid_call_mode(config: dict) -> str | None:
     ):
         config["call_mode"] = "direct"
         return "direct"
-    if mode not in ("direct", "openai"):
+    if mode not in ("direct", "openai", "novelai"):
         config["call_mode"] = "direct"
         return "direct"
     return None
@@ -770,9 +793,11 @@ class NAIGenerateImagePlugin(Star):
             history_limit = config.get("image_history_limit")
             self.image_history_limit: int = max(
                 0,
-                int(history_limit)
-                if history_limit is not None and history_limit != ""
-                else 0,
+                (
+                    int(history_limit)
+                    if history_limit is not None and history_limit != ""
+                    else 0
+                ),
             )
         except (TypeError, ValueError):
             self.image_history_limit = 0
@@ -798,9 +823,11 @@ class NAIGenerateImagePlugin(Star):
                 0.0,
                 min(
                     20.0,
-                    float(raw_scale)
-                    if raw_scale is not None and raw_scale != ""
-                    else 6.0,
+                    (
+                        float(raw_scale)
+                        if raw_scale is not None and raw_scale != ""
+                        else 6.0
+                    ),
                 ),
             )
         except (TypeError, ValueError):
@@ -831,31 +858,25 @@ class NAIGenerateImagePlugin(Star):
         # 先归一化被污染/非法的 call_mode（如 openai 但未配置接口地址），再读取；
         # 迁移结果在 init 末尾统一持久化。
         healed_call_mode = migrate_invalid_call_mode(config)
-        self.openai_api_profile: str = (
-            str(config.get("openai_api_profile") or "compatible").strip().casefold()
-        )
-        if self.openai_api_profile not in ("compatible", "starbridge"):
-            self.openai_api_profile = "compatible"
-        credential_updates: dict[str, Any] = {}
-        if not config.get("_api_credentials_version"):
-            # Move the old shared pair once, before users can switch services.
-            if self.openai_api_profile == "starbridge" and not any(
-                str(config.get(key) or "").strip()
-                for key in ("starbridge_api_base_url", "starbridge_api_key")
-            ):
-                credential_updates.update(
-                    starbridge_api_base_url=config.get("openai_api_base_url") or "",
-                    starbridge_api_key=config.get("openai_api_key") or "",
-                    openai_api_base_url="",
-                    openai_api_key="",
-                )
-            credential_updates["_api_credentials_version"] = 1
-            config.update(credential_updates)
+        credential_updates = migrate_novelai_config(config)
         if healed_call_mode is not None:
             credential_updates["call_mode"] = healed_call_mode
         self.call_mode: str = (config.get("call_mode") or "direct").strip()
-        if self.call_mode not in ("direct", "openai"):
-            self.call_mode = "direct"
+        self.novelai_service: str = api_settings(config, "novelai")["profile"]
+        self._api_config = dict(config)
+        selected_api = api_settings(config, self.call_mode)
+        self.openai_api_profile: str = selected_api["profile"]
+        self.starbridge_reference_model: str = str(
+            config.get("novelai_reference_model") or ""
+        ).strip()
+        if self.starbridge_reference_model == "不切换":
+            self.starbridge_reference_model = ""
+        if self.call_mode == "novelai":
+            self.image_size = str(config.get("novelai_image_size") or "832x1216")
+        elif self.call_mode == "openai":
+            self.image_size = (
+                normalize_image_size(config.get("openai_image_size")) or self.image_size
+            )
         # 聊天回复与测试面板是否展示「预计消耗点数」。
         self.show_cost_estimate: bool = bool(config.get("show_cost_estimate", True))
         # 点数用量统计：按日期累计每次成功出图的点数，供 /usage 与面板图表读取。
@@ -879,31 +900,24 @@ class NAIGenerateImagePlugin(Star):
             self.upstream_billing_sync_interval = 10
         self._upstream_billing_task: asyncio.Task | None = None
         self._upstream_billing_last_error = ""
-        # Keep the existing runtime attributes bound to the selected service.
-        credential_prefix = (
-            "starbridge" if self.openai_api_profile == "starbridge" else "openai"
-        )
-        self.openai_api_base_url: str = (
-            (config.get(f"{credential_prefix}_api_base_url") or "").strip().rstrip("/")
-        )
-        self.openai_api_key: str = (
-            config.get(f"{credential_prefix}_api_key") or ""
-        ).strip()
-        # model 为接口必填字段，留空时回退文档推荐的 nai-diffusion-5-full。
-        self.openai_api_model: str = (
-            config.get("openai_api_model") or "nai-diffusion-5-full"
-        ).strip() or "nai-diffusion-5-full"
+        # Existing generation helpers use attributes bound to the selected API.
+        self.openai_api_base_url: str = selected_api["url"]
+        self.openai_api_key: str = selected_api["key"]
+        self.openai_api_model: str = selected_api["model"]
+        reference_prefix = "novelai" if self.call_mode == "novelai" else "openai"
         # 参考图模式：vibe（风格参考，走 generations 的 reference_* 参数）、
         # img2img（图生图，走 /v1/images/edits）或 director（精准参考，走
         # generations 的 director_reference_* 参数，§6）。
         self.openai_reference_mode: str = (
-            (config.get("openai_reference_mode") or "vibe").strip().casefold()
+            (config.get(reference_prefix + "_reference_mode") or "vibe")
+            .strip()
+            .casefold()
         )
         if self.openai_reference_mode not in ("img2img", "vibe", "director"):
             self.openai_reference_mode = "vibe"
         # 精准参考描述（新文档 §8.4 的 base_caption），仅三个枚举值合法
         self.openai_director_caption: str = str(
-            config.get("openai_director_caption") or "character&style"
+            config.get(reference_prefix + "_director_caption") or "character&style"
         ).strip()
         if self.openai_director_caption not in OPENAI_DIRECTOR_CAPTIONS:
             self.openai_director_caption = "character&style"
@@ -922,17 +936,17 @@ class NAIGenerateImagePlugin(Star):
                 return default
 
         self.openai_vibe_strength: float = _load_ref_strength(
-            "openai_vibe_strength", 0.6
+            reference_prefix + "_vibe_strength", 0.6
         )
         self.openai_director_strength: float = _load_ref_strength(
-            "openai_director_strength", 1.0
+            reference_prefix + "_director_strength", 1.0
         )
         self.openai_director_secondary_strength: float = _load_ref_strength(
-            "openai_director_secondary_strength", 0.5
+            reference_prefix + "_director_secondary_strength", 0.5
         )
         # 精准参考兜底参考图：director 模式下请求未携带参考图（聊天指令/陪伴
         # 联动等场景）时，取此处第一个存在的文件。配置值为文件路径列表。
-        _fb_cfg = config.get("openai_director_fallback_images") or []
+        _fb_cfg = config.get(reference_prefix + "_director_fallback_images") or []
         if isinstance(_fb_cfg, str):
             _fb_cfg = [_fb_cfg]
         self.openai_director_fallback_images: list[str] = [
@@ -940,7 +954,7 @@ class NAIGenerateImagePlugin(Star):
         ]
         # 随机种子：-1 表示每次随机（不发送 seed 字段）。
         try:
-            _seed_cfg = config.get("openai_seed")
+            _seed_cfg = config.get(reference_prefix + "_seed")
             self.openai_seed: int = (
                 int(_seed_cfg) if _seed_cfg not in (None, "") else -1
             )
@@ -1936,16 +1950,18 @@ class NAIGenerateImagePlugin(Star):
                 return {
                     "enabled": bool(getattr(self, "enable_usage_stats", True)),
                     "days": days,
-                    "today": today_rows[-1]
-                    if today_rows
-                    else {
-                        "date": "",
-                        "cost": 0,
-                        "count": 0,
-                        "failed": 0,
-                        "upstream_cost": 0,
-                        "upstream_events": 0,
-                    },
+                    "today": (
+                        today_rows[-1]
+                        if today_rows
+                        else {
+                            "date": "",
+                            "cost": 0,
+                            "count": 0,
+                            "failed": 0,
+                            "upstream_cost": 0,
+                            "upstream_events": 0,
+                        }
+                    ),
                     "window": window,
                     "overall": overall,
                     "series": series,
@@ -2349,7 +2365,7 @@ class NAIGenerateImagePlugin(Star):
             logger.info(f"{LOG_TAG} [openai_generate] 尺寸校正: {size} -> {normalized}")
         return normalized
 
-    def _openai_endpoint(self, target: str) -> str:
+    def _openai_endpoint(self, target: str, *, base_url: str | None = None) -> str:
         """拼接 OpenAI 兼容端点，兼容 base_url 是否带 ``/v1``。
 
         Args:
@@ -2358,7 +2374,9 @@ class NAIGenerateImagePlugin(Star):
         Returns:
             完整端点 URL，例如 ``https://api1.syuan.org/v1/images/edits``。
         """
-        base = self.openai_api_base_url.rstrip("/")
+        base = (base_url if base_url is not None else self.openai_api_base_url).rstrip(
+            "/"
+        )
         target = "edits" if target == "edits" else "generations"
         if base.endswith(f"/images/{target}"):
             return base
@@ -2498,6 +2516,7 @@ class NAIGenerateImagePlugin(Star):
         director_caption: str | None = None,
         director_captions: Sequence[str] | None = None,
         characters: Sequence[tuple[str, float, float]] | None = None,
+        transport_mode: str | None = None,
     ) -> tuple[list[bytes], str]:
         """OpenAI 兼容格式生图（文生图 / 图生图 / 参考图 / 图片处理）。
 
@@ -2537,8 +2556,8 @@ class NAIGenerateImagePlugin(Star):
             director_caption: 精准参考描述（新文档 §8.4 的 base_caption），仅
                 允许 character / style / character&style，默认
                 self.openai_director_caption；被 director_captions 逐项覆盖。
-                精准参考仅支持 NAI 4.5 / NAI 5 模型，其他模型会自动切换为
-                nai-diffusion-4-5-full。
+                OpenAI 兼容入口的精准参考仅开放已确认的 NAI 4.5 型号；
+                不支持的型号会在请求前报错，须由用户明确选择替代模型。
             director_captions: 每张精准参考图的 base_caption 列表，非法值回退
                 director_caption / 插件配置。
             characters: 多角色坐标列表 (提示词, x, y)，坐标 0-1（§7），
@@ -2551,9 +2570,34 @@ class NAIGenerateImagePlugin(Star):
 
         import aiohttp
 
-        base = self.openai_api_base_url
+        selected_api = (
+            api_settings(self._api_config, transport_mode or self.call_mode)
+            if hasattr(self, "_api_config")
+            else {
+                "url": self.openai_api_base_url,
+                "key": self.openai_api_key,
+                "profile": getattr(self, "openai_api_profile", "compatible"),
+                "model": self.openai_api_model,
+            }
+        )
+        reference_prefix = (
+            "novelai"
+            if selected_api["profile"] in ("starbridge", "starbride", "official")
+            else "openai"
+        )
+        reference_config = getattr(self, "_api_config", {})
+
+        def reference_setting(suffix, fallback):
+            return reference_config.get(reference_prefix + "_" + suffix, fallback)
+
+        base = selected_api["url"]
         if not base:
             return [], "openai_not_configured"
+        if (
+            selected_api["profile"] in ("starbridge", "starbride", "official")
+            and not selected_api["key"]
+        ):
+            return [], "novelai | 请填写当前 NovelAI 生图服务的 API Key。"
         if not self._session:
             return [], "no_session"
 
@@ -2566,18 +2610,19 @@ class NAIGenerateImagePlugin(Star):
 
         # director-tools 图片处理：model / action 由动作唯一决定（§8）
         is_director = director_action in OPENAI_DIRECTOR_ACTIONS
-        starbridge = getattr(self, "openai_api_profile", "compatible") == "starbridge"
+        starbridge = selected_api["profile"] in ("starbridge", "starbride", "official")
         starbridge_tool_model = (
-            (model or self._slot_model() or self.openai_api_model or "").strip()
+            (model or self._slot_model() or selected_api["model"] or "").strip()
             if starbridge and is_director
             else None
         )
         model = (
             "director-tools"
             if is_director
-            else (model or self._slot_model() or self.openai_api_model or "").strip()
+            else (model or self._slot_model() or selected_api["model"] or "").strip()
         )
-        api_key = self.openai_api_key
+        requested_model = starbridge_tool_model if starbridge and is_director else model
+        api_key = selected_api["key"]
         timeout = aiohttp.ClientTimeout(total=self.request_timeout)
 
         # ==== 参考图收集：多图列表优先，兼容旧单图参数（§5.2 上限 8 张） ====
@@ -2603,7 +2648,11 @@ class NAIGenerateImagePlugin(Star):
                     f"{type(exc).__name__}: {exc}"
                 )
 
-        ref_mode = (reference_mode or self.openai_reference_mode or "vibe").casefold()
+        ref_mode = (
+            reference_mode
+            or reference_setting("reference_mode", self.openai_reference_mode)
+            or "vibe"
+        ).casefold()
         if ref_mode not in ("img2img", "vibe", "director"):
             ref_mode = "vibe"
         if (is_director or ref_mode == "director") and not ref_bytes_list:
@@ -2613,7 +2662,9 @@ class NAIGenerateImagePlugin(Star):
             # 绝对路径（用户手填）则原样使用。
             if not is_director:
                 _data_dir = StarTools.get_data_dir(PLUGIN_NAME)
-                for _fb_path in self.openai_director_fallback_images:
+                for _fb_path in reference_setting(
+                    "director_fallback_images", self.openai_director_fallback_images
+                ):
                     if len(ref_bytes_list) >= OPENAI_MAX_REFERENCE_IMAGES:
                         break
                     try:
@@ -2640,6 +2691,16 @@ class NAIGenerateImagePlugin(Star):
                     )
             if not ref_bytes_list and is_director:
                 return [], "no_reference_image"
+
+        if (
+            not starbridge
+            and not is_director
+            and ref_mode == "director"
+            and ref_bytes_list
+        ):
+            capability_error = _openai_precise_reference_error(model)
+            if capability_error:
+                return [], "reference_model_unsupported | " + capability_error
 
         if len(ref_bytes_list) > OPENAI_MAX_REFERENCE_IMAGES:
             logger.info(
@@ -2747,7 +2808,11 @@ class NAIGenerateImagePlugin(Star):
         ).strip()
         _negative = negative if negative is not None else self.negative
         try:
-            _seed = int(seed if seed is not None else self.openai_seed)
+            _seed = int(
+                seed
+                if seed is not None
+                else reference_setting("seed", self.openai_seed)
+            )
         except (TypeError, ValueError):
             _seed = -1
 
@@ -2792,9 +2857,9 @@ class NAIGenerateImagePlugin(Star):
         # strength 参数，仍缺失时用模式默认值补齐（vibe 默认 0.6、精准参考
         # 默认 1.0），保证数组与参考图严格等长。
         _strength_default = (
-            self.openai_director_strength
+            reference_setting("director_strength", self.openai_director_strength)
             if ref_mode == "director"
-            else self.openai_vibe_strength
+            else reference_setting("vibe_strength", self.openai_vibe_strength)
         )
         _scalar_strength: float | None = None
         if strength is not None:
@@ -2818,7 +2883,9 @@ class NAIGenerateImagePlugin(Star):
         # 精准参考逐图描述（§8.4）：base_caption 仅三个枚举值合法，非法值
         # 回退 director_caption / 插件配置，最终回退 character&style。
         _caption_fallback = (
-            director_caption or self.openai_director_caption or ""
+            director_caption
+            or reference_setting("director_caption", self.openai_director_caption)
+            or ""
         ).strip()
         if _caption_fallback not in OPENAI_DIRECTOR_CAPTIONS:
             _caption_fallback = "character&style"
@@ -2856,23 +2923,14 @@ class NAIGenerateImagePlugin(Star):
             # 预处理。information_extracted 固定 1.0：实测其他取值（如 0.7）
             # 会被上游参数校验拒绝（HTTP 400），与 §8 各示例保持一致。
             payload["action"] = "generate"
-            # 精准参考仅支持 NAI 4.5 / NAI 5 模型（实测），其余模型会被服务端
-            # 拒绝；当前模型不满足时自动切换到 4-5-full 以保证能力可用。
-            if (
-                not starbridge
-                and (model or "").strip().casefold() not in OPENAI_DIRECTOR_MODELS
-            ):
-                logger.info(
-                    f"{LOG_TAG} [openai_generate] 精准参考不支持当前模型 {model or '(none)'}"
-                    "（仅 4.5 / 5 系列），自动切换为 nai-diffusion-4-5-full"
-                )
-                model = "nai-diffusion-4-5-full"
-                payload["model"] = model
             parameters["director_reference_images"] = ref_uris
             parameters["director_reference_strength_values"] = ref_strength_values
             # 次级特征强度（§8.5 推荐 0.35-0.7），默认取插件设置
             parameters["director_reference_secondary_strength_values"] = [
-                self.openai_director_secondary_strength
+                reference_setting(
+                    "director_secondary_strength",
+                    self.openai_director_secondary_strength,
+                )
             ] * len(ref_uris)
             parameters["director_reference_information_extracted"] = [1.0] * len(
                 ref_uris
@@ -2920,7 +2978,9 @@ class NAIGenerateImagePlugin(Star):
             }
         payload["parameters"] = parameters
 
-        endpoint = self._openai_endpoint("edits" if is_edit else "generations")
+        endpoint = self._openai_endpoint(
+            "edits" if is_edit else "generations", base_url=base
+        )
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -2935,20 +2995,22 @@ class NAIGenerateImagePlugin(Star):
                     headers=headers,
                     timeout=timeout,
                     image_model=starbridge_tool_model,
+                    reference_model=getattr(self, "starbridge_reference_model", ""),
                 )
             except asyncio.TimeoutError:
                 return (
                     [],
-                    "starbridge | 参考图编码超时，未继续生图；编码可能已计费，请确认后再试。",
+                    "novelai | 参考图编码超时，未继续生图；编码可能已计费，请确认后再试。",
                 )
             except StarbridgeError as exc:
-                return [], "starbridge | " + str(exc)
+                return [], "novelai | " + str(exc)
             except (aiohttp.ClientError, OSError):
                 return (
                     [],
-                    "starbridge | 参考图处理请求中断，未自动重试；请确认编码费用后再试。",
+                    "novelai | 参考图处理请求中断，未自动重试；请确认编码费用后再试。",
                 )
             endpoint, payload = prepared.endpoint, prepared.payload
+            model = payload["model"]
             headers["Accept"] = "application/json"
             request_options["allow_redirects"] = False
 
@@ -2993,8 +3055,12 @@ class NAIGenerateImagePlugin(Star):
                     timeout=timeout,
                     **request_options,
                 ) as resp:
-                    text = await resp.text()
                     status = resp.status
+                    text = (
+                        json.dumps(decode_native_response(await resp.read()))
+                        if starbridge and 200 <= status < 300
+                        else await resp.text()
+                    )
             except asyncio.TimeoutError:
                 # 超时不自动重试：生图请求超时后上游通常仍在继续生成并照常
                 # 扣费，自动重试会导致一次需求被多次扣费。直接失败并提示
@@ -3033,7 +3099,7 @@ class NAIGenerateImagePlugin(Star):
         if status == 0:
             return [], "timeout"
         if starbridge and 300 <= status < 400:
-            return [], "starbridge | 接口发生重定向，请填写最终的 HTTPS 站点地址。"
+            return [], "novelai | 接口发生重定向，请填写最终的 HTTPS 站点地址。"
         if status >= 400:
             # 尽量提取上游 error.message，透传给用户（如"降低尺寸、步数"建议）
             err_msg = ""
@@ -3152,6 +3218,7 @@ class NAIGenerateImagePlugin(Star):
             generation_parameters: dict[str, Any] = {
                 "tag": prompt,
                 "model": str(model or ""),
+                "requested_model": str(requested_model or ""),
                 "size": _openai_size,
                 "steps": _steps,
                 "scale": _scale,
@@ -3164,7 +3231,7 @@ class NAIGenerateImagePlugin(Star):
                 "estimated_cost": _estimated_cost,
             }
             if starbridge:
-                generation_parameters["api_profile"] = "starbridge"
+                generation_parameters["api_profile"] = selected_api["profile"]
                 generation_parameters["seed"] = payload.get("parameters", {}).get(
                     "seed", "random"
                 )
@@ -3818,6 +3885,9 @@ class NAIGenerateImagePlugin(Star):
 
     async def _test_panel_get_config(self) -> Any:
         """Web API: 返回当前插件配置（脱敏 token）。"""
+        stored = getattr(self, "_api_config", {})
+        openai_api = api_settings(stored, "openai")
+        native_api = api_settings(stored, "novelai")
         return json_response(
             {
                 "image_gen_key": "已配置" if self.image_gen_key else "未配置",
@@ -3855,12 +3925,20 @@ class NAIGenerateImagePlugin(Star):
                 "image_styles_options": IMAGE_STYLES,
                 "image_size_options": IMAGE_SIZES,
                 "default_negative": DEFAULT_NEGATIVE,
-                "openai_api_base_url": self.openai_api_base_url or "未配置",
+                "openai_api_base_url": openai_api["url"] or "未配置",
                 "openai_api_profile": getattr(self, "openai_api_profile", "compatible"),
-                "openai_api_model": self.openai_api_model or "未配置",
-                "openai_available": bool(
-                    self.openai_api_base_url and self.openai_api_key
-                ),
+                "openai_api_model": openai_api["model"],
+                "openai_available": bool(openai_api["url"] and openai_api["key"]),
+                "novelai_available": bool(native_api["url"] and native_api["key"]),
+                "novelai_service": native_api["profile"],
+                "novelai_api_base_url": native_api["url"],
+                "novelai_api_model": native_api["model"],
+                "novelai_image_size": stored.get("novelai_image_size", "832x1216"),
+                "novelai_size_options": [
+                    {"value": value, "label": label}
+                    for value, label in NATIVE_SIZE_OPTIONS
+                ],
+                "novelai_models": list(NATIVE_MODELS),
                 "openai_reference_mode": self.openai_reference_mode,
                 "openai_director_caption": self.openai_director_caption,
                 "openai_vibe_strength": self.openai_vibe_strength,
@@ -3870,6 +3948,7 @@ class NAIGenerateImagePlugin(Star):
                 "request_timeout": self.request_timeout,
                 "openai_max_retries": self.openai_max_retries,
                 "openai_models": OPENAI_COMPATIBLE_MODELS,
+                "openai_director_models": sorted(OPENAI_DIRECTOR_MODELS),
                 "openai_director_actions": OPENAI_DIRECTOR_ACTIONS,
                 "call_mode": self.call_mode,
             }
@@ -4035,7 +4114,17 @@ class NAIGenerateImagePlugin(Star):
         if not nai_prompt and not nl_prompt and not director_action:
             return error_response("请至少填写一个提示词框", status_code=400)
 
-        if not self.openai_api_base_url:
+        transport_mode = str(
+            body.get("call_format") or getattr(self, "call_mode", "openai")
+        )
+        if transport_mode not in ("openai", "novelai"):
+            transport_mode = "openai"
+        panel_api = (
+            api_settings(self._api_config, transport_mode)
+            if hasattr(self, "_api_config")
+            else {"url": self.openai_api_base_url}
+        )
+        if not panel_api["url"]:
             return error_response(
                 "未配置当前生图服务的接口地址，请在插件设置中选择对应服务并填写地址。",
                 status_code=400,
@@ -4158,6 +4247,22 @@ class NAIGenerateImagePlugin(Star):
         model = (_slot["model"] or None) if _slot else _opt_str("model")
         director_caption = _opt_str("director_caption")
 
+        # 面板预检在转译和生图之前执行；核心入口再次校验，覆盖聊天与联动。
+        if (
+            transport_mode == "openai"
+            and not director_action
+            and (reference_mode or self.openai_reference_mode) == "director"
+            and reference_image_bytes_list
+        ):
+            effective_model = (
+                model
+                or self._slot_model()
+                or panel_api.get("model", getattr(self, "openai_api_model", ""))
+            )
+            capability_error = _openai_precise_reference_error(effective_model)
+            if capability_error:
+                return error_response(capability_error, status_code=400)
+
         # 逐图精准参考描述（§8.4）：面板传 base_caption 数组，与参考图按下标
         # 对应；非法值由 _openai_generate 回退统一配置处理。
         director_captions: list[str] | None = None
@@ -4250,6 +4355,7 @@ class NAIGenerateImagePlugin(Star):
                 director_caption=director_caption,
                 director_captions=director_captions,
                 characters=characters,
+                transport_mode=transport_mode,
             )
         except Exception as exc:
             logger.warning(
@@ -4277,7 +4383,7 @@ class NAIGenerateImagePlugin(Star):
                 "data": [{"b64_json": b64} for b64 in images_b64],
                 "merge_info": merge_info,
                 "elapsed_info": f"{len(images_b64)} 张",
-                "call_format": "openai",
+                "call_format": transport_mode,
                 "reference_used": bool(reference_image_bytes_list),
             }
         )
@@ -4595,7 +4701,7 @@ class NAIGenerateImagePlugin(Star):
             slot_model = ""
         if slot_model:
             return normalize_model_ver(slot_model)
-        if call_mode == "openai":
+        if call_mode in ("openai", "novelai"):
             model = str(getattr(self, "openai_api_model", "") or "")
         else:
             model = str(getattr(self, "model", "") or "")
@@ -5214,7 +5320,7 @@ class NAIGenerateImagePlugin(Star):
         )
         # 按调用模式校验所需凭据
         missing = ""
-        if self.call_mode == "openai":
+        if self.call_mode in ("openai", "novelai"):
             if not self.openai_api_base_url:
                 missing = "当前生图服务的接口地址"
         else:
@@ -5284,7 +5390,7 @@ class NAIGenerateImagePlugin(Star):
         )
 
         try:
-            if self.call_mode == "openai":
+            if self.call_mode in ("openai", "novelai"):
                 images, reason = await self._openai_generate(
                     prompt,
                     size,
@@ -5365,7 +5471,7 @@ class NAIGenerateImagePlugin(Star):
         )
         # 按调用模式校验所需凭据
         missing = ""
-        if self.call_mode == "openai":
+        if self.call_mode in ("openai", "novelai"):
             if not self.openai_api_base_url:
                 missing = "当前生图服务的接口地址"
         else:
@@ -5505,7 +5611,7 @@ class NAIGenerateImagePlugin(Star):
                 },
                 status=400,
             )
-        if self.call_mode == "openai":
+        if self.call_mode in ("openai", "novelai"):
             # OpenAI 兼容模式：有参考图走图生图，否则文生图
             logger.info(
                 f"{LOG_TAG} [proxy:edit] OpenAI 模式 | prompt='{prompt[:80]}' "
@@ -5670,7 +5776,7 @@ class NAIGenerateImagePlugin(Star):
             yield event.plain_result("请提供提示词。")
             return
 
-        if args.characters and self.call_mode != "openai":
+        if args.characters and self.call_mode not in ("openai", "novelai"):
             logger.info(f"{LOG_TAG} [cmd:image] --char 需要 OpenAI 兼容模式")
             yield event.plain_result(
                 "参数 --char（多角色坐标）仅在调用模式为「OpenAI 兼容」时可用，"
@@ -5679,7 +5785,7 @@ class NAIGenerateImagePlugin(Star):
             return
 
         # 按调用模式校验凭据
-        if self.call_mode == "openai":
+        if self.call_mode in ("openai", "novelai"):
             if not self.openai_api_base_url:
                 logger.warning(f"{LOG_TAG} [cmd:image] OpenAI 接口未配置")
                 yield event.plain_result(
@@ -5697,7 +5803,7 @@ class NAIGenerateImagePlugin(Star):
         n = args.n if args.n is not None else self.image_count
         style = args.style or self.image_style
         size_cn = args.size or self.image_size
-        if self.call_mode == "openai":
+        if self.call_mode in ("openai", "novelai"):
             # OpenAI 兼容模式：--size 直接使用像素分辨率（宽x高），契约修正由
             # _openai_generate 内部完成；分档名则映射为对应分辨率。
             size = self._openai_size(size_cn) if size_cn in IMAGE_SIZES else size_cn
@@ -5735,7 +5841,9 @@ class NAIGenerateImagePlugin(Star):
         # 直连模式按「步数 × 画质」档位预估点数（任务接口计费见 pricing
         # 模块）；步数超过任务接口上限 50 时按 50 计。
         cost_note = ""
-        if self.call_mode != "openai" and getattr(self, "show_cost_estimate", True):
+        if self.call_mode not in ("openai", "novelai") and getattr(
+            self, "show_cost_estimate", True
+        ):
             unit_cost = web_job_generation_cost(size, effective_model, effective_steps)
             cost_note = f"\n预计消耗: {unit_cost} 点/张"
             if n > 1:
@@ -5774,7 +5882,7 @@ class NAIGenerateImagePlugin(Star):
         success = 0
         first_reason: str | None = None
 
-        if self.call_mode == "openai":
+        if self.call_mode in ("openai", "novelai"):
             # OpenAI 兼容模式：一次请求返回 n 张。先按与直连一致的流程完成
             # 转译 / 服装缓存 / 角色模板，再把画师串并入 prompt。
             try:
@@ -5797,9 +5905,9 @@ class NAIGenerateImagePlugin(Star):
                     scale=args.scale,
                     sampler=args.sampler,
                     noise_schedule=args.noise_schedule,
-                    negative=args.negative
-                    if args.negative is not None
-                    else self.negative,
+                    negative=(
+                        args.negative if args.negative is not None else self.negative
+                    ),
                     model=effective_model,
                     characters=args.characters,
                 )
@@ -6027,7 +6135,9 @@ class NAIGenerateImagePlugin(Star):
             yield event.plain_result(f"图片反推失败：{type(exc).__name__}: {exc}")
 
     @filter.on_llm_request()
-    async def filter_disabled_image_tools(self, event: AstrMessageEvent, request: Any) -> None:
+    async def filter_disabled_image_tools(
+        self, event: AstrMessageEvent, request: Any
+    ) -> None:
         """Remove disabled standalone tools from this request's private catalog.
 
         Args:
@@ -6038,9 +6148,13 @@ class NAIGenerateImagePlugin(Star):
             return
         tools = getattr(request, "func_tool", None)
         if isinstance(tools, ToolSet):
-            request.func_tool = ToolSet(tools=[
-                tool for tool in tools
-                if tool.name not in {"NAI_Generate_Image", "NAI_Search_Grimoire"}])
+            request.func_tool = ToolSet(
+                tools=[
+                    tool
+                    for tool in tools
+                    if tool.name not in {"NAI_Generate_Image", "NAI_Search_Grimoire"}
+                ]
+            )
 
     def _refresh_llm_tool_schema(self) -> None:
         """按当前插件配置改写 NAI_Generate_Image 的参数 schema。
@@ -6093,12 +6207,17 @@ class NAIGenerateImagePlugin(Star):
             if not self._character_blocks_enabled():
                 props.pop("char1_prompt", None)
                 props.pop("char2_prompt", None)
-            if self.call_mode == "openai":
+            if self.call_mode in ("openai", "novelai"):
+                tool_sizes = (
+                    tuple(value for value, _ in NATIVE_SIZE_OPTIONS)
+                    if self.call_mode == "novelai"
+                    else OPENAI_TOOL_SIZES
+                )
                 default_size = self._openai_size(self.image_size)
                 if "size_cn" in props:
                     props["size_cn"]["description"] = (
                         '图片尺寸，像素分辨率 "宽x高"，宽高须为 64 的倍数。'
-                        f"常用值: {', '.join(OPENAI_TOOL_SIZES)}。"
+                        f"常用值: {', '.join(tool_sizes)}。"
                         f"留空则使用插件设置的默认尺寸（当前默认 {default_size}）。"
                     )
             elif "size_cn" in props:
@@ -6221,7 +6340,7 @@ class NAIGenerateImagePlugin(Star):
             return
 
         # 按调用模式校验凭据
-        if self.call_mode == "openai":
+        if self.call_mode in ("openai", "novelai"):
             if not self.openai_api_base_url:
                 logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] OpenAI 接口未配置")
                 yield "生成失败，未配置当前生图服务的接口地址，请告知用户在插件设置中选择对应服务并填写地址。"
@@ -6248,7 +6367,7 @@ class NAIGenerateImagePlugin(Star):
         # 分档名与真实分辨率对不上）；传统 GET 模式保持中文分档名，上游只识别
         # 中文尺寸值（portrait/2k_portrait 等英文别名会导致 2K/4K 生成失败）。
         raw_size = str(size_cn or "").strip()
-        if self.call_mode == "openai":
+        if self.call_mode in ("openai", "novelai"):
             if not raw_size:
                 raw_size = self.image_size
             normalized_size = normalize_image_size(raw_size)
@@ -6317,7 +6436,7 @@ class NAIGenerateImagePlugin(Star):
                 f"char1/char2 参数"
             )
         characters: list[tuple[str, float, float]] | None = None
-        if char_blocks and self.call_mode == "openai":
+        if char_blocks and self.call_mode in ("openai", "novelai"):
             if len(char_blocks) == 1:
                 characters = [(char_blocks[0], 0.5, 0.5)]
             else:
@@ -6348,7 +6467,7 @@ class NAIGenerateImagePlugin(Star):
 
         logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 生成第 1/1 张")
         try:
-            if self.call_mode == "openai":
+            if self.call_mode in ("openai", "novelai"):
                 openai_prompt, _, _ = await self._prepare_openai_prompt(
                     prompt, style, custom_artists=slot_artists or None
                 )
@@ -6438,7 +6557,7 @@ class NAIGenerateImagePlugin(Star):
             yield event.plain_result(f"参数错误：{e}")
             return
 
-        if self.call_mode == "openai":
+        if self.call_mode in ("openai", "novelai"):
             yield event.plain_result(
                 "当前调用模式为「OpenAI 兼容」，点数规则由该服务方决定，"
                 "本价目表仅适用于「传统 GET」直连模式（nai.sta1n.cn）。\n"
@@ -6589,7 +6708,7 @@ class NAIGenerateImagePlugin(Star):
         lines.append(
             f"本地代理 127.0.0.1:{self.proxy_port}: {'✅ 在线' if proxy_ok else '❌ 离线'} {proxy_msg}"
         )
-        if self.call_mode == "openai":
+        if self.call_mode in ("openai", "novelai"):
             lines.append(
                 f"上游 OpenAI 兼容接口: {self.openai_api_base_url or '❌ 未配置'}"
                 f" | key={'✅ 已配置' if self.openai_api_key else '⚠️ 未配置'}"

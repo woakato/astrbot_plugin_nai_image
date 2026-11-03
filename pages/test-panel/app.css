@@ -1400,10 +1400,10 @@ body::before {
   box-shadow: 0 8px 48px rgba(0, 0, 0, 0.6);
 }
 
-/* ===== 调用格式分段切换（NAI 直连 / OpenAI 兼容） ===== */
+/* ===== 生图接入方式 ===== */
 .format-toggle-group {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1976,4 +1976,8 @@ body::before {
     flex-direction: column;
     align-items: stretch;
   }
+}
+
+@media (max-width: 520px) {
+  .format-toggle-group { grid-template-columns: 1fr; }
 }
