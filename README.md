@@ -9,6 +9,14 @@
 - **NovelAI**：使用 NAI 原生 `/ai/` 协议，生图服务可选「NAI 官方」或「Starbride」，默认选择 **Starbride**。
 - **nai.sta1n.cn**：保留原有 GET / 任务接口、尺寸分档和点数规则。
 
+### 陪伴联动与面板状态
+
+陪伴联动按**当前选中的服务**检查地址和 API Key；只有其他服务的密钥、只填地址或密钥为空白时，当前服务仍显示未配置、不可用。接口的 `operations` 明确声明当前可用的 `generate` / `edit` 操作，`call_mode` 保留真实接入方式。编辑入口可用不代表所选模型支持精准参考，型号限制仍在生图提交前校验。
+
+陪伴插件旧适配器只为 `openai` 开放编辑；使用 NovelAI 接入时，还需要配套升级陪伴端适配器，修复见 [private_companion PR #504](https://github.com/menglimi/astrbot_plugin_private_companion/pull/504)。该适配器优先读取操作声明，同时兼容旧版 NAI 的 `reference_supported`。
+
+测试面板先加载所选服务的完整模型和尺寸选项，再恢复缓存。刷新及来回切换入口后保留上次选中的模型、尺寸和参数；有缓存时不让默认画风槽位覆盖缓存，仅首次无缓存时自动应用默认槽位。
+
 ### NovelAI 配置
 
 1. **生图接入方式**选择 `NovelAI`。

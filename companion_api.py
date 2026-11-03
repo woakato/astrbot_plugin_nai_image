@@ -22,6 +22,7 @@ from astrbot.api.star import StarTools
 
 from .command_args import normalize_image_size, normalize_image_style
 from .prompt_processing import normalize_prompt
+from .provider_config import api_settings
 
 if TYPE_CHECKING:
     from .main import NAIGenerateImagePlugin
@@ -73,15 +74,35 @@ class NAIImageCompanionExtensionAPI:
 
     # ==== 状态查询 ====
 
+    def _credential_status(self) -> tuple[bool, str]:
+        """检查当前服务的地址和密钥，不读取其他服务的凭据作为兜底。"""
+        plugin = self._plugin
+        mode = str(getattr(plugin, "call_mode", "direct") or "direct")
+        if mode in ("openai", "novelai"):
+            selected = (
+                api_settings(plugin._api_config, mode)
+                if hasattr(plugin, "_api_config")
+                else {
+                    "url": getattr(plugin, "openai_api_base_url", ""),
+                    "key": getattr(plugin, "openai_api_key", ""),
+                }
+            )
+            if not str(selected["url"] or "").strip():
+                return False, mode + "_not_configured"
+            if not str(selected["key"] or "").strip():
+                return False, mode + "_key_missing"
+            return True, "ready"
+        return (
+            (True, "ready")
+            if str(plugin.image_gen_key or "").strip()
+            else (False, "no_token")
+        )
+
     def status(self) -> dict[str, Any]:
         """返回插件直连状态快照，供陪伴插件面板与状态查询使用。"""
         plugin = self._plugin
         call_mode = str(getattr(plugin, "call_mode", "direct") or "direct")
-        if call_mode in ("openai", "novelai"):
-            # OpenAI 兼容模式只需要接口地址；直连 token 不参与生图。
-            credential_configured = bool(getattr(plugin, "openai_api_base_url", ""))
-        else:
-            credential_configured = bool(plugin.image_gen_key)
+        credential_configured, credential_reason = self._credential_status()
         slot_model = getattr(plugin, "_slot_model", lambda: "")()
         slot = (
             getattr(plugin, "_active_artist_slot", lambda: None)()
@@ -103,6 +124,8 @@ class NAIImageCompanionExtensionAPI:
             # 是否就绪看 credential_configured。
             "token_configured": bool(plugin.image_gen_key),
             "credential_configured": credential_configured,
+            "credential_reason": credential_reason,
+            "operations": self.capability_status(None)["operations"],
             "base_url": plugin.base_url,
             "default_style": plugin.image_style,
             "artist_slot_name": (
@@ -138,18 +161,13 @@ class NAIImageCompanionExtensionAPI:
                 "selected_backend": "nai",
                 "backup_external_note": "disabled",
                 "backends": {},
+                "operations": [],
             }
         # 只做本地就绪检查，不探测上游：上游可达性探测每次约 1 秒以上，
         # 而陪伴插件会高频轮询本接口，预检会拖慢主动链路；真实失败会由
         # 生图结果以明确的错误信息返回。
         call_mode = str(getattr(plugin, "call_mode", "direct") or "direct")
-        if call_mode in ("openai", "novelai"):
-            # OpenAI 兼容模式不依赖直连 token，接口地址缺失才是未就绪。
-            credential_ok = bool(getattr(plugin, "openai_api_base_url", ""))
-            credential_reason = "openai_not_configured"
-        else:
-            credential_ok = bool(plugin.image_gen_key)
-            credential_reason = "no_token"
+        credential_ok, credential_reason = self._credential_status()
         session_ok = plugin._session is not None and not plugin._session.closed
         nai_ready = credential_ok and session_ok
         if not credential_ok:
@@ -170,6 +188,15 @@ class NAIImageCompanionExtensionAPI:
                 "external": nai_ready,
                 "proxy": plugin.proxy_runner is not None,
             },
+            "operations": (
+                (
+                    ["generate", "edit"]
+                    if call_mode in ("openai", "novelai")
+                    else ["generate"]
+                )
+                if nai_ready
+                else []
+            ),
         }
 
     async def maintenance(self, owner: Any) -> dict[str, Any]:

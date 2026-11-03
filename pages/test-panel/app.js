@@ -408,6 +408,12 @@
       const data = (resp && resp.data) ? resp.data : resp;
       if (!data || typeof data !== "object") return false;
       let restored = false;
+      // 配置和选项已加载；先切到缓存的接口，再恢复其模型和尺寸。
+      if (["openai", "direct", "novelai"].includes(data.callFormat)) {
+        hasCachedFormat = true;
+        setCallFormat(data.callFormat);
+        restored = true;
+      }
       getCachedFields().forEach((key) => {
         const el = els[key];
         if (el && data[key] != null) {
@@ -418,16 +424,13 @@
             option.textContent = "正在读取画风槽位";
             el.appendChild(option);
           }
+          if (el.tagName === "SELECT" && !Array.from(el.options).some(option => option.value === String(data[key]))) return;
           el.value = data[key];
           restored = true;
         }
       });
-      if (["openai", "direct", "novelai"].includes(data.callFormat)) {
-        currentCallFormat = ["direct", "openai", "novelai"].includes(data.callFormat) ? data.callFormat : "direct";
-        hasCachedFormat = true;
-        setCallFormat(currentCallFormat);
-        restored = true;
-      }
+      modeSelections[currentCallFormat] = {size: els.size.value, model: els.model.value};
+      applyRefModeUI();
       if (Array.isArray(data.characters) && data.characters.length) {
         clearCharRows();
         data.characters.slice(0, MAX_CHAR_ROWS).forEach((item) => {
@@ -453,6 +456,8 @@
       const bridge = await getBridge();
       const resp = await bridge.apiGet("test_panel/config");
       const config = (resp && resp.data) ? resp.data : resp;
+      panelConfig = config;
+      novelaiSizeOptions = Array.isArray(config.novelai_size_options) ? config.novelai_size_options : [];
       if (config.image_gen_key === "已配置") {
         setBadge(els.tokenBadge, "Token: 已配置", "badge-success");
       } else {
@@ -486,8 +491,6 @@
       ) {
         defaultDirectorStrength = directorStrength;
       }
-      panelConfig = config;
-      novelaiSizeOptions = Array.isArray(config.novelai_size_options) ? config.novelai_size_options : [];
       if (!hasCachedFormat) {
         setCallFormat(["direct", "openai", "novelai"].includes(config.call_mode) ? config.call_mode : "direct");
       } else { updateSizeOptionsUI(); updateProviderStatus(); }
@@ -2228,14 +2231,12 @@
     initContourEngine();
 
     bindEvents();
-    // 从后端恢复面板状态
-    await loadCache();
-    updateSizeOptionsUI();
-    toggleCustomArtists();
-    setCallFormat(currentCallFormat);
-    updateCostBadge();
-    // 仅加载 token 状态 badge（不填表单）
+    // 先加载服务配置和完整选项，再恢复用户缓存，避免默认值覆盖选择。
     await loadTokenStatus();
+    const cacheRestored = await loadCache();
+    slotState.autoApplied = cacheRestored;
+    toggleCustomArtists();
+    updateCostBadge();
     // 加载试用状态
     await loadTrialStatus();
     // 加载点数用量台账
