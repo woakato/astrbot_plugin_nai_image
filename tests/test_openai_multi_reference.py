@@ -8,7 +8,9 @@
 import asyncio
 import base64
 import json
+from unittest.mock import AsyncMock
 
+import pytest
 import yaml
 
 from main import OPENAI_MAX_REFERENCE_IMAGES, NAIGenerateImagePlugin
@@ -121,7 +123,11 @@ def test_vibe_per_image_strengths_fill_from_scalar():
     assert params["reference_strength_multiple"] == [0.9, 0.4]
 
 
-def test_director_multi_image_parallel_arrays_keeps_v5_model():
+@pytest.mark.parametrize(
+    "model",
+    ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated", "nai45", "nai45-curated"],
+)
+def test_director_multi_image_parallel_arrays_keep_explicit_45_model(model):
     plugin = make_plugin()
     _, reason = asyncio.run(
         plugin._openai_generate(
@@ -130,13 +136,13 @@ def test_director_multi_image_parallel_arrays_keeps_v5_model():
             n=1,
             reference_image_bytes_list=[PNG_1PX, PNG_1PX],
             reference_mode="director",
+            model=model,
             director_captions=["character", "not-a-caption"],
         )
     )
     assert reason == "ok"
     payload = last_payload(plugin)
-    # NAI 5 全系列同样支持精准参考（实测），不应误切换为 4.5
-    assert payload["model"] == "nai-diffusion-5-full"
+    assert payload["model"] == model
     params = payload["parameters"]
     assert len(params["director_reference_images"]) == 2
     assert params["director_reference_strength_values"] == [1.0, 1.0]
@@ -150,21 +156,85 @@ def test_director_multi_image_parallel_arrays_keeps_v5_model():
     assert all(item["caption"]["char_captions"] == [] for item in descriptions)
 
 
-def test_director_unsupported_model_falls_back_to_45():
+@pytest.mark.parametrize(
+    "model",
+    [
+        "nai-diffusion-5-full",
+        "nai-diffusion-5-curated",
+        "nai5",
+        "nai5-curated",
+        "nai-diffusion-3",
+        "unknown",
+    ],
+)
+@pytest.mark.parametrize("model_source", ["default", "override", "slot"])
+def test_director_unsupported_model_is_rejected_without_requests_or_success_records(
+    model, model_source
+):
     plugin = make_plugin()
-    plugin.openai_api_model = "nai-diffusion-3"
-    _, reason = asyncio.run(
+    plugin._archive_generated_image = AsyncMock()
+    plugin._record_usage_stat = AsyncMock()
+    kwargs = {}
+    if model_source == "default":
+        plugin.openai_api_model = model
+    elif model_source == "override":
+        plugin.openai_api_model = "nai-diffusion-4-5-full"
+        kwargs["model"] = model
+    else:
+        plugin._slot_model = lambda: model
+    images, reason = asyncio.run(
         plugin._openai_generate(
             "same girl",
             "1024x1024",
             n=1,
             reference_image_bytes_list=[PNG_1PX],
             reference_mode="director",
+            **kwargs,
         )
     )
-    assert reason == "ok"
-    # 非 4.5 / 5 系列模型不支持精准参考，自动回退 nai-diffusion-4-5-full
-    assert last_payload(plugin)["model"] == "nai-diffusion-4-5-full"
+    assert images == []
+    assert reason.startswith("reference_model_unsupported | ")
+    assert model in reason and "明确选择 V4.5" in reason
+    assert "传输协议" in reason
+    assert plugin._session.calls == []
+    plugin._archive_generated_image.assert_not_awaited()
+    plugin._record_usage_stat.assert_not_awaited()
+
+
+def test_director_configured_fallback_image_does_not_bypass_v5_gate(
+    tmp_path, monkeypatch
+):
+    plugin = make_plugin(reference_mode="director")
+    image = tmp_path / "reference.png"
+    image.write_bytes(PNG_1PX)
+    plugin.openai_director_fallback_images = [str(image)]
+    monkeypatch.setattr("main.StarTools.get_data_dir", lambda _: tmp_path)
+    images, reason = asyncio.run(plugin._openai_generate("same girl", "832x1216"))
+    assert images == [] and "明确选择 V4.5" in reason
+    assert plugin._session.calls == []
+
+
+@pytest.mark.parametrize(
+    "model", ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated"]
+)
+def test_explicit_45_choice_records_actual_model_in_history_and_usage(model):
+    plugin = make_plugin(reference_mode="director")
+    plugin._archive_generated_image = AsyncMock()
+    plugin._record_usage_stat = AsyncMock()
+    images, reason = asyncio.run(
+        plugin._openai_generate(
+            "same girl",
+            "832x1216",
+            model=model,
+            reference_image_bytes=PNG_1PX,
+        )
+    )
+    assert images and reason == "ok"
+    assert last_payload(plugin)["model"] == model
+    history = plugin._archive_generated_image.await_args.args[1]
+    assert history["model"] == history["requested_model"] == model
+    assert history["reference_mode"] == "director"
+    assert plugin._record_usage_stat.await_args.kwargs["model"] == model
 
 
 def test_director_without_reference_falls_back_to_text2img():
@@ -186,6 +256,7 @@ def test_director_without_reference_falls_back_to_text2img():
 
 def test_configured_director_weights_are_applied():
     plugin = make_plugin(reference_mode="director")
+    plugin.openai_api_model = "nai-diffusion-4-5-full"
     plugin.openai_vibe_strength = 0.45
     plugin.openai_director_strength = 0.85
     plugin.openai_director_secondary_strength = 0.4

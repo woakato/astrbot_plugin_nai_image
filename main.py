@@ -368,19 +368,26 @@ OPENAI_DIRECTOR_ACTIONS = {
 # 精准参考的 director_reference_* 数组均按此收敛。
 OPENAI_MAX_REFERENCE_IMAGES = 8
 
-# 支持精准参考（director_reference_*）的模型集合：NAI 4.5 与 NAI 5 全系
-# 实测均支持精准参考。其他模型携带精准参考字段会被服务端拒绝，仍自动切换
-# 为 nai-diffusion-4-5-full。
+# 精准参考按模型能力校验；OpenAI 兼容仅描述传输协议，不能证明模型支持。
+# 当前仅开放已确认的 V4.5 型号及别名，不自动替换用户选中的模型。
 OPENAI_DIRECTOR_MODELS = {
     "nai-diffusion-4-5-full",
     "nai-diffusion-4-5-curated",
     "nai45",
     "nai45-curated",
-    "nai-diffusion-5-full",
-    "nai-diffusion-5-curated",
-    "nai5",
-    "nai5-curated",
 }
+
+
+def _openai_precise_reference_error(model: str) -> str:
+    if model.strip().casefold() in OPENAI_DIRECTOR_MODELS:
+        return ""
+    return (
+        f"当前模型 {model or '（未选择）'} 不支持本插件的精准参考。"
+        "V5 暂不支持精准参考；OpenAI 兼容仅表示传输协议，不代表模型能力。"
+        "请明确选择 V4.5 Full 或 Curated 后重新提交；本次未发送生图请求，"
+        "不会自动替换模型。图生图（img2img）与精准参考效果不同。"
+    )
+
 
 # 精准参考 base_caption 仅允许的枚举值（新文档 §8.4）。
 OPENAI_DIRECTOR_CAPTIONS = ("character", "style", "character&style")
@@ -553,6 +560,8 @@ def _format_generate_error(reason: str) -> str:
         return _map[reason]
     if reason.startswith(("starbridge | ", "novelai | ")):
         return "🚫 NovelAI：" + reason.split(" | ", 1)[1]
+    if reason.startswith("reference_model_unsupported | "):
+        return "🚫 " + reason.split(" | ", 1)[1]
     # 精准参考（§6）被上游拒绝：参数已按文档格式提交，多为能力未开通
     if reason.startswith("director_ref_rejected"):
         detail = reason.split(" | ", 1)[1] if " | " in reason else ""
@@ -2547,8 +2556,8 @@ class NAIGenerateImagePlugin(Star):
             director_caption: 精准参考描述（新文档 §8.4 的 base_caption），仅
                 允许 character / style / character&style，默认
                 self.openai_director_caption；被 director_captions 逐项覆盖。
-                精准参考仅支持 NAI 4.5 / NAI 5 模型，其他模型会自动切换为
-                nai-diffusion-4-5-full。
+                OpenAI 兼容入口的精准参考仅开放已确认的 NAI 4.5 型号；
+                不支持的型号会在请求前报错，须由用户明确选择替代模型。
             director_captions: 每张精准参考图的 base_caption 列表，非法值回退
                 director_caption / 插件配置。
             characters: 多角色坐标列表 (提示词, x, y)，坐标 0-1（§7），
@@ -2612,6 +2621,7 @@ class NAIGenerateImagePlugin(Star):
             if is_director
             else (model or self._slot_model() or selected_api["model"] or "").strip()
         )
+        requested_model = starbridge_tool_model if starbridge and is_director else model
         api_key = selected_api["key"]
         timeout = aiohttp.ClientTimeout(total=self.request_timeout)
 
@@ -2681,6 +2691,16 @@ class NAIGenerateImagePlugin(Star):
                     )
             if not ref_bytes_list and is_director:
                 return [], "no_reference_image"
+
+        if (
+            not starbridge
+            and not is_director
+            and ref_mode == "director"
+            and ref_bytes_list
+        ):
+            capability_error = _openai_precise_reference_error(model)
+            if capability_error:
+                return [], "reference_model_unsupported | " + capability_error
 
         if len(ref_bytes_list) > OPENAI_MAX_REFERENCE_IMAGES:
             logger.info(
@@ -2903,18 +2923,6 @@ class NAIGenerateImagePlugin(Star):
             # 预处理。information_extracted 固定 1.0：实测其他取值（如 0.7）
             # 会被上游参数校验拒绝（HTTP 400），与 §8 各示例保持一致。
             payload["action"] = "generate"
-            # 精准参考仅支持 NAI 4.5 / NAI 5 模型（实测），其余模型会被服务端
-            # 拒绝；当前模型不满足时自动切换到 4-5-full 以保证能力可用。
-            if (
-                not starbridge
-                and (model or "").strip().casefold() not in OPENAI_DIRECTOR_MODELS
-            ):
-                logger.info(
-                    f"{LOG_TAG} [openai_generate] 精准参考不支持当前模型 {model or '(none)'}"
-                    "（仅 4.5 / 5 系列），自动切换为 nai-diffusion-4-5-full"
-                )
-                model = "nai-diffusion-4-5-full"
-                payload["model"] = model
             parameters["director_reference_images"] = ref_uris
             parameters["director_reference_strength_values"] = ref_strength_values
             # 次级特征强度（§8.5 推荐 0.35-0.7），默认取插件设置
@@ -2979,7 +2987,6 @@ class NAIGenerateImagePlugin(Star):
         requested_count = payload["n"]
         request_options = {}
         if starbridge:
-            starbridge_requested_model = starbridge_tool_model if is_director else model
             try:
                 prepared = await prepare_starbridge_request(
                     self._session,
@@ -3211,6 +3218,7 @@ class NAIGenerateImagePlugin(Star):
             generation_parameters: dict[str, Any] = {
                 "tag": prompt,
                 "model": str(model or ""),
+                "requested_model": str(requested_model or ""),
                 "size": _openai_size,
                 "steps": _steps,
                 "scale": _scale,
@@ -3224,10 +3232,6 @@ class NAIGenerateImagePlugin(Star):
             }
             if starbridge:
                 generation_parameters["api_profile"] = selected_api["profile"]
-                if model != starbridge_requested_model:
-                    generation_parameters["requested_model"] = (
-                        starbridge_requested_model
-                    )
                 generation_parameters["seed"] = payload.get("parameters", {}).get(
                     "seed", "random"
                 )
@@ -3944,6 +3948,7 @@ class NAIGenerateImagePlugin(Star):
                 "request_timeout": self.request_timeout,
                 "openai_max_retries": self.openai_max_retries,
                 "openai_models": OPENAI_COMPATIBLE_MODELS,
+                "openai_director_models": sorted(OPENAI_DIRECTOR_MODELS),
                 "openai_director_actions": OPENAI_DIRECTOR_ACTIONS,
                 "call_mode": self.call_mode,
             }
@@ -4241,6 +4246,22 @@ class NAIGenerateImagePlugin(Star):
         custom_artists = _slot["artists"] if _slot else _opt_str("custom_artists")
         model = (_slot["model"] or None) if _slot else _opt_str("model")
         director_caption = _opt_str("director_caption")
+
+        # 面板预检在转译和生图之前执行；核心入口再次校验，覆盖聊天与联动。
+        if (
+            transport_mode == "openai"
+            and not director_action
+            and (reference_mode or self.openai_reference_mode) == "director"
+            and reference_image_bytes_list
+        ):
+            effective_model = (
+                model
+                or self._slot_model()
+                or panel_api.get("model", getattr(self, "openai_api_model", ""))
+            )
+            capability_error = _openai_precise_reference_error(effective_model)
+            if capability_error:
+                return error_response(capability_error, status_code=400)
 
         # 逐图精准参考描述（§8.4）：面板传 base_caption 数组，与参考图按下标
         # 对应；非法值由 _openai_generate 回退统一配置处理。

@@ -148,8 +148,9 @@
               </div>
               <div class="field-hint">
                 <span class="hint-icon">◈</span>
-                <span>vibe：reference_* 风格/角色参考（支持多张）；img2img：/v1/images/edits 重绘（仅取第一张）；director：精准参考（§6，支持 4.5 / 5 系列，可多张并逐图设权重）。未上传参考图时本项无效。</span>
+                <span>Vibe 学习风格/氛围；img2img 使用第一张图重绘，效果不同于精准参考。精准参考当前仅开放 V4.5 Full / Curated，可多张并逐图设权重；V5 不支持。OpenAI 兼容仅表示传输协议，不能证明模型支持精准参考。OpenAI 入口须自行选择 V4.5；NovelAI 入口可使用已明确配置的「V5 参考模型」。</span>
               </div>
+              <div id="refModelWarning" class="field-hint hidden" role="alert"></div>
             </div>
 
             <!-- img2img 附加噪声（仅 OpenAI 兼容格式 + img2img 模式显示） -->
@@ -715,6 +716,6 @@
     </main>
   </div>
 
-  <script src="./app.js?v=4.10.0"></script>
+  <script src="./app.js?v=4.10.1"></script>
 </body>
 </html>

@@ -66,6 +66,7 @@
     refStrength: $("refStrength"),
     refModeWrap: $("refModeWrap"),
     refMode: $("refMode"),
+    refModelWarning: $("refModelWarning"),
     refNoiseWrap: $("refNoiseWrap"),
     refNoise: $("refNoise"),
     openaiSeedWrap: $("openaiSeedWrap"),
@@ -972,10 +973,32 @@
       if (referenceImages.length) show(els.refGridWrap);
       else hide(els.refGridWrap);
     }
+    updateReferenceWarning();
   }
 
   // 按参考图使用模式切换可见性：全局重绘强度/附加噪声仅 img2img 使用，
   // vibe / 精准参考改用逐图强度（CSS 按 mode-* 类控制卡片内控件显隐）
+  function openaiReferenceError(body) {
+    if (body.call_format !== "openai" || body.director_action ||
+        body.reference_mode !== "director" || !(body.reference_image_b64_list || []).length) return "";
+    const supported = panelConfig.openai_director_models || [
+      "nai-diffusion-4-5-full", "nai-diffusion-4-5-curated", "nai45", "nai45-curated",
+    ];
+    if (supported.includes(String(body.model || "").trim().toLowerCase())) return "";
+    return `当前模型 ${body.model || "（未选择）"} 不支持精准参考，V5 暂不支持此功能。请明确选择 V4.5 Full 或 Curated 后重新提交；不会自动替换模型。OpenAI 兼容仅表示传输协议，不代表模型能力。`;
+  }
+
+  function updateReferenceWarning() {
+    const message = openaiReferenceError({
+      call_format: currentCallFormat, model: els.model.value,
+      reference_mode: currentRefMode(), director_action: els.directorAction.value,
+      reference_image_b64_list: referenceImages,
+    });
+    els.refModelWarning.textContent = message;
+    if (message) show(els.refModelWarning);
+    else hide(els.refModelWarning);
+  }
+
   function applyRefModeUI() {
     const openai = currentCallFormat !== "direct";
     const mode = currentRefMode();
@@ -990,6 +1013,7 @@
       hide(els.refStrengthWrap);
       hide(els.refNoiseWrap);
     }
+    updateReferenceWarning();
   }
 
   // ===== 生成图片 =====
@@ -1013,6 +1037,11 @@
         );
         return;
       }
+    }
+    const capabilityError = openaiReferenceError(body);
+    if (capabilityError) {
+      showError(capabilityError);
+      return;
     }
 
     lastRequestBody = body;
@@ -1337,6 +1366,7 @@
     }
     updateProviderStatus();
     updateCostBadge();
+    updateReferenceWarning();
   }
 
   function handleReferenceFileChange() {
@@ -1709,6 +1739,7 @@
       }
       updateSizeOptionsUI();
       updateCostBadge();
+      updateReferenceWarning();
     });
     // 步数 / 画幅 / 张数变化时实时刷新点数预估
     ["steps", "size", "count"].forEach((key) => {
@@ -1736,6 +1767,7 @@
     initFormatToggle();
     els.refFile.addEventListener("change", handleReferenceFileChange);
     els.refRemove.addEventListener("click", clearReferenceImage);
+    els.directorAction.addEventListener("change", updateReferenceWarning);
     if (els.refMode) {
       els.refMode.addEventListener("change", () => {
         applyRefModeUI();
@@ -1952,6 +1984,7 @@
     updateSizeOptionsUI();
     updateCostBadge();
     slotState.appliedId = String(slot.id);
+    updateReferenceWarning();
     refreshSlotStatus();
     if (e.status) {
       const name = slot.name || `槽位 ${slot.id}`;

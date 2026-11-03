@@ -334,8 +334,8 @@ def test_reference_model_setting_is_ignored_by_other_providers():
     images, reason = generate(
         value, reference_mode="director", reference_image_bytes=png()
     )
-    assert images and reason == "ok"
-    assert value._session.calls[0]["body"]["model"] == "nai-diffusion-5-full"
+    assert images == [] and "明确选择 V4.5" in reason
+    assert value._session.calls == []
 
 
 @pytest.mark.parametrize("reference_model", ["nai-diffusion-5-full", "unknown"])
@@ -545,7 +545,9 @@ def test_emotion_prefix_survives_artist_prompt_merging(prompt):
     assert value._session.calls[0]["body"]["prompt"].startswith("happy;;")
 
 
-def test_existing_profile_keeps_v5_director_payload_and_transient_retries(monkeypatch):
+def test_compatible_profile_keeps_explicit_45_director_payload_and_transient_retries(
+    monkeypatch,
+):
     calls = 0
 
     def handler(endpoint, body):
@@ -560,12 +562,15 @@ def test_existing_profile_keeps_v5_director_payload_and_transient_retries(monkey
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
     value = plugin("compatible", handler)
     images, reason = generate(
-        value, reference_mode="director", reference_image_bytes=png()
+        value,
+        model="nai-diffusion-4-5-full",
+        reference_mode="director",
+        reference_image_bytes=png(),
     )
     assert images and reason == "ok"
     assert len(value._session.calls) == 2
     body = value._session.calls[1]["body"]
-    assert body["model"] == "nai-diffusion-5-full"
+    assert body["model"] == "nai-diffusion-4-5-full"
     assert body["action"] == "generate"
     assert body["parameters"]["director_reference_images"][0].startswith("data:")
 

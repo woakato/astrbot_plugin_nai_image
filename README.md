@@ -5,7 +5,7 @@
 
 插件设置中的「生图接入方式」提供三种选择：**OpenAI**、**NovelAI**、**nai.sta1n.cn**。聊天指令、LLM 工具和陪伴联动按所选方式调用；测试面板也可分别测试三种接口。
 
-- **OpenAI**：使用独立的 OpenAI 兼容地址、API Key 和模型，调用 `/v1/images/generations` 或 `/v1/images/edits`。
+- **OpenAI**：使用独立的 OpenAI 兼容地址、API Key 和模型，调用 `/v1/images/generations` 或 `/v1/images/edits`。兼容只描述传输协议，不代表所选模型支持精准参考。
 - **NovelAI**：使用 NAI 原生 `/ai/` 协议，生图服务可选「NAI 官方」或「Starbride」，默认选择 **Starbride**。
 - **nai.sta1n.cn**：保留原有 GET / 任务接口、尺寸分档和点数规则。
 
@@ -17,6 +17,19 @@
 4. **API Key**：Starbride 填本站 NewAPI Key；NAI 官方填 NovelAI 官方账号的持久 API Token。
 5. **默认尺寸**采用官方预设，默认标准竖图 `832 × 1216`；每种画幅均标注实际分辨率。
 6. 默认使用 V5、同时需要 Vibe 或精准参考时，可将 **V5 参考模型**设为 V4.5 Full 或 Curated。仅这两类带参考图的 V5 请求使用该模型，历史归档保留原选和实际模型。默认不切换。
+
+### OpenAI 精准参考能力与选择
+
+| 模型／操作 | 当前行为 |
+| --- | --- |
+| V4.5 Full / Curated（含 `nai45` / `nai45-curated` 别名）精准参考 | 保留用户选定的型号，提交逐图精准参考参数；服务方仍须实现该能力 |
+| V5 Full / Curated（含 `nai5` / `nai5-curated` 别名）精准参考 | 提交前明确提示不支持，不发送生图请求 |
+| 其他或未知型号精准参考 | 当前未确认能力，提交前拒绝，不自动换模 |
+| Vibe、img2img、director-tools | 分别是氛围参考、重绘和图片处理，不等同于精准参考；是否可用需按模型与服务确认 |
+
+OpenAI 入口需要精准参考时，请在模型下拉、画风槽位或单次模型参数中**明确选择 V4.5 Full / Curated**。不会因为上传参考图而自动改用 V4.5，也不会去掉参考参数后按 V5 文生图。NovelAI 设置中的「V5 参考模型」只作用于 NovelAI 原生入口，不会授权 OpenAI 入口换模。测试面板在上传参考图、选择模型或参考模式时显示能力提示，提交时再次检查；聊天、LLM 工具、陪伴联动和本地代理共用后端校验。
+
+开启历史及参数保存后，`model` 记录实际提交生图的型号，`requested_model` 记录原选型号；用量估算使用实际型号。OpenAI 显式选择 V4.5 时两者均为 V4.5；NovelAI 明确配置替代型号时两者可不同。协议兼容、请求被接受或返回图片，都不能单独作为精准参考已生效的证明。
 
 | 尺寸预设 | 竖图 | 横图 | 方图 |
 | --- | --- | --- | --- |
@@ -47,12 +60,12 @@ Vibe 编码独立计费，每次请求按参考图逐张编码；已经成功的
 
 > 🆕 **v2.4.0 OpenAI 兼容接口全面对齐**：`/v1/images/generations` 与 `/v1/images/edits` 按接口文档对齐——高级参数（`steps`/`scale`/`sampler`/`noise_schedule`/`seed`/`negative_prompt`）统一放入 `parameters` 对象；参考图支持 **Vibe 参考**（`reference_image_multiple` 数组）、**img2img 图生图** 与 **精准参考 director**（`director_reference_*`，§6）三种模式（配置项「参考图模式」+「精准参考描述」）；新增 **多角色坐标控制**（`use_coords`/`characterPrompts`/`v4_prompt`，§7），聊天指令用可重复的 `--char="提示词|x|y"`，面板可动态添加角色行；超限参考图自动等比缩小（最长边 1920 / 面积 3686400 内），参考图统一以 Data URI 提交；新增「随机种子」「请求超时」「失败重试次数」配置；仅对 408/429/502/503/504 及上游"服务繁忙"类瞬时错误按 2/4/8 秒退避重试（请求超时不重试，避免上游仍在生成时重复扣费）。本地代理的 `/v1/images/edits` 同时支持 JSON 与 multipart 请求。测试面板新增参考图模式、精准参考描述、噪声强度、种子、多角色坐标与 **director-tools 工具**（抠图/线稿/草图/上色/情绪/清理）入口。
 
-> 🆕 **v2.5.0 多张参考图**：OpenAI 兼容服务支持 Vibe 参考与精准参考（director）一次提交最多 **8 张**；NAI 5 精准参考的可用性以所选服务商为准，Starbride的能力范围见上文。参考图（§5.2，超出自动截断），vibe 的 `reference_image_multiple` / `reference_strength_multiple` 与精准参考的五个 `director_reference_*` 数组均按提交顺序逐张对应：
+> 🆕 **v2.5.0 多张参考图**：插件的 OpenAI 兼容入口可为支持的模型一次提交最多 **8 张** Vibe 或精准参考图；精准参考当前仅开放 V4.5，V5 请求在提交前拒绝。参考图（§5.2，超出自动截断），vibe 的 `reference_image_multiple` / `reference_strength_multiple` 与精准参考的五个 `director_reference_*` 数组均按提交顺序逐张对应：
 > - 测试面板：参考图选择框支持一次多选上传，缩略图列表可删除单张，并逐张设置强度；精准参考模式下每张还可单独指定 `base_caption`（character&style / character / style）。img2img 模式仍只使用第一张主输入图（§5.3），全局「重绘强度」「附加噪声」仅在 img2img 下显示。
 > - 插件设置：新增「Vibe 参考权重」（`openai_vibe_strength`，默认 0.6）、「精准参考权重」（`openai_director_strength`，默认 1.0）与「精准参考次级特征权重」（`openai_director_secondary_strength`，默认 0.5），作为聊天指令 / LLM 工具 / 陪伴联动及面板新参考图的默认权重；「精准参考兜底参考图」（`openai_director_fallback_images`）从"只取第一张"升级为按顺序使用全部已配置图片（最多 8 张）；「精准参考描述」（`openai_director_caption`）作为默认描述按顺序应用到全部兜底参考图。
 > - 陪伴直连：陪伴插件传来的 `reference_image_paths` 数组会被完整接收并按下标路由到 vibe / 精准参考数组，不再只取首项。
 
-> ⚠️ **精准参考使用说明**：OpenAI 兼容服务的精准参考支持范围以服务商为准；Starbride仅支持 V4.5，可通过「V5 参考模型」为带参考图的 V5 请求指定 V4.5。`director_reference_information_extracted` 必须为 `1.0`，其他取值会被上游参数校验拒绝（HTTP 400），插件已按此固定。
+> ⚠️ **精准参考使用说明**：OpenAI 兼容仅是协议，不能据此认定模型支持精准参考。OpenAI 入口须明确选择 V4.5；V5 及未确认型号在发起生图前拒绝。仅 NovelAI 原生入口可使用已配置的「V5 参考模型」替代。`director_reference_information_extracted` 固定为 `1.0`。
 
 ## 指令
 

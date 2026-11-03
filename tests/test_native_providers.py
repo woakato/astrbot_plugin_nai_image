@@ -6,12 +6,61 @@ import io
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from test_api_credentials import load_plugin
 from test_starbridge import Response, Session, png
 from provider_config import NATIVE_SIZE_OPTIONS, api_settings
+
+
+@pytest.mark.parametrize("model", ["nai-diffusion-5-full", "nai-diffusion-5-curated"])
+@pytest.mark.parametrize("model_source", ["default", "override", "slot"])
+def test_panel_rejects_v5_precise_reference_before_translation_or_generation(
+    load_plugin, monkeypatch, model, model_source
+):
+    plugin, _ = load_plugin(
+        {
+            "call_mode": "openai",
+            "openai_api_base_url": "https://compatible.example/v1",
+            "openai_api_key": "test-key",
+            "openai_api_model": model,
+            "openai_reference_mode": "director",
+            "novelai_reference_model": "nai-diffusion-4-5-full",
+        }
+    )
+    body = {
+        "nl_prompt": "draw the same girl at the beach",
+        "call_format": "openai",
+        "reference_image_b64_list": [base64.b64encode(png()).decode()],
+    }
+    if model_source == "override":
+        body["model"] = model
+    elif model_source == "slot":
+        body["model"] = "nai-diffusion-4-5-full"
+    plugin._slot_by_id = lambda _: (
+        {"model": model, "artists": ""} if model_source == "slot" else None
+    )
+    plugin._expand_grimoire = lambda value: value
+    plugin._translate_prompt = AsyncMock()
+    plugin._openai_generate = AsyncMock()
+    monkeypatch.setattr(
+        "main.web_request", SimpleNamespace(json=AsyncMock(return_value=body))
+    )
+    monkeypatch.setattr(
+        "main.error_response",
+        lambda message, status_code: {
+            "message": message,
+            "status": status_code,
+        },
+    )
+    result = asyncio.run(plugin._test_panel_generate_openai())
+    assert result["status"] == 400
+    assert model in result["message"] and "明确选择 V4.5" in result["message"]
+    plugin._translate_prompt.assert_not_awaited()
+    plugin._openai_generate.assert_not_awaited()
 
 
 def test_novelai_defaults_to_starbride_and_official_portrait(load_plugin):
