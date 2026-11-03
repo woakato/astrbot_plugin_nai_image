@@ -163,7 +163,9 @@ def test_official_zip_returns_all_images_and_ignores_metadata(load_plugin):
 
 
 def test_native_sizes_match_values_and_labels_without_legacy_tiers():
-    schema = json.loads((Path(__file__).parents[1] / "_conf_schema.json").read_text())
+    schema = json.loads(
+        (Path(__file__).parents[1] / "_conf_schema.json").read_text(encoding="utf-8")
+    )
     sizes = schema["novelai_image_size"]
     assert list(zip(sizes["options"], sizes["labels"])) == list(NATIVE_SIZE_OPTIONS)
     assert len(NATIVE_SIZE_OPTIONS) == 11
