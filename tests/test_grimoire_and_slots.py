@@ -590,3 +590,150 @@ def test_openai_prompt_skips_global_slot_when_flag_off(tmp_path, monkeypatch):
     assert "artist:global" not in plugin._openai_prompt(
         "1girl", "custom", "", use_slot_artists=False
     )
+
+
+@pytest.mark.parametrize("artists", ["artist:selected", ""])
+def test_panel_global_slot_is_used_by_both_generation_modes(
+    tmp_path, monkeypatch, artists
+):
+    plugin = _panel_plugin(tmp_path, monkeypatch)
+    slots = plugin._load_artist_slots()
+    slots[1]["artists"] = artists
+    monkeypatch.setattr(
+        "main.web_request",
+        _FakeWebRequest({"slots": slots, "active_slot_id": "2"}),
+    )
+
+    response = asyncio.run(plugin._test_panel_slots_save())
+
+    assert response.status_code == 200
+    assert plugin.active_artist_slot == "2"
+    assert plugin._read_plugin_config()["active_artist_slot"] == "2"
+    assert plugin._slot_model() == "nai-diffusion-5-full"
+    expected_prompt = f"{artists}, 1girl" if artists else "1girl"
+    assert plugin._openai_prompt("1girl", "vertical") == expected_prompt
+
+    plugin.image_gen_key = "test-token"
+    plugin._session = object()
+    plugin.steps = 24
+    plugin.scale = 6
+    plugin.cfg_value = 1
+    plugin.sampler = "k_euler_ancestral"
+    plugin.noise_schedule = "karras"
+    plugin.negative = ""
+    plugin.model = "nai-diffusion-4-5-full"
+    plugin.enable_template = False
+    plugin.translate_mode = "关闭"
+    plugin.character_preset = ""
+    plugin.default_outfit = ""
+    plugin._prepare_translated_prompt = AsyncMock(
+        return_value=("1girl", "none", False, "nai")
+    )
+    plugin._submit_web_job = AsyncMock(return_value=(b"img", "ok"))
+    plugin._archive_generated_image = AsyncMock()
+    plugin._record_usage_from_parameters = AsyncMock()
+
+    assert asyncio.run(plugin._generate_one("1girl", "vertical", "竖图")) == (
+        b"img",
+        "ok",
+    )
+    call = plugin._submit_web_job.await_args
+    assert call.args[1] == artists
+    assert call.kwargs["model"] == "nai-diffusion-5-full"
+
+
+def test_panel_slot_save_rejects_invalid_active_slot_without_writing(
+    tmp_path, monkeypatch
+):
+    plugin = _panel_plugin(tmp_path, monkeypatch)
+    before = plugin._config_path().read_bytes()
+    monkeypatch.setattr(
+        "main.web_request",
+        _FakeWebRequest(
+            {
+                "slots": [{"name": "replacement", "model": "m", "artists": "a"}],
+                "active_slot_id": "99",
+            }
+        ),
+    )
+
+    response = asyncio.run(plugin._test_panel_slots_save())
+
+    assert response.status_code == 400
+    assert plugin.active_artist_slot == "1"
+    assert plugin._config_path().read_bytes() == before
+
+
+def test_panel_slot_save_reports_active_slot_persistence_failure(tmp_path, monkeypatch):
+    plugin = _panel_plugin(tmp_path, monkeypatch)
+    slots = plugin._load_artist_slots()
+    before = plugin._config_path().read_bytes()
+    monkeypatch.setattr(
+        "main.web_request",
+        _FakeWebRequest({"slots": slots, "active_slot_id": "2"}),
+    )
+    original_write = plugin._write_plugin_config
+
+    def fail_active_write(updates):
+        if "active_artist_slot" in updates:
+            raise OSError("disk full")
+        original_write(updates)
+
+    monkeypatch.setattr(plugin, "_write_plugin_config", fail_active_write)
+
+    response = asyncio.run(plugin._test_panel_slots_save())
+
+    assert response.status_code != 200
+    assert plugin.active_artist_slot == "1"
+    assert plugin._config_path().read_bytes() == before
+
+
+def test_slot_save_keeps_active_style_after_ids_are_renumbered(tmp_path, monkeypatch):
+    plugin = _panel_plugin(tmp_path, monkeypatch)
+    plugin._save_artist_slots(plugin._load_artist_slots(), active_slot_id="2")
+    remaining = plugin._load_artist_slots()[1:]
+
+    plugin._save_artist_slots(remaining)
+
+    assert plugin.active_artist_slot == "1"
+    assert plugin._read_plugin_config()["active_artist_slot"] == "1"
+    assert plugin._active_artist_slot()["name"] == "科幻风"
+
+
+@pytest.mark.parametrize("artists", ["artist:once", ""])
+def test_explicit_artists_override_global_slot_in_openai_prompt(
+    tmp_path, monkeypatch, artists
+):
+    plugin = _panel_plugin(tmp_path, monkeypatch)
+
+    expected = f"{artists}, 1girl" if artists else "1girl"
+    assert plugin._openai_prompt("1girl", "vertical", artists) == expected
+
+
+@pytest.mark.parametrize("endpoint", ["generations", "edits"])
+@pytest.mark.parametrize("call_mode", ["openai", "novelai"])
+def test_openai_proxy_inherits_global_slot_artists(
+    tmp_path, monkeypatch, endpoint, call_mode
+):
+    plugin = _panel_plugin(tmp_path, monkeypatch)
+    plugin.call_mode = call_mode
+    plugin.openai_api_base_url = "https://example.invalid"
+    plugin._session = object()
+    plugin.translate_mode = "关闭"
+    plugin.enable_template = False
+    plugin.character_preset = ""
+    plugin.default_outfit = ""
+    plugin._prepare_translated_prompt = AsyncMock(
+        return_value=("1girl", "none", False, "nai")
+    )
+    plugin._openai_generate = AsyncMock(return_value=([b"img"], "ok"))
+    request = _FakeWebRequest({"prompt": "1girl"})
+    request.path = f"/v1/images/{endpoint}"
+    request.remote = "127.0.0.1"
+    request.content_type = "application/json"
+
+    handler = getattr(plugin, f"_proxy_handle_{endpoint}")
+    response = asyncio.run(handler(request))
+
+    assert response.status == 200
+    assert plugin._openai_generate.await_args.args[0] == "artist:a, 1girl"

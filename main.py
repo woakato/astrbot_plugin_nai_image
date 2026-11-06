@@ -761,7 +761,7 @@ def migrate_invalid_call_mode(config: dict) -> str | None:
     "astrbot_plugin_nai_image",
     "缪缪的小水泡",
     "基于 nai.sta1n.cn 的 NovelAI 生图插件",
-    "2.10.2",
+    "2.11.0",
 )
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -805,7 +805,7 @@ class NAIGenerateImagePlugin(Star):
         self._image_history_lock = asyncio.Lock()
         self.custom_artists: str = config.get("custom_artists") or ""
         self.model: str = config.get("model") or "nai-diffusion-4-5-full"
-        # 正式生图启用的槽位（槽位表本身存在插件数据目录的 artist_slots.json）。
+        # The active slot and slot table share the plugin configuration.
         self.active_artist_slot: str = (
             str(config.get("active_artist_slot") or "1").strip() or "1"
         )
@@ -1390,17 +1390,55 @@ class NAIGenerateImagePlugin(Star):
         self._slots_cache_mtime = self._slots_cache_key()
         return slots
 
-    def _save_artist_slots(self, slots: list[dict[str, Any]]) -> None:
-        """保存画风槽位表，并同步「正式生图启用槽位」下拉里显示的名字。"""
+    def _save_artist_slots(
+        self,
+        slots: list[dict[str, Any]],
+        *,
+        active_slot_id: Any = None,
+    ) -> None:
+        """Save slots and the global selection in one configuration write.
+
+        Args:
+            slots: Slot records, optionally retaining their previous IDs.
+            active_slot_id: Selected ID in the normalized table, or None to
+                preserve the active record across renumbering.
+
+        Raises:
+            ValueError: If the table is empty or the selected ID is invalid.
+        """
 
         normalized = self._normalize_slots(slots)
         if not normalized:
             raise ValueError("槽位表不能为空")
 
-        self._write_plugin_config({"artist_slots": self._to_config_items(normalized)})
+        if active_slot_id not in (None, ""):
+            active = str(active_slot_id).strip()
+            if active not in {str(slot["id"]) for slot in normalized}:
+                raise ValueError("正式生效槽位不存在")
+        else:
+            active = "1"
+            previous = str(getattr(self, "active_artist_slot", "1"))
+            index = 0
+            for slot in slots:
+                if self._normalize_slot(slot) is None:
+                    continue
+                index += 1
+                if str(slot.get("id", index)) == previous:
+                    active = str(index)
+                    break
+
+        self._write_plugin_config(
+            {
+                "artist_slots": self._to_config_items(normalized),
+                "active_artist_slot": active,
+            }
+        )
+        self.active_artist_slot = active
         self._slots_cache = normalized
         self._slots_cache_mtime = self._slots_cache_key()
         self._sync_slot_labels(normalized)
+        if getattr(self, "context", None) is not None:
+            self._refresh_llm_tool_schema()
 
     def _sync_slot_labels(self, slots: list[dict[str, Any]]) -> None:
         """把槽位名写进 schema 下拉的 labels，让设置页显示改后的画风名。
@@ -1599,16 +1637,6 @@ class NAIGenerateImagePlugin(Star):
             if compact(slot["name"]) == target:
                 return slot
         return None
-
-    def _persist_active_slot(self, slot_id: str) -> None:
-        """把「正式生图启用槽位」写回插件配置；失败只告警。"""
-
-        try:
-            self._write_plugin_config({"active_artist_slot": str(slot_id)})
-            self.active_artist_slot = str(slot_id)
-            logger.info(f"{LOG_TAG} 正式生图槽位已切换为 {slot_id}")
-        except Exception as exc:
-            logger.warning(f"{LOG_TAG} 写入生效槽位失败: {exc!r}")
 
     def _migrate_legacy_data_dir(self) -> None:
         """把旧版工作目录下的数据整体迁移到 AstrBot 插件数据目录。"""
@@ -2207,7 +2235,33 @@ class NAIGenerateImagePlugin(Star):
             self._outfit_cache_clear()
         logger.info(f"{LOG_TAG} [terminate] 阶段完成")
 
-    def _resolve_artists(self, style: str) -> str:
+    def _resolve_artists(
+        self,
+        style: str,
+        custom_artists: str | None = None,
+        *,
+        use_slot_artists: bool = True,
+    ) -> str:
+        """Resolve explicit artists, the active slot, then the style fallback.
+
+        Args:
+            style: Built-in style key used when no slot applies.
+            custom_artists: Request override; an empty string disables artists.
+            use_slot_artists: Whether to inherit the global slot.
+
+        Returns:
+            The artist string, including an explicitly configured empty string.
+        """
+        if custom_artists is not None:
+            return str(custom_artists)
+        if (
+            use_slot_artists
+            and self._artist_slots_enabled()
+            and hasattr(self, "active_artist_slot")
+        ):
+            slot = self._active_artist_slot()
+            if slot is not None:
+                return str(slot.get("artists") or "")
         if style == "custom":
             return self.custom_artists if self.custom_artists is not None else ""
         return DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
@@ -2396,8 +2450,9 @@ class NAIGenerateImagePlugin(Star):
         """把画师串作为风格前缀拼进 OpenAI 兼容格式的 prompt。
 
         OpenAI 兼容格式没有独立的 artist 参数，画师串需要并入 prompt 文本。
-        ``custom`` 风格可用 ``custom_artists`` 覆盖（面板独立字段），否则用
-        插件配置的 ``self.custom_artists``；其余风格回退到对应预设。
+        Explicit artists override the global slot, including empty strings.
+        With no slot, custom style uses the configured artists and other styles
+        use their built-in presets.
 
         Args:
             prompt: 已转译/合并后的主体提示词。
@@ -2408,25 +2463,11 @@ class NAIGenerateImagePlugin(Star):
         Returns:
             拼接了画师串的最终 prompt 文本。
         """
-        if style == "custom":
-            artists = (
-                custom_artists if custom_artists is not None else self.custom_artists
+        artists = normalize_prompt(
+            self._resolve_artists(
+                style, custom_artists, use_slot_artists=use_slot_artists
             )
-            artists = normalize_prompt(artists or "")
-        else:
-            artists = normalize_prompt(
-                DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
-            )
-        # 槽位绑定的画师串优先级高于风格预设，但低于本次显式指定的画师串。
-        # 面板已按明确选中的槽位套用时传 use_slot_artists=False 关掉这层回退，
-        # 否则「该槽位画师串为空」会被全局生效槽位的画师串顶掉。
-        if use_slot_artists and custom_artists is None:
-            try:
-                slot_artists = self._slot_artists()
-            except Exception:
-                slot_artists = ""
-            if slot_artists:
-                artists = normalize_prompt(slot_artists)
+        )
         if not artists:
             return normalize_prompt(prompt)
         return normalize_prompt(f"{artists}, {prompt}")
@@ -2451,7 +2492,7 @@ class NAIGenerateImagePlugin(Star):
         Args:
             prompt: 用户原始提示词。
             style: NAI 画风键。
-            custom_artists: 单次自定义画师串，仅 ``custom`` 风格生效。
+            custom_artists: Request artist override, including an empty string.
             enable_template: 单次模板开关；None 时使用插件配置。
             enable_translate: 单次转译模式；None 时使用插件配置。
             apply_outfit: Whether to inherit standalone outfit defaults and cache.
@@ -3322,15 +3363,7 @@ class NAIGenerateImagePlugin(Star):
             enable_translate if enable_translate is not None else self.translate_mode
         )
 
-        # artists 解析：自定义风格允许空画师串（不强制回退预设）
-        if style == "custom":
-            _artists = (
-                custom_artists if custom_artists is not None else self.custom_artists
-            )
-            if _artists is None:
-                _artists = ""
-        else:
-            _artists = DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
+        _artists = self._resolve_artists(style, custom_artists, use_slot_artists=False)
 
         # character_preset
         _char_preset = (
@@ -3805,14 +3838,14 @@ class NAIGenerateImagePlugin(Star):
         if not isinstance(raw_slots, list) or not raw_slots:
             return error_response("slots 必须是非空数组", status_code=400)
         try:
-            await asyncio.to_thread(self._save_artist_slots, raw_slots)
+            await asyncio.to_thread(
+                self._save_artist_slots,
+                raw_slots,
+                active_slot_id=body.get("active_slot_id"),
+            )
         except Exception as exc:
             logger.warning(f"{LOG_TAG} [panel:slots] 保存失败: {exc!r}")
             return error_response(f"保存槽位失败: {exc!r}", status_code=400)
-
-        active = body.get("active_slot_id")
-        if active not in (None, ""):
-            await asyncio.to_thread(self._persist_active_slot, str(active))
 
         slots = await asyncio.to_thread(self._load_artist_slots)
         logger.info(
@@ -5107,21 +5140,7 @@ class NAIGenerateImagePlugin(Star):
             )
         full_prompt = normalize_prompt(full_prompt)
 
-        # 自定义风格允许空画师串（不强制回退预设）。
-        # 优先级：本次显式指定 > 槽位绑定 > 自定义/风格预设。
-        slot_artists = self._slot_artists()
-        if custom_artists is not None and str(custom_artists).strip():
-            artists = str(custom_artists)
-        elif slot_artists:
-            artists = slot_artists
-        elif style == "custom":
-            artists = (
-                custom_artists if custom_artists is not None else self.custom_artists
-            )
-            if artists is None:
-                artists = ""
-        else:
-            artists = self._resolve_artists(style)
+        artists = self._resolve_artists(style, custom_artists)
 
         logger.info(
             f"{LOG_TAG} [generate] 开始 | style={style} size={size} | "
@@ -5391,6 +5410,9 @@ class NAIGenerateImagePlugin(Star):
 
         try:
             if self.call_mode in ("openai", "novelai"):
+                prompt, _, _ = await self._prepare_openai_prompt(
+                    prompt, self.image_style
+                )
                 images, reason = await self._openai_generate(
                     prompt,
                     size,
@@ -5619,6 +5641,9 @@ class NAIGenerateImagePlugin(Star):
                 f"image_bytes={len(image_bytes) if image_bytes else 0}"
             )
             try:
+                prompt, _, _ = await self._prepare_openai_prompt(
+                    prompt, self.image_style
+                )
                 images, reason = await self._openai_generate(
                     prompt,
                     size,
@@ -6326,7 +6351,7 @@ class NAIGenerateImagePlugin(Star):
             )
         else:
             slot_model = ""
-            slot_artists = ""
+            slot_artists = None
             # 「开启画风参数」关闭或未传画风时，固定使用插件设置里选好的默认画风；
             # 工具 schema 会同步隐藏 style 字段（见 _refresh_llm_tool_schema）。
             style = (
@@ -6469,7 +6494,7 @@ class NAIGenerateImagePlugin(Star):
         try:
             if self.call_mode in ("openai", "novelai"):
                 openai_prompt, _, _ = await self._prepare_openai_prompt(
-                    prompt, style, custom_artists=slot_artists or None
+                    prompt, style, custom_artists=slot_artists
                 )
                 images, reason = await self._openai_generate(
                     openai_prompt,
@@ -6485,7 +6510,7 @@ class NAIGenerateImagePlugin(Star):
                     style,
                     size,
                     model=slot_model or None,
-                    custom_artists=slot_artists or None,
+                    custom_artists=slot_artists,
                 )
         except Exception as exc:
             logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 生成异常: {exc!r}")

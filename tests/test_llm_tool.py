@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import mcp
+import pytest
 
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Image
@@ -616,6 +617,33 @@ def test_llm_tool_uses_style_slot_model_and_artists():
         model="nai-diffusion-5-full",
         custom_artists="artist:slot",
     )
+
+
+@pytest.mark.parametrize("call_mode", ["direct", "openai", "novelai"])
+def test_llm_tool_preserves_explicit_empty_slot_artists(call_mode):
+    plugin = (
+        make_openai_plugin((b"img", "ok"))
+        if call_mode in ("openai", "novelai")
+        else make_plugin((b"img", "ok"))
+    )
+    plugin.call_mode = call_mode
+    plugin._match_style_slot = lambda _name: {
+        "id": 2,
+        "name": "No artists",
+        "model": "nai-diffusion-5-full",
+        "artists": "",
+    }
+    event = FakeEvent()
+
+    results = asyncio.run(
+        collect_results(plugin.NAI_Generate_Image(event, "1girl", "No artists", "方图"))
+    )
+
+    assert results == ["图片已生成并发送给用户，请根据本次请求继续回复。"]
+    if call_mode in ("openai", "novelai"):
+        assert plugin._openai_generate.await_args.args[0] == "1girl"
+    else:
+        assert plugin._generate_one.await_args.kwargs["custom_artists"] == ""
 
 
 def test_character_blocks_also_expand_grimoire_macros():
