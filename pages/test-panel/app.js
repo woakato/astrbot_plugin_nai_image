@@ -1830,7 +1830,7 @@
   }
 
   // ===== 画风槽位与法典 =====
-  const slotState = { slots: [], activeId: "1", models: [], enabled: false, appliedId: null, autoApplied: false };
+  const slotState = { slots: [], activeId: "1", models: [], enabled: false, appliedId: null, autoApplied: false, saving: false };
 
   function slotEls() {
     return {
@@ -1918,9 +1918,10 @@
       const apply = document.createElement("button");
       apply.type = "button";
       apply.className = "btn btn-primary";
-      apply.textContent = "应用";
-      apply.title = "把该画风的模型与画师串套到本面板";
-      apply.addEventListener("click", () => applySlotToPanel(slot));
+      apply.textContent = String(slot.id) === slotState.activeId ? "全局生效" : "全局启用";
+      apply.title = "保存槽位并将该画风设为全局默认";
+      apply.disabled = !slotState.enabled || slotState.saving;
+      apply.addEventListener("click", () => saveSlots(slot.id));
 
       const del = document.createElement("button");
       del.type = "button";
@@ -2016,9 +2017,9 @@
     );
     const appliedText = applied
       ? `本面板已套用「${applied.name || `槽位 ${applied.id}`}」。`
-      : "点槽位右侧「应用」即可用该画风出图。";
+      : "";
     e.status.textContent =
-      `聊天生图使用槽位 ${slotState.activeId}（${activeName}），共 ${slotState.slots.length} 个。` +
+      `全局画风：${activeName}（槽位 ${slotState.activeId}），共 ${slotState.slots.length} 个。` +
       appliedText;
   }
 
@@ -2055,21 +2056,29 @@
     }
   }
 
-  async function saveSlots() {
+  async function saveSlots(activeSlotId = null) {
     const e = slotEls();
+    if (slotState.saving) return;
     if (!slotState.slots.length) {
       if (e.status) e.status.textContent = "至少保留一个槽位。";
       return;
     }
+    slotState.saving = true;
+    if (e.save) e.save.disabled = true;
     try {
       const appliedIndex = slotState.slots.findIndex(
-        (slot) => String(slot.id) === String(slotState.appliedId)
+        (slot) => String(slot.id) === String(activeSlotId ?? slotState.appliedId)
+      );
+      const activeIndex = slotState.slots.findIndex(
+        (slot) => String(slot.id) === String(activeSlotId ?? slotState.activeId)
       );
       const bridge = await getBridge();
       const resp = await bridge.apiPost("test_panel/slots_save", {
         slots: slotState.slots,
+        active_slot_id: String(Math.max(0, activeIndex) + 1),
       });
       const data = unwrapData(resp) || {};
+      slotState.activeId = String(data.active_slot_id || slotState.activeId);
       if (Array.isArray(data.slots) && data.slots.length) {
         slotState.slots = data.slots.map((s) => ({
           id: Number(s.id) || 0,
@@ -2082,9 +2091,14 @@
           applySlotToPanel(slotState.slots[appliedIndex]);
         }
       }
-      if (e.status) e.status.textContent = "槽位已保存。";
+      refreshSlotStatus();
+      if (e.status) e.status.textContent = `槽位已保存。${e.status.textContent}`;
     } catch (err) {
       if (e.status) e.status.textContent = `保存失败：${err && err.message ? err.message : err}`;
+    } finally {
+      slotState.saving = false;
+      if (e.save) e.save.disabled = false;
+      renderSlotRows();
     }
   }
 
@@ -2178,7 +2192,7 @@
         renderSlotRows();
       });
     }
-    if (e.save) e.save.addEventListener("click", saveSlots);
+    if (e.save) e.save.addEventListener("click", () => saveSlots());
     if (e.reset) {
       e.reset.addEventListener("click", async () => {
         if (!window.confirm("会用内置画风重建槽位表，当前槽位（含自定义）会被覆盖，确定吗？")) {
@@ -2189,6 +2203,7 @@
           const resp = await bridge.apiPost("test_panel/slots_reset", {});
           const data = unwrapData(resp) || {};
           if (Array.isArray(data.slots)) {
+            slotState.activeId = String(data.active_slot_id || "1");
             slotState.slots = data.slots.map((s) => ({
               id: Number(s.id) || 0,
               name: String(s.name || ""),
