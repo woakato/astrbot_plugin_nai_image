@@ -3894,14 +3894,14 @@ class NAIGenerateImagePlugin(Star):
         if not isinstance(body, dict):
             body = {}
         query = str(body.get("query") or "").strip()
+        model = str(body.get("model") or "").strip()
+        model_ver = normalize_model_ver(model) if model else self._active_model_ver()
         try:
             limit = int(body.get("limit") or 12)
         except (TypeError, ValueError):
             limit = 12
         try:
-            hits = await asyncio.to_thread(
-                search_grimoire, query, limit, self._active_model_ver()
-            )
+            hits = await asyncio.to_thread(search_grimoire, query, limit, model_ver)
         except Exception as exc:
             logger.warning(f"{LOG_TAG} [panel:grimoire] 检索失败: {exc!r}")
             return error_response(f"检索失败: {exc!r}", status_code=500)
@@ -3910,7 +3910,7 @@ class NAIGenerateImagePlugin(Star):
                 "status": "ok",
                 "data": {
                     "items": hits,
-                    "model_ver": self._active_model_ver(),
+                    "model_ver": model_ver,
                     "total_db": 19663,
                 },
             }
@@ -4722,8 +4722,7 @@ class NAIGenerateImagePlugin(Star):
         """当前生效模型对应的词库版本（``NAI4.5`` / ``NAI5``）。
 
         两套调用通道用的模型配置不同：传统 GET 用 ``model``，OpenAI 兼容用
-        ``openai_api_model``。词库必须锁定到当前通道真正会用的那个模型，
-        避免 V4.5 检索到 V5 的词条。
+        ``openai_api_model``。当前模型用于词条排序，两卷均可检索。
         """
 
         call_mode = str(getattr(self, "call_mode", "direct") or "direct")
@@ -6758,7 +6757,7 @@ class NAIGenerateImagePlugin(Star):
     ) -> str:
         """在内置 NovelAI 法典词库（19,663 条实测 Tag 组合，NAI4.5 与 NAI5 分卷）中检索画风、服饰、姿势、视角、特殊玩法等 Tag。
 
-        检索范围自动跟随当前生图模型：V5 会同时查 V5 与 V4.5 两卷（新底模兼容旧词条，同名优先 V5）；V4.5 只查 V4.5 卷。
+        同时检索 V4.5 与 V5 两卷，同名词条优先当前模型的版本；收录版本不作为排他兼容性标记。
 
         需要特定画风、精致穿搭、复杂互动姿势时，可先调用本工具取现成的实测 Tag 组合；
         也可以直接在 NAI_Generate_Image 的 prompt 里写【法典:词条名】，生图时会自动展开。

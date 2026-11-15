@@ -11,7 +11,7 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import grimoire_service as grimoire
 import pytest
@@ -41,10 +41,10 @@ def test_normalize_model_ver_separates_v45_from_v5(model, expected):
     assert normalize_model_ver(model) == expected
 
 
-def test_search_grimoire_is_locked_to_current_model_version():
+def test_search_grimoire_prefers_current_model_version():
     hits = search_grimoire("白丝", 5, "nai-diffusion-4-5-full")
     assert hits, "V4.5 词库应当能检索到词条"
-    assert all(item["model_ver"] == "NAI4.5" for item in hits)
+    assert hits[0]["model_ver"] == "NAI4.5"
 
 
 def test_expand_grimoire_macros_replaces_macro_with_tags():
@@ -411,11 +411,11 @@ def test_grimoire_tool_has_no_scope_param():
 
 
 # ---------------------------------------------------------------------------
-# 版本回退：V5 兼容 V4.5 词条，V4.5 用不了 V5 专属词条
+# Both source volumes remain searchable; the current model determines ranking.
 # ---------------------------------------------------------------------------
 def test_allowed_model_vers_fallback_chain():
     assert grimoire.allowed_model_vers("nai-diffusion-5-full") == ["NAI5", "NAI4.5"]
-    assert grimoire.allowed_model_vers("nai-diffusion-4-5-full") == ["NAI4.5"]
+    assert grimoire.allowed_model_vers("nai-diffusion-4-5-full") == ["NAI4.5", "NAI5"]
     assert grimoire.allowed_model_vers(None) == []
 
 
@@ -427,10 +427,35 @@ def test_v5_search_falls_back_to_v45_entries():
     assert any(item["model_ver"] == "NAI4.5" for item in hits)
 
 
-def test_v45_search_cannot_reach_v5_only_entries():
-    # 「ZUN绘」只存在于 V5 卷；V4.5 模型检索不应返回任何 V5 词条
+def test_v45_search_includes_entries_collected_in_v5_volume():
+    # A source-volume label alone does not establish exclusive model support.
     hits = search_grimoire("ZUN绘", 5, "nai-diffusion-4-5-full")
-    assert all(item["model_ver"] == "NAI4.5" for item in hits)
+    assert any(
+        item["title"] == "ZUN绘" and item["model_ver"] == "NAI5" for item in hits
+    )
+
+
+def test_v45_macros_expand_entries_from_v5_volume():
+    hits = search_grimoire("ZUN绘", 1, "nai-diffusion-4-5-full")
+    assert hits
+    assert (
+        expand_grimoire_macros("【法典:ZUN绘】", "nai-diffusion-4-5-full")
+        == (hits[0]["clean_tags"])
+    )
+
+
+def test_v45_translation_hints_include_entries_from_v5_volume():
+    hint = grimoire.build_grimoire_translation_hint(
+        "请使用ZUN绘画风", model_ver="nai-diffusion-4-5-full"
+    )
+    assert "《ZUN绘》" in hint
+
+
+@pytest.mark.parametrize("model", ["nai-diffusion-4-5-full", "nai-diffusion-5-full"])
+def test_unfiltered_search_prefers_selected_source_volume(model):
+    hits = search_grimoire("", 5, model)
+    assert hits
+    assert all(item["model_ver"] == normalize_model_ver(model) for item in hits)
 
 
 def test_v5_prefers_own_volume_on_duplicate_titles():
@@ -487,6 +512,51 @@ class _FakeWebRequest:
 
     async def json(self, default=None):
         return self._body
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("nai-diffusion-5-full", "NAI5"),
+        ("nai-diffusion-4-5-full", "NAI4.5"),
+        ("", "NAI5"),
+    ],
+)
+def test_panel_grimoire_uses_panel_model_or_global_fallback(
+    tmp_path, monkeypatch, model, expected
+):
+    plugin = _make_slot_plugin(tmp_path, monkeypatch)
+    plugin.enable_grimoire = True
+    monkeypatch.setattr(plugin, "_active_model_ver", lambda: "NAI5")
+    search = Mock(return_value=[{"title": "test", "model_ver": expected}])
+    monkeypatch.setattr("main.search_grimoire", search)
+    monkeypatch.setattr(
+        "main.web_request",
+        _FakeWebRequest({"query": "test", "limit": 5, "model": model}),
+    )
+
+    response = asyncio.run(plugin._test_panel_grimoire_search())
+
+    assert response.status_code == 200
+    search.assert_called_once_with("test", 5, expected)
+    assert json.loads(response.body)["data"]["model_ver"] == expected
+
+
+def test_panel_grimoire_stays_disabled_with_an_explicit_panel_model(
+    tmp_path, monkeypatch
+):
+    plugin = _make_slot_plugin(tmp_path, monkeypatch)
+    search = Mock()
+    monkeypatch.setattr("main.search_grimoire", search)
+    monkeypatch.setattr(
+        "main.web_request",
+        _FakeWebRequest({"query": "test", "model": "nai-diffusion-5-full"}),
+    )
+
+    response = asyncio.run(plugin._test_panel_grimoire_search())
+
+    assert json.loads(response.body)["status"] == "disabled"
+    search.assert_not_called()
 
 
 def _panel_plugin(tmp_path, monkeypatch):

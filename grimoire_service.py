@@ -43,11 +43,13 @@ def normalize_model_ver(model_name: str | None) -> str:
 
 
 def allowed_model_vers(model_name: str | None) -> list[str]:
-    """当前模型可用的词库版本，按优先级排列（第一个是模型自身那一卷）。
+    """Return both source volumes, ordered by the requested model.
 
-    V5 是新的底模，能直接用 V4.5 的标签与画风，所以 V5 检索时要把 V4.5
-    那 18,505 条一起算进来；反向不成立——V4.5 用不了 V5 专属的部分词条，
-    因此 V4.5 只查自己这一卷。
+    Args:
+        model_name: Model name used to prefer its source volume.
+
+    Returns:
+        Both source versions in preference order, or no preference when absent.
     """
 
     if not model_name:
@@ -55,7 +57,7 @@ def allowed_model_vers(model_name: str | None) -> list[str]:
     locked = normalize_model_ver(model_name)
     if locked == "NAI5":
         return ["NAI5", "NAI4.5"]
-    return [locked]
+    return ["NAI4.5", "NAI5"]
 
 
 def _candidate_db_paths() -> list[Path]:
@@ -165,7 +167,9 @@ def extract_clean_positive_tags(raw_tags: str) -> str:
         s = line.strip()
         if not s:
             continue
-        if s.startswith(("负面", "negative", "Steps:", "Sampler:", "Prompt Guidance", "设置")):
+        if s.startswith(
+            ("负面", "negative", "Steps:", "Sampler:", "Prompt Guidance", "设置")
+        ):
             continue
         s = re.sub(r"^char\d+[:：]\s*", "", s, flags=re.IGNORECASE)
         lines.append(s.rstrip(",， "))
@@ -177,12 +181,16 @@ def search_grimoire(
     limit: int = 12,
     model_ver: str | None = None,
 ) -> list[dict[str, Any]]:
-    """检索内置 NovelAI 法典词库，按当前生图模型版本过滤。
+    """Search both source volumes, preferring the requested model's entries.
 
-    V5 会同时检索 V5 与 V4.5 两卷（新底模兼容旧词条），同名时优先返回 V5 的
-    那一条；V4.5 只查自己这一卷（用不了 V5 专属词条）。
-    不做 sfw/nsfw 分级过滤：词条本身就是用户点名要查的内容，多一个分级开关
-    只会让模型或用户在不知情时漏掉整卷词库。
+    Args:
+        query: Words matched against entry titles, categories and tags.
+        limit: Maximum number of returned entries, capped at 50.
+        model_ver: Model name used for ranking; source labels do not prove
+            exclusive compatibility.
+
+    Returns:
+        Matching entries with their original source version and cleaned tags.
     """
     db_path = get_grimoire_db_path()
     if not db_path:
@@ -215,7 +223,7 @@ def search_grimoire(
 
     if tokens:
         first_tok = tokens[0]
-        # 同名同分时，模型自己那一卷排在前面（V5 模型优先 V5 词条，再回退 V4.5）。
+        # Source versions affect ranking, not compatibility eligibility.
         version_bonus_sql = ""
         score_params = [
             first_tok,
@@ -224,7 +232,9 @@ def search_grimoire(
             f"%{first_tok}%",
         ]
         if preferred_ver:
-            version_bonus_sql = "\n                 + CASE WHEN model_ver = ? THEN 15 ELSE 0 END"
+            version_bonus_sql = (
+                "\n                 + CASE WHEN model_ver = ? THEN 15 ELSE 0 END"
+            )
             score_params.append(preferred_ver)
         sql = f"""
             SELECT id, volume, rating, model_ver, category, title, tags,
@@ -244,30 +254,40 @@ def search_grimoire(
             SELECT id, volume, rating, model_ver, category, title, tags, 10 AS relevance
             FROM grimoire_entries
             {where_sql}
-            ORDER BY id ASC
+            ORDER BY CASE WHEN model_ver = ? THEN 0 ELSE 1 END, id ASC
             LIMIT ?
         """
-        rows = cur.execute(sql, params + [limit]).fetchall()
+        rows = cur.execute(sql, params + [preferred_ver, limit]).fetchall()
 
     conn.close()
     results = []
     for r in rows:
         raw_tags = r["tags"] or ""
-        results.append({
-            "id": r["id"],
-            "volume": r["volume"],
-            "rating": r["rating"],
-            "model_ver": r["model_ver"],
-            "category": r["category"],
-            "title": r["title"],
-            "tags": raw_tags,
-            "clean_tags": extract_clean_positive_tags(raw_tags),
-        })
+        results.append(
+            {
+                "id": r["id"],
+                "volume": r["volume"],
+                "rating": r["rating"],
+                "model_ver": r["model_ver"],
+                "category": r["category"],
+                "title": r["title"],
+                "tags": raw_tags,
+                "clean_tags": extract_clean_positive_tags(raw_tags),
+            }
+        )
     return results
 
 
 def expand_grimoire_macros(prompt: str, model_ver: str | None = None) -> str:
-    """展开提示词中的 [法典:词条名] 或 【法典:词条名】 宏（严格限定在当前模型版本词库内）。"""
+    """Expand grimoire macros from either source volume.
+
+    Args:
+        prompt: Prompt containing bracketed grimoire entry names.
+        model_ver: Model name used to rank entries with matching names.
+
+    Returns:
+        The prompt with matching macros replaced by cleaned tags.
+    """
     if not prompt or ("法典:" not in prompt and "法典：" not in prompt):
         return prompt
 
@@ -284,10 +304,16 @@ def expand_grimoire_macros(prompt: str, model_ver: str | None = None) -> str:
 def build_grimoire_translation_hint(
     natural_text: str, max_matches: int = 5, model_ver: str | None = None
 ) -> str:
-    """从自然语言描述中提取命中的法典词条，供转译模型参考。
+    """Find entries from both volumes to guide prompt translation.
 
-版本规则与检索一致：V5 模型同时参考 V5 与 V4.5 词条，V4.5 只参考自己那卷。
-"""
+    Args:
+        natural_text: Text containing grimoire entry names.
+        max_matches: Maximum number of distinct entry titles to include.
+        model_ver: Model name used to prefer its source volume.
+
+    Returns:
+        A translation hint containing matching tags, or an empty string.
+    """
     if not natural_text or len(natural_text.strip()) < 2:
         return ""
     db_path = get_grimoire_db_path()
@@ -299,15 +325,15 @@ def build_grimoire_translation_hint(
     if not cn_chunks:
         return ""
 
-    allowed_vers = allowed_model_vers(model_ver) or ["NAI4.5"]
-    locked_ver = allowed_vers[0]
+    allowed_vers = allowed_model_vers(model_ver) or ["NAI4.5", "NAI5"]
+    preferred_ver = allowed_vers[0]
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     matched_rows = []
-    seen_ids = set()
+    seen_titles = set()
 
     placeholders = ", ".join("?" for _ in allowed_vers)
     rows = cur.execute(
@@ -317,18 +343,31 @@ def build_grimoire_translation_hint(
         WHERE model_ver IN ({placeholders})
           AND length(title) BETWEEN 2 AND 14
           AND instr(?, title) > 0
-        ORDER BY length(title) DESC, id ASC
+        ORDER BY length(title) DESC,
+            CASE WHEN model_ver = ? THEN 0 ELSE 1 END, id ASC
         LIMIT 12
         """,
-        (*allowed_vers, text),
+        (*allowed_vers, text, preferred_ver),
     ).fetchall()
 
     for r in rows:
         t = r["title"]
-        if t in ("其他", "杂项", "正面", "侧面", "背面", "室内", "室外", "日常", "内衣", "泳装", "睡衣"):
+        if t in (
+            "其他",
+            "杂项",
+            "正面",
+            "侧面",
+            "背面",
+            "室内",
+            "室外",
+            "日常",
+            "内衣",
+            "泳装",
+            "睡衣",
+        ):
             continue
-        if r["id"] not in seen_ids:
-            seen_ids.add(r["id"])
+        if t not in seen_titles:
+            seen_titles.add(t)
             matched_rows.append(r)
             if len(matched_rows) >= max_matches:
                 break
@@ -337,8 +376,10 @@ def build_grimoire_translation_hint(
     if not matched_rows:
         return ""
 
-    ver_label = "NAI5 + 兼容的 NAI4.5" if locked_ver == "NAI5" else locked_ver
-    lines = [f"\n\n【NovelAI ({ver_label}) 法典命中词条参考（若与用户意图一致，请优先采用或融合以下经过实测的标签）】："]
+    lines = [
+        f"\n\n【NovelAI ({preferred_ver}) 法典候选词条参考"
+        "（检索 NAI4.5 / NAI5 两卷，优先当前版本；请结合用户意图选择标签）】："
+    ]
     for r in matched_rows:
         clean = extract_clean_positive_tags(r["tags"])
         if len(clean) > 260:
