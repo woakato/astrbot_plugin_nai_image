@@ -85,10 +85,18 @@
     usageDisabled: $("usageDisabled"),
     usageError: $("usageError"),
   };
+  const LEGACY_STYLE_OPTIONS = Array.from(els.style.options, (option) => ({
+    value: option.value,
+    label: option.textContent,
+  }));
 
   // ===== 状态 =====
   let isGenerating = false;
+  let isInitializing = true;
   let lastRequestBody = null;
+  let lastRequestWasTrial = false;
+  let trialStatus = null;
+  let cachedStyle = null;
   // 点数用量统计：当前窗口天数与后端快照
   let usageDays = 7;
   let usageData = null;
@@ -382,6 +390,7 @@
 
   let _saveCacheTimer = null;
   function saveCache() {
+    if (isInitializing) return;
     if (_saveCacheTimer) clearTimeout(_saveCacheTimer);
     _saveCacheTimer = setTimeout(async () => {
       try {
@@ -408,12 +417,13 @@
       const data = (resp && resp.data) ? resp.data : resp;
       if (!data || typeof data !== "object") return false;
       let restored = false;
-      // 配置和选项已加载；先切到缓存的接口，再恢复其模型和尺寸。
+      // Restore the provider before its model and size selections.
       if (["openai", "direct", "novelai"].includes(data.callFormat)) {
         hasCachedFormat = true;
         setCallFormat(data.callFormat);
         restored = true;
       }
+      cachedStyle = data.style == null ? null : String(data.style);
       getCachedFields().forEach((key) => {
         const el = els[key];
         if (el && data[key] != null) {
@@ -435,7 +445,7 @@
         clearCharRows();
         data.characters.slice(0, MAX_CHAR_ROWS).forEach((item) => {
           if (!item || typeof item.prompt !== "string" || !item.prompt.trim()) return;
-          addCharRow(item.prompt, Number(item.x) || 0.5, Number(item.y) || 0.5);
+          addCharRow(item.prompt, item.x ?? 0.5, item.y ?? 0.5);
         });
         restored = true;
       }
@@ -775,7 +785,8 @@
     xInput.min = "0";
     xInput.max = "1";
     xInput.step = "0.05";
-    xInput.value = String(x);
+    x = parseFloat(x);
+    xInput.value = String(Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0.5);
     xInput.title = "x 坐标（0-1，从左到右）";
 
     const yInput = document.createElement("input");
@@ -784,7 +795,8 @@
     yInput.min = "0";
     yInput.max = "1";
     yInput.step = "0.05";
-    yInput.value = String(y);
+    y = parseFloat(y);
+    yInput.value = String(Number.isFinite(y) ? Math.min(1, Math.max(0, y)) : 0.5);
     yInput.title = "y 坐标（0-1，从上到下）";
 
     const removeBtn = document.createElement("button");
@@ -1021,7 +1033,7 @@
 
   // ===== 生成图片 =====
   async function generate() {
-    if (isGenerating) return;
+    if (isGenerating || isInitializing) return;
 
     const body = buildRequestBody();
     if (!body.nai_prompt && !body.nl_prompt && !body.director_action) {
@@ -1048,6 +1060,7 @@
     }
 
     lastRequestBody = body;
+    lastRequestWasTrial = false;
     isGenerating = true;
     const refCountText = (body.reference_image_b64_list || []).length
       ? `（含 ${(body.reference_image_b64_list || []).length} 张参考图）`
@@ -1057,10 +1070,10 @@
       : body.call_format !== "direct"
         ? `正在通过 ${upstreamLabel} 生成${refCountText}...`
         : "正在转译 + 生成图片...";
-    setLoading(true);
     hideError();
     hideResults();
     hideMergeInfo();
+    setLoading(true);
 
     try {
       const bridge = await getBridge();
@@ -1169,13 +1182,12 @@
       hide(els.emptyState);
       hide(els.errorState);
       show(els.loadingState);
-      els.generateBtn.disabled = true;
-      els.trialBtn.disabled = true;
-      els.loadingText.textContent = "正在转译 + 生成图片...";
     } else {
       hide(els.loadingState);
-      els.generateBtn.disabled = false;
     }
+    els.generateBtn.disabled = loading || isInitializing;
+    els.resetBtn.disabled = loading;
+    updateTrialUI(trialStatus);
   }
 
   function showError(msg) {
@@ -1290,7 +1302,8 @@
     els.cfg.value = "1";
     els.noiseSchedule.value = "karras";
     els.model.value = "nai-diffusion-4-5-full";
-    els.style.value = "vertical";
+    slotState.appliedId = null;
+    els.style.value = slotState.enabled ? "custom" : "vertical";
     updateSizeOptionsUI();
     els.size.value = "竖图";
     els.count.value = "1";
@@ -1305,6 +1318,11 @@
     clearCharRows();
     toggleCustomArtists();
     setCallFormat("direct");
+    const active = slotState.enabled && slotState.slots.find(
+      (slot) => String(slot.id) === slotState.activeId
+    );
+    if (active) applySlotToPanel(active);
+    else refreshSlotStatus();
     saveCache();
   }
 
@@ -1340,7 +1358,6 @@
       if (els.openaiConfigStatus) show(els.openaiConfigStatus);
       els.callFormatHint.textContent =
         `使用插件设置中的 ${upstreamLabel} 地址和密钥。`;
-      els.trialBtn.disabled = true;
       els.trialBtn.title = "试用生成仅支持 nai.sta1n.cn格式";
     } else {
       hide(els.refUploadWrap);
@@ -1353,10 +1370,10 @@
       if (els.openaiConfigStatus) hide(els.openaiConfigStatus);
       els.callFormatHint.textContent =
         "直连 nai.sta1n.cn 原生接口生成。";
-      els.trialBtn.disabled = false;
       els.trialBtn.title = "";
       loadTrialStatus();
     }
+    updateTrialUI(trialStatus);
     applyRefModeUI();
     updateModelOptionsUI();
     updateSizeOptionsUI();
@@ -1366,6 +1383,15 @@
     if (selected) {
       if (Array.from(els.size.options).some(opt => opt.value === selected.size)) els.size.value = selected.size;
       if (Array.from(els.model.options).some(opt => opt.value === selected.model)) els.model.value = selected.model;
+    }
+    const applied = slotState.slots.find(
+      (slot) => String(slot.id) === slotState.appliedId
+    );
+    if (applied?.model && els.model.value !== applied.model) {
+      slotState.appliedId = null;
+      els.style.value = "custom";
+      toggleCustomArtists();
+      refreshSlotStatus();
     }
     updateProviderStatus();
     updateCostBadge();
@@ -1415,33 +1441,36 @@
       const status = (resp && resp.data) ? resp.data : resp;
       updateTrialUI(status);
     } catch (err) {
-      hide(els.trialStatus);
-      els.trialBtn.disabled = true;
+      updateTrialUI(null);
     }
   }
 
   function updateTrialUI(status) {
-    if (!status) return;
+    trialStatus = status;
+    els.trialBtn.disabled = isInitializing || isGenerating ||
+      currentCallFormat !== "direct" || !status?.available;
+    if (!status || currentCallFormat !== "direct") {
+      hide(els.trialStatus);
+      return;
+    }
     const remaining = status.remaining || 0;
     const used = status.used || 0;
     const max = status.max_uses || 3;
 
     if (status.available) {
-      els.trialBtn.disabled = false;
       show(els.trialStatus);
       els.trialStatusText.textContent = `🌟 试用生成可用 · 已用 ${used}/${max} 次 · 剩余 ${remaining} 次`;
     } else if (status.key_loaded && used >= max) {
-      els.trialBtn.disabled = true;
       show(els.trialStatus);
       els.trialStatusText.textContent = `⚠ 试用次数已达上限（${max} 次）。请配置自己的密钥后使用正式生图。`;
     } else {
-      els.trialBtn.disabled = true;
       hide(els.trialStatus);
     }
   }
 
   async function trialGenerate() {
-    if (isGenerating) return;
+    if (isGenerating || isInitializing || currentCallFormat !== "direct" ||
+        !trialStatus?.available) return;
 
     const body = buildRequestBody();
     if (!body.nai_prompt && !body.nl_prompt) {
@@ -1451,11 +1480,12 @@
 
     body.n = 1;
     lastRequestBody = body;
+    lastRequestWasTrial = true;
     isGenerating = true;
-    setLoading(true);
     hideError();
     hideResults();
     hideMergeInfo();
+    setLoading(true);
     els.loadingText.textContent = "正在使用试用密钥转译 + 生成...";
 
     try {
@@ -1672,18 +1702,26 @@
     if (!els.usageBreakdown) return;
     const groups = (payload.breakdowns || {})[String(usageDays)] || {};
     const labels = { model: "MODEL", size: "SIZE", transport: "CHANNEL" };
-    const html = Object.keys(labels)
-      .map((field) => {
-        const items = groups[field] || [];
-        if (!items.length) return "";
-        const chips = items
-          .map((item) => `<span class="usage-bd-item">${item.name} · ${item.cost} 点</span>`)
-          .join("");
-        return `<div class="usage-bd-row"><span class="usage-bd-tag">${labels[field]}</span><span class="usage-bd-items">${chips}</span></div>`;
-      })
-      .filter(Boolean)
-      .join("");
-    els.usageBreakdown.innerHTML = html;
+    els.usageBreakdown.replaceChildren();
+    Object.keys(labels).forEach((field) => {
+      const items = groups[field] || [];
+      if (!items.length) return;
+      const row = document.createElement("div");
+      row.className = "usage-bd-row";
+      const label = document.createElement("span");
+      label.className = "usage-bd-tag";
+      label.textContent = labels[field];
+      const chips = document.createElement("span");
+      chips.className = "usage-bd-items";
+      items.forEach((item) => {
+        const chip = document.createElement("span");
+        chip.className = "usage-bd-item";
+        chip.textContent = `${item.name} · ${item.cost} 点`;
+        chips.appendChild(chip);
+      });
+      row.append(label, chips);
+      els.usageBreakdown.appendChild(row);
+    });
   }
 
   function renderUsage() {
@@ -1790,7 +1828,8 @@
     els.retryBtn.addEventListener("click", () => {
       if (lastRequestBody) {
         hideError();
-        generate();
+        if (lastRequestWasTrial) trialGenerate();
+        else generate();
       }
     });
     els.loadDefaultNegative.addEventListener("click", loadDefaultNegative);
@@ -1854,6 +1893,7 @@
     const e = slotEls();
     if (!e.rows) return;
     e.rows.textContent = "";
+    renderSlotOptions();
     if (!slotState.slots.length) {
       const empty = document.createElement("div");
       empty.className = "grimoire-empty";
@@ -1865,7 +1905,6 @@
       ? slotState.models
       : ["nai-diffusion-4-5-full", "nai-diffusion-5-full"];
 
-    renderSlotOptions();
     slotState.slots.forEach((slot) => {
       const row = document.createElement("div");
       row.className = "slot-row";
@@ -1945,17 +1984,24 @@
 
   function renderSlotOptions() {
     const selected = els.style.value;
-    els.style.querySelectorAll('[data-slot-option]').forEach((option) => option.remove());
-    if (slotState.enabled) {
-      slotState.slots.forEach((slot) => {
-        const option = document.createElement("option");
-        option.dataset.slotOption = "true";
-        option.value = `slot:${slot.id}`;
-        option.textContent = slot.name || `槽位 ${slot.id}`;
-        els.style.appendChild(option);
-      });
-    }
-    els.style.value = selected;
+    const options = slotState.enabled
+      ? [
+          ...slotState.slots.map((slot) => ({
+            value: `slot:${slot.id}`,
+            label: slot.name || `槽位 ${slot.id}`,
+          })),
+          ...LEGACY_STYLE_OPTIONS.filter((option) => option.value === "custom"),
+        ]
+      : LEGACY_STYLE_OPTIONS;
+    els.style.replaceChildren(...options.map((item) => {
+      const option = document.createElement("option");
+      option.value = item.value;
+      option.textContent = item.label;
+      return option;
+    }));
+    els.style.value = options.some((option) => option.value === selected)
+      ? selected
+      : "custom";
   }
 
   // Keep the selected slot and the visible generation fields in sync.
@@ -2049,7 +2095,8 @@
         const active = slotState.slots.find(
           (s) => String(s.id) === String(slotState.activeId)
         );
-        if (selected || active) applySlotToPanel(selected || active);
+        if (selected) applySlotToPanel(selected);
+        else if (cachedStyle !== "custom" && active) applySlotToPanel(active);
       }
     } catch (err) {
       if (e.status) e.status.textContent = `读取槽位失败：${err && err.message ? err.message : err}`;
@@ -2163,6 +2210,7 @@
       const resp = await bridge.apiPost("test_panel/grimoire_search", {
         query,
         limit: 12,
+        model: els.model.value,
       });
       const payload = unwrapData(resp) || {};
       if (payload.message && !(payload.items && payload.items.length)) {
@@ -2212,8 +2260,14 @@
             }));
             renderSlotRows();
             slotState.appliedId = null;
-            els.style.value = "custom";
-            toggleCustomArtists();
+            const active = slotState.enabled && slotState.slots.find(
+              (slot) => String(slot.id) === slotState.activeId
+            );
+            if (active) applySlotToPanel(active);
+            else {
+              els.style.value = "custom";
+              toggleCustomArtists();
+            }
             refreshSlotStatus();
           }
           if (e.status) e.status.textContent = "已恢复为内置画风。";
@@ -2245,20 +2299,23 @@
     // 启动高可见度等高线拓扑地形动画引擎
     initContourEngine();
 
+    els.generateBtn.disabled = true;
     bindEvents();
     // 先加载服务配置和完整选项，再恢复用户缓存，避免默认值覆盖选择。
     await loadTokenStatus();
     const cacheRestored = await loadCache();
-    slotState.autoApplied = cacheRestored;
+    slotState.autoApplied = cacheRestored && cachedStyle === null;
     toggleCustomArtists();
     updateCostBadge();
-    // 加载试用状态
-    await loadTrialStatus();
-    // 加载点数用量台账
-    await loadUsageStats();
     // 加载画风槽位与法典面板
     bindSlotEvents();
     await loadSlots();
+    isInitializing = false;
+    setLoading(false);
+    saveCache();
+    // Metadata must not delay restoring the generation form.
+    loadTrialStatus();
+    loadUsageStats();
   }
 
   // DOM 就绪后启动

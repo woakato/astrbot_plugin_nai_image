@@ -515,8 +515,10 @@ body::before {
 
 .field-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
 }
 
 .field-label {
@@ -1538,6 +1540,7 @@ body::before {
 
 .ref-item-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -1549,6 +1552,7 @@ body::before {
 
 .ref-caption-select {
   max-width: 180px;
+  min-width: 0;
 }
 
 /* 按参考图使用模式控制逐图控件显隐：img2img 走全局重绘强度、隐藏逐图
@@ -1584,13 +1588,14 @@ body::before {
 
 .char-row {
   display: grid;
-  grid-template-columns: 1fr 76px 76px auto;
+  grid-template-columns: minmax(0, 1fr) 76px 76px auto;
   gap: 8px;
   align-items: center;
 }
 
 .char-row .char-prompt {
   width: 100%;
+  min-width: 0;
 }
 
 .char-row .char-coord {
@@ -1980,4 +1985,31 @@ body::before {
 
 @media (max-width: 520px) {
   .format-toggle-group { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 640px) {
+  .char-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  }
+  .char-row .char-prompt {
+    grid-column: 1 / -1;
+  }
+  .char-row .char-coord {
+    width: 100%;
+    min-width: 0;
+  }
+  .ref-item {
+    flex-wrap: wrap;
+  }
+  .ref-item-body {
+    order: 1;
+    flex-basis: 100%;
+  }
+  .ref-item-remove {
+    margin-left: auto;
+  }
+  .ref-caption-select {
+    flex: 1 1 140px;
+    max-width: 100%;
+  }
 }
