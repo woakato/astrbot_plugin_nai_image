@@ -66,6 +66,13 @@ if __package__:
         api_settings,
         migrate_novelai_config,
     )
+    from .site_failover import (
+        SITE_MODE_LABELS,
+        build_site,
+        describe_site,
+        enabled_sites,
+        switch_decision,
+    )
     from .starbridge import (
         StarbridgeError,
         native_error,
@@ -126,6 +133,13 @@ else:
         decode_native_response,
         normalize_starbridge_response,
         prepare_starbridge_request,
+    )
+    from site_failover import (
+        SITE_MODE_LABELS,
+        build_site,
+        describe_site,
+        enabled_sites,
+        switch_decision,
     )
     from usage_stats import (
         STATS_FILE_NAME,
@@ -774,6 +788,12 @@ class NAIGenerateImagePlugin(Star):
             config.get("base_url") or IMAGE_GEN_BASE_URL_DEFAULT
         ).strip() or IMAGE_GEN_BASE_URL_DEFAULT
         self.image_gen_key: str = (config.get("image_gen_key") or "").strip()
+        # 站点优先级故障转移：站点表为空表示沿用上面的单站点配置，行为完全不变。
+        # 仅在「明确没有出图、也没有计费」的失败时换站，判定见 site_failover。
+        self._sites_config = config.get("site_failover_sites")
+        self.enable_site_failover: bool = bool(
+            config.get("enable_site_failover", False)
+        )
         self.image_style: str = (
             normalize_image_style(config.get("image_style")) or "vertical"
         )
@@ -2419,6 +2439,126 @@ class NAIGenerateImagePlugin(Star):
             logger.info(f"{LOG_TAG} [openai_generate] 尺寸校正: {size} -> {normalized}")
         return normalized
 
+    def _failover_sites(self) -> list[dict[str, Any]]:
+        """返回本次生图可用的站点序列（已按优先级排序）。
+
+        站点表为空、开关关闭或未配置任何有效站点时返回空列表，调用方据此
+        走原有的单站点逻辑；这样未启用该功能的用户行为完全不变。
+
+        Returns:
+            已启用的站点列表，首项是优先级最高的站点。
+        """
+
+        if not getattr(self, "enable_site_failover", False):
+            return []
+        return enabled_sites(getattr(self, "_sites_config", None))
+
+    def _current_site(self, mode: str | None = None) -> dict[str, Any]:
+        """把当前插件配置包装成一个站点，供统一的站点循环复用。
+
+        站点表未启用时，故障转移退化为此单站点路径，从而让两条路径共用同一
+        套请求代码，避免维护两份实现。完整实例（有 ``_api_config``）不在这里
+        固化地址和密钥，交由 ``_site_api_settings`` 按协议从配置解析，这样
+        测试面板强制指定协议时仍能取到该协议各自的凭据。
+
+        Args:
+            mode: 接入方式；None 时使用插件当前的 ``call_mode``。
+
+        Returns:
+            形如站点表条目的字典，``name`` 为「当前配置」。
+        """
+
+        resolved = mode or getattr(self, "call_mode", "direct")
+        if resolved in ("openai", "novelai"):
+            if isinstance(getattr(self, "_api_config", None), dict):
+                url, key, service = "", "", ""
+            else:
+                url = str(getattr(self, "openai_api_base_url", "") or "")
+                key = str(getattr(self, "openai_api_key", "") or "")
+                service = str(getattr(self, "novelai_service", "") or "")
+        else:
+            url = str(getattr(self, "base_url", "") or "")
+            key = str(getattr(self, "image_gen_key", "") or "")
+            service = ""
+        site = build_site(
+            "当前配置",
+            resolved,
+            url,
+            api_key=key,
+            novelai_service=service,
+        )
+        if not site:
+            # 地址为空时 build_site 返回空字典；保留接入方式以便给出准确报错。
+            site = {
+                "name": "当前配置",
+                "mode": resolved,
+                "base_url": url,
+                "api_key": key,
+                "effective_order": 1,
+            }
+            if service:
+                site["novelai_service"] = service
+        # 标记这是「当前配置」包装而非站点表条目，供凭据解析区分优先级。
+        site["_is_current"] = True
+        return site
+
+    def _attempt_sites(self, mode: str | None = None) -> list[dict[str, Any]]:
+        """给出本次生图要依次尝试的站点序列。
+
+        站点表启用时按其优先级排列；未启用时退化为单个「当前配置」站点。
+
+        Args:
+            mode: 单站点退化路径使用的接入方式；调用方应显式传入自己适逢的
+                协议，避免依赖实例上可能不存在的 ``call_mode``。
+
+        Returns:
+            至少包含一个站点的列表。
+        """
+
+        sites = self._failover_sites()
+        if sites:
+            return sites
+        return [self._current_site(mode)]
+
+    @staticmethod
+    def _site_api_settings(site: dict[str, Any], config: dict[str, Any]) -> dict:
+        """解析某个站点的地址、密钥与型号。
+
+        站点条目自己填了凭据就用站点的；留空时回退插件里该协议的既有配置，
+        这样用户只填地址也能复用已保存的 Key。
+
+        Args:
+            site: 站点表条目或 ``_current_site`` 的返回值。
+            config: 插件原始配置，用于回退。
+
+        Returns:
+            ``{"profile", "url", "key", "model"}``，与 ``api_settings`` 同构。
+        """
+
+        mode = str(site.get("mode") or "direct")
+        resolved = config
+        if mode in ("openai", "novelai"):
+            if site.get("mode") == "novelai":
+                resolved = dict(config)
+                # 站点可显式指定官方/星桥，取站点自己的服务名。
+                resolved["novelai_service"] = site.get("novelai_service") or config.get(
+                    "novelai_service", "starbride"
+                )
+            settings = api_settings(resolved, mode)
+            site_url = str(site.get("base_url") or "").strip()
+            site_key = str(site.get("api_key") or "").strip()
+            if site_url:
+                settings["url"] = site_url.rstrip("/")
+            if site_key:
+                settings["key"] = site_key
+            return settings
+        return {
+            "profile": "direct",
+            "url": str(site.get("base_url") or "").rstrip("/"),
+            "key": str(site.get("api_key") or "").strip(),
+            "model": str(config.get("model") or NATIVE_MODELS[0]).strip(),
+        }
+
     def _openai_endpoint(self, target: str, *, base_url: str | None = None) -> str:
         """拼接 OpenAI 兼容端点，兼容 base_url 是否带 ``/v1``。
 
@@ -2559,6 +2699,127 @@ class NAIGenerateImagePlugin(Star):
         characters: Sequence[tuple[str, float, float]] | None = None,
         transport_mode: str | None = None,
     ) -> tuple[list[bytes], str]:
+        """OpenAI 兼容 / NovelAI 原生生图入口，按站点优先级做故障转移。
+
+        站点表启用时按配置的优先级依次尝试；站点表为空时只有「当前配置」一个
+        候选站点，行为与未引入故障转移前一致。换站遵循保守口径：只有明确没有
+        出图、也没有计费的失败才会切换（见 ``site_failover.is_switchable``）。
+
+        Args:
+            prompt: 主体提示词（已合并画师串）。
+            size: NAI 尺寸键或像素尺寸 "WxH"。
+            n: 生成张数。
+            reference_image_path / reference_image_bytes: 旧的单图参考参数。
+            reference_image_paths / reference_image_bytes_list: 多图参考，最多 8 张。
+            strength / reference_strengths: 参考图强度及逐图强度。
+            noise / steps / scale / sampler / noise_schedule / seed / negative:
+                高级参数，留 None 时使用插件全局配置。
+            model: 模型覆盖，默认取所选站点对应的配置。
+            reference_mode: "vibe" / "img2img" / "director"。
+            director_action: director-tools 动作。
+            director_caption / director_captions: 精准参考描述及逐图描述。
+            characters: 多角色坐标列表（提示词, x, y），最多 6 个。
+            transport_mode: 强制使用某个接入方式的配置（测试面板用）。
+
+        Returns:
+            (images_bytes, reason) — 成功为 ``"ok"``，否则为错误码；
+            全部站点失败时返回最后一次的失败原因。
+        """
+
+        # 供单站点退化路径使用：优先测试面板强制指定的协议，其次按实例上
+        # 是否已解析出原生 profile 判断，最后回退插件当前配置。
+        if transport_mode:
+            fallback_mode = transport_mode
+        elif getattr(self, "openai_api_profile", "") in (
+            "starbridge",
+            "starbride",
+            "official",
+        ):
+            fallback_mode = "novelai"
+        else:
+            fallback_mode = str(getattr(self, "call_mode", "openai") or "openai")
+            if fallback_mode not in ("openai", "novelai"):
+                fallback_mode = "openai"
+        sites = self._attempt_sites(fallback_mode)
+        last_reason = ""
+        for index, site in enumerate(sites):
+            remaining = len(sites) - index - 1
+            if len(sites) > 1:
+                logger.info(
+                    f"{LOG_TAG} [openai_generate] 站点 {index + 1}/{len(sites)} | "
+                    f"{describe_site(site)}"
+                )
+            images, reason = await self._openai_generate_on_site(
+                site,
+                prompt,
+                size,
+                n=n,
+                reference_image_path=reference_image_path,
+                reference_image_bytes=reference_image_bytes,
+                reference_image_paths=reference_image_paths,
+                reference_image_bytes_list=reference_image_bytes_list,
+                strength=strength,
+                reference_strengths=reference_strengths,
+                noise=noise,
+                steps=steps,
+                scale=scale,
+                sampler=sampler,
+                noise_schedule=noise_schedule,
+                seed=seed,
+                negative=negative,
+                model=model,
+                reference_mode=reference_mode,
+                director_action=director_action,
+                director_caption=director_caption,
+                director_captions=director_captions,
+                characters=characters,
+                transport_mode=transport_mode,
+            )
+            if reason == "ok":
+                return images, reason
+            last_reason = reason
+            should_switch, detail = switch_decision(reason, remaining)
+            if not should_switch:
+                if len(sites) > 1:
+                    logger.warning(
+                        f"{LOG_TAG} [openai_generate] 站点 "
+                        f"{site.get('name', '')} 失败后不换站 | {detail}"
+                    )
+                break
+            logger.warning(
+                f"{LOG_TAG} [openai_generate] 站点 {site.get('name', '')} 失败，"
+                f"切换到下一站点 | {detail}"
+            )
+        return [], last_reason
+
+    async def _openai_generate_on_site(
+        self,
+        site: dict[str, Any],
+        prompt: str,
+        size: str,
+        *,
+        n: int = 1,
+        reference_image_path: str | None = None,
+        reference_image_bytes: bytes | None = None,
+        reference_image_paths: Sequence[str] | None = None,
+        reference_image_bytes_list: Sequence[bytes] | None = None,
+        strength: float | None = None,
+        reference_strengths: Sequence[float] | None = None,
+        noise: float | None = None,
+        steps: int | None = None,
+        scale: float | None = None,
+        sampler: str | None = None,
+        noise_schedule: str | None = None,
+        seed: int | None = None,
+        negative: str | None = None,
+        model: str | None = None,
+        reference_mode: str | None = None,
+        director_action: str | None = None,
+        director_caption: str | None = None,
+        director_captions: Sequence[str] | None = None,
+        characters: Sequence[tuple[str, float, float]] | None = None,
+        transport_mode: str | None = None,
+    ) -> tuple[list[bytes], str]:
         """OpenAI 兼容格式生图（文生图 / 图生图 / 参考图 / 图片处理）。
 
         对齐接口文档：高级参数统一放入 ``parameters`` 对象（§3.2/§10.2）；
@@ -2572,7 +2833,10 @@ class NAIGenerateImagePlugin(Star):
         超时不自动重试（上游可能仍在生成并扣费）；400/401/403 默认不重
         试，但错误文案提示"稍后重试"的瞬时故障除外。
 
+        这是单站点的实际请求实现，站点切换由 ``_openai_generate`` 负责。
+
         Args:
+            site: 本次请求使用的站点条目，凭据与地址从它解析。
             prompt: 主体提示词（已合并画师串）。
             size: NAI 尺寸键（竖图/方图/...）或像素尺寸 "WxH"。
             n: 生成张数。
@@ -2589,7 +2853,7 @@ class NAIGenerateImagePlugin(Star):
             noise: img2img 附加噪声强度，0-1。
             steps / scale / sampler / noise_schedule / seed / negative:
                 高级参数，留 None 时使用插件全局配置。
-            model: 模型覆盖，默认 self.openai_api_model。
+            model: 模型覆盖，默认取所选站点的型号配置。
             reference_mode: "vibe" / "img2img" / "director"，默认
                 self.openai_reference_mode。
             director_action: director-tools 动作（bg-removal/lineart/sketch/
@@ -2603,6 +2867,7 @@ class NAIGenerateImagePlugin(Star):
                 director_caption / 插件配置。
             characters: 多角色坐标列表 (提示词, x, y)，坐标 0-1（§7），
                 最多取前 6 个；仅对 generations 类请求生效。
+            transport_mode: 强制使用某个接入方式的参考图配置（测试面板用）。
 
         Returns:
             (images_bytes, reason) — reason 为 "ok" 或错误码。
@@ -2611,22 +2876,53 @@ class NAIGenerateImagePlugin(Star):
 
         import aiohttp
 
-        selected_api = (
-            api_settings(self._api_config, transport_mode or self.call_mode)
-            if hasattr(self, "_api_config")
-            else {
-                "url": self.openai_api_base_url,
-                "key": self.openai_api_key,
-                "profile": getattr(self, "openai_api_profile", "compatible"),
-                "model": self.openai_api_model,
+        # 站点条目自带接入方式；transport_mode 用于测试面板强制某种协议。
+        effective_mode = transport_mode or str(site.get("mode") or self.call_mode)
+        site_for_mode = dict(site)
+        site_for_mode["mode"] = effective_mode
+        if effective_mode == "direct":
+            # 直连站点不应落到本方法，交由调用方回退；此处仅做防御性返回。
+            return [], "openai_not_configured"
+        reference_config = getattr(self, "_api_config", None)
+        if isinstance(reference_config, dict):
+            selected_api = self._site_api_settings(site_for_mode, reference_config)
+        else:
+            # 裸实例（测试或极简调用）没有完整配置字典：沿用实例上已解析的
+            # 属性。「当前配置」包装只是单站点退化路径的占位，不能用它的
+            # 缺省字段覆盖实例已确定的凭据与 profile。
+            if effective_mode == "novelai":
+                profile = str(
+                    getattr(self, "openai_api_profile", "")
+                    or getattr(self, "novelai_service", "")
+                    or "starbride"
+                )
+                if not site.get("_is_current") and site.get("novelai_service"):
+                    # 站点表里显式指定了服务类型时以站点为准。
+                    profile = str(site["novelai_service"])
+            else:
+                profile = str(getattr(self, "openai_api_profile", "compatible"))
+            selected_api = {
+                "url": str(
+                    getattr(self, "openai_api_base_url", "")
+                    or site.get("base_url")
+                    or ""
+                ).rstrip("/"),
+                "key": str(
+                    getattr(self, "openai_api_key", "")
+                    or site.get("api_key")
+                    or ""
+                ).strip(),
+                "profile": profile,
+                "model": str(
+                    getattr(self, "openai_api_model", "") or NATIVE_MODELS[0]
+                ).strip(),
             }
-        )
+            reference_config = {}
         reference_prefix = (
             "novelai"
             if selected_api["profile"] in ("starbridge", "starbride", "official")
             else "openai"
         )
-        reference_config = getattr(self, "_api_config", {})
 
         def reference_setting(suffix, fallback):
             return reference_config.get(reference_prefix + "_" + suffix, fallback)
@@ -3112,6 +3408,14 @@ class NAIGenerateImagePlugin(Star):
                     "上游可能仍在生成（可能已扣费），不再自动重试"
                 )
                 break
+            except aiohttp.ClientConnectorError as exc:
+                # 连接阶段就失败（DNS/拒连/握手）：请求没有到达上游，不可能
+                # 出图或计费，因此允许故障转移换到下一个站点。
+                logger.warning(
+                    f"{LOG_TAG} [openai_generate] 无法连接站点 "
+                    f"{site.get('name', '')}: {type(exc).__name__}: {exc}"
+                )
+                return [], "connect_failed"
             except Exception as exc:
                 logger.warning(
                     f"{LOG_TAG} [openai_generate] 异常: {type(exc).__name__}: {exc}"
@@ -3984,6 +4288,21 @@ class NAIGenerateImagePlugin(Star):
                 "openai_director_models": sorted(OPENAI_DIRECTOR_MODELS),
                 "openai_director_actions": OPENAI_DIRECTOR_ACTIONS,
                 "call_mode": self.call_mode,
+                # 站点故障转移摘要：只下发站点名、接入方式与地址，不下发密钥。
+                "enable_site_failover": getattr(
+                    self, "enable_site_failover", False
+                ),
+                "site_failover_summary": [
+                    {
+                        "order": site["effective_order"],
+                        "name": site["name"],
+                        "mode": site["mode"],
+                        "mode_label": SITE_MODE_LABELS.get(site["mode"], site["mode"]),
+                        "base_url": site["base_url"],
+                        "has_key": bool(site.get("api_key")),
+                    }
+                    for site in self._failover_sites()
+                ],
             }
         )
 
@@ -4839,6 +5158,7 @@ class NAIGenerateImagePlugin(Star):
         negative: str,
         model: str,
         token: str | None = None,
+        base_url: str | None = None,
     ) -> tuple[bytes | None, str]:
         """经任务接口（POST /api/web/jobs）提交生图并轮询取回图片。
 
@@ -4846,6 +5166,10 @@ class NAIGenerateImagePlugin(Star):
         档位计价，失败任务点数自动退回；GET 直链最高按 28 步路由且固定
         基础档价格。token 经 POST body 与轮询请求头（x-user-token）传递，
         不出现在 URL 中。
+
+        Args:
+            base_url: 站点地址；留 None 时使用插件配置的 ``self.base_url``，
+                故障转移逐个站点尝试时由调用方显式传入。
 
         Returns:
             (img_bytes_or_None, reason)
@@ -4859,7 +5183,7 @@ class NAIGenerateImagePlugin(Star):
         if not self._session:
             return None, "no_session"
 
-        base = self.base_url.rstrip("/")
+        base = (base_url or self.base_url).rstrip("/")
         # 步数钳制到任务接口上限 50，与上游 clamp 行为一致。
         _steps = max(1, min(int(steps), WEB_JOB_STEPS_MAX))
         payload = {
@@ -5061,11 +5385,23 @@ class NAIGenerateImagePlugin(Star):
         enable_translate: bool | str | None = None,
         apply_outfit: bool = True,
     ) -> tuple[bytes | None, str]:
-        """使用最终参数生成单张图片。
+        """使用最终参数生成单张图片，按站点优先级做故障转移。
 
         所有关键字参数都是仅对本次请求生效的覆盖值；传入 ``None`` 时才使用
         插件全局配置，因此 ``0``、``False`` 和空反向提示词都能被显式传递。
-        成功后会按当前历史配置归档图片及实际发送的接口参数。
+        站点表未启用时只有「当前配置」一个候选站点，行为与引入故障转移前
+        一致；换站遵循保守口径，只在本站明确没有出图、也没有计费时切换。
+
+        Args:
+            prompt: 提示词。
+            style: 画风键。
+            size: 直连模式的中文分档名。
+            steps / scale / cfg / sampler / noise_schedule / negative:
+                单次覆盖的生成参数，None 时使用插件配置。
+            model: 模型覆盖。
+            custom_artists: 画师串覆盖，空串表示显式不加画师串。
+            enable_template / enable_translate: 单次模板与转译开关。
+            apply_outfit: 是否套用默认服装与服装缓存。
 
         Returns:
             (img_bytes_or_None, reason)
@@ -5078,12 +5414,19 @@ class NAIGenerateImagePlugin(Star):
         上游无任务接口（404，旧版自建 Nai2API）时自动回退 GET 直链
         （>28 步按 28 路由，基础档计价）。
         """
-        if not self.image_gen_key:
-            logger.warning(f"{LOG_TAG} [generate] 跳过：token 未配置")
-            return None, "no_token"
         if not self._session:
             logger.warning(f"{LOG_TAG} [generate] 跳过：session 未初始化")
             return None, "no_session"
+
+        # 站点表可能自带 token：只有「所有候选站点都没有可用 token」时才短路，
+        # 否则插件级 image_gen_key 为空会错误拦住配好凭据的直连站点。
+        sites = self._attempt_sites("direct")
+        plugin_token = str(getattr(self, "image_gen_key", "") or "").strip()
+        if not any(
+            str(site.get("api_key") or "").strip() or plugin_token for site in sites
+        ):
+            logger.warning(f"{LOG_TAG} [generate] 跳过：token 未配置")
+            return None, "no_token"
 
         # 在局部变量中合并单次覆盖，不修改实例配置，后续请求仍使用原设置。
         # 所有数值参数在入口处统一收敛到上游有效范围，避免面板/指令/API
@@ -5176,17 +5519,108 @@ class NAIGenerateImagePlugin(Star):
         # 直连通道固定为任务接口（/api/web/jobs）优先：支持 1-50 步、
         # 按「步数 × 画质」档位计价、失败退点；上游无该接口（404，自建
         # 旧版 Nai2API）时自动回退 GET 直链（>28 步按 28 路由、基础档计价）。
+        # 站点故障转移只包住「请求发送」这一段：提示词转译与成功后的归档、
+        # 记账都只执行一次，避免换站导致重复调用 LLM 或重复计费记账。
+        # sites 已在入口处解析，这里直接复用，避免重复归一化配置。
+        last_reason = ""
+        for index, site in enumerate(sites):
+            remaining = len(sites) - index - 1
+            if len(sites) > 1:
+                logger.info(
+                    f"{LOG_TAG} [generate] 站点 {index + 1}/{len(sites)} | "
+                    f"{describe_site(site)}"
+                )
+            img_bytes, reason = await self._generate_one_on_site(
+                site,
+                full_prompt,
+                artists,
+                size,
+                generation_parameters=generation_parameters,
+                steps=_steps,
+                scale=_scale,
+                cfg=_cfg,
+                sampler=_sampler,
+                noise_schedule=_noise,
+                negative=_negative,
+                model=_model,
+                style=style,
+            )
+            if reason == "ok":
+                return img_bytes, reason
+            last_reason = reason
+            should_switch, detail = switch_decision(reason, remaining)
+            if not should_switch:
+                if len(sites) > 1:
+                    logger.warning(
+                        f"{LOG_TAG} [generate] 站点 {site.get('name', '')} "
+                        f"失败后不换站 | {detail}"
+                    )
+                break
+            logger.warning(
+                f"{LOG_TAG} [generate] 站点 {site.get('name', '')} 失败，"
+                f"切换到下一站点 | {detail}"
+            )
+            # 换站前复位，避免上一个站点的步数/计费口径污染下一站。
+            generation_parameters["steps"] = _steps
+        return None, last_reason
+
+    async def _generate_one_on_site(
+        self,
+        site: dict[str, Any],
+        full_prompt: str,
+        artists: str,
+        size: str,
+        *,
+        generation_parameters: dict[str, Any],
+        steps: int,
+        scale: float,
+        cfg: float,
+        sampler: str,
+        noise_schedule: str,
+        negative: str,
+        model: str,
+        style: str,
+    ) -> tuple[bytes | None, str]:
+        """在指定站点上完成一次直连生图（任务接口优先，GET 直链兜底）。
+
+        Args:
+            site: 目标站点条目，地址与 token 从它解析。
+            full_prompt: 已合并画师串与模板的最终提示词。
+            artists: 画师串，随任务接口请求体一起提交。
+            size: 中文分档名。
+            generation_parameters: 归档参数，成功时由本方法补全后写盘。
+            steps / scale / cfg / sampler / noise_schedule / negative / model:
+                已收敛到有效范围的生成参数。
+            style: 画风键，仅用于日志。
+
+        Returns:
+            ``(图片字节或 None, 原因)``；成功时归档与记账已在此完成。
+        """
+
+        site_base = str(
+            site.get("base_url") or getattr(self, "base_url", "") or ""
+        ).rstrip("/")
+        site_token = (
+            str(site.get("api_key") or "").strip()
+            or str(getattr(self, "image_gen_key", "") or "").strip()
+        )
+        if not site_token:
+            logger.warning(f"{LOG_TAG} [generate] 跳过：站点未配置 token")
+            return None, "no_token"
+        _steps = steps
         web_img, web_reason = await self._submit_web_job(
             full_prompt,
             artists,
             size,
             steps=_steps,
-            scale=_scale,
-            cfg=_cfg,
-            sampler=_sampler,
-            noise_schedule=_noise,
-            negative=_negative,
-            model=_model,
+            scale=scale,
+            cfg=cfg,
+            sampler=sampler,
+            noise_schedule=noise_schedule,
+            negative=negative,
+            model=model,
+            token=site_token,
+            base_url=site_base,
         )
         if web_img is not None:
             generation_parameters["steps"] = effective_transport_steps(
@@ -5194,7 +5628,7 @@ class NAIGenerateImagePlugin(Star):
             )
             generation_parameters["transport"] = "web_jobs"
             generation_parameters["estimated_cost"] = web_job_generation_cost(
-                size, _model, _steps
+                size, model, _steps
             )
             await self._archive_generated_image(web_img, generation_parameters)
             await self._record_usage_from_parameters(generation_parameters)
@@ -5212,22 +5646,22 @@ class NAIGenerateImagePlugin(Star):
         generation_parameters["steps"] = _steps
 
         url = (
-            f"{self.base_url.rstrip('/')}/generate"
+            f"{site_base}/generate"
             f"?tag={quote(full_prompt)}"
-            f"&token={self.image_gen_key}"
-            f"&model={quote(_model)}"
+            f"&token={site_token}"
+            f"&model={quote(model)}"
             f"&artist={quote(artists)}"
             f"&size={quote(size)}"
             f"&steps={_steps}"
-            f"&scale={_scale}"
-            f"&cfg={_cfg}"
-            f"&sampler={quote(_sampler)}"
-            f"&negative={quote(_negative)}"
+            f"&scale={scale}"
+            f"&cfg={cfg}"
+            f"&sampler={quote(sampler)}"
+            f"&negative={quote(negative)}"
             f"&nocache=1"
-            f"&noise_schedule={quote(_noise)}"
+            f"&noise_schedule={quote(noise_schedule)}"
         )
         # 脱敏：日志中不输出完整 URL（含明文 token）
-        safe_url = url.replace(f"&token={self.image_gen_key}", "&token=***")
+        safe_url = url.replace(f"&token={site_token}", "&token=***")
         logger.debug(f"{LOG_TAG} [generate] request url = {safe_url}")
 
         start = time.perf_counter()
@@ -5261,7 +5695,7 @@ class NAIGenerateImagePlugin(Star):
                 )
                 generation_parameters["transport"] = TRANSPORT_GET
                 generation_parameters["estimated_cost"] = direct_url_generation_cost(
-                    size, _model
+                    size, model
                 )
                 await self._archive_generated_image(
                     img_bytes,
@@ -5274,6 +5708,13 @@ class NAIGenerateImagePlugin(Star):
                 f"{LOG_TAG} [generate] 超时 (>{self.request_timeout}s) | prompt='{full_prompt[:60]}...'"
             )
             return None, "timeout"
+        except aiohttp.ClientConnectorError as e:
+            # 连接阶段失败：请求未到达上游，允许换站。
+            logger.warning(
+                f"{LOG_TAG} [generate] 无法连接站点 {site.get('name', '')}: "
+                f"{type(e).__name__}: {e}"
+            )
+            return None, "connect_failed"
         except Exception as e:
             logger.warning(f"{LOG_TAG} [generate] 异常: {e!r}")
             return None, "exception"
@@ -6747,6 +7188,27 @@ class NAIGenerateImagePlugin(Star):
             f"绕过系统代理直连生图站: {'✅ 开启' if self.bypass_system_proxy else '❌ 关闭'}"
             "（开启时忽略系统/环境代理；TUN 类梯子需在梯子软件里给 nai.sta1n.cn 加直连规则）"
         )
+        # 站点故障转移：展示实际生效顺序，便于确认优先级配置是否符合预期。
+        if getattr(self, "enable_site_failover", False):
+            sites = self._failover_sites()
+            if sites:
+                site_lines = [
+                    f"站点故障转移: ✅ 已启用（{len(sites)} 个站点，按顺序尝试）"
+                ]
+                for site in sites:
+                    site_lines.append(
+                        f"  {site['effective_order']}. {describe_site(site)}"
+                        f" | key={'✅' if site.get('api_key') else '沿用插件配置'}"
+                    )
+                site_lines.append(
+                    "换站条件: 仅连接失败、4xx/5xx、任务失败退点等未出图未计费的失败；"
+                    "超时与响应解析失败不换站（避免重复扣费）"
+                )
+                lines.extend(site_lines)
+            else:
+                lines.append(
+                    "站点故障转移: ⚠️ 已启用但站点列表为空，当前仍使用上方单站点配置"
+                )
         yield event.plain_result("\n".join(lines))
 
     @filter.llm_tool(name="NAI_Search_Grimoire")

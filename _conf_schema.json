@@ -16,6 +16,90 @@
         ],
         "obvious": true
     },
+    "enable_site_failover": {
+        "type": "bool",
+        "default": false,
+        "description": "启用站点故障转移",
+        "hint": "开启后按下方「站点列表」的优先级依次尝试生图；只有明确没有出图、也没有计费的失败才会换到下一站点（连接失败、4xx/5xx、任务失败退点）。请求超时与已收到响应后的解析失败一律不换站，避免同一需求被多次扣费。关闭时沿用上方「生图接入方式」的单站点配置，行为不变。",
+        "obvious": true
+    },
+    "site_failover_sites": {
+        "type": "template_list",
+        "default": [],
+        "description": "站点列表（按优先级）",
+        "hint": "「优先级」数字越小越先用，相同优先级按列表顺序。每行的「接入方式」决定该站点的协议：nai.sta1n.cn 走任务接口与 GET 直链，NovelAI 走原生 /ai/ 接口，OpenAI 兼容走 /v1/images/*；不同协议可以混排，按顺序降级。「API Key」留空时沿用插件里该协议已保存的凭据。",
+        "templates": {
+            "site": {
+                "name": "站点",
+                "items": {
+                    "name": {
+                        "type": "string",
+                        "default": "",
+                        "description": "站点名",
+                        "hint": "显示在日志与状态里，便于区分主力和备用站点。"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "default": "direct",
+                        "description": "接入方式",
+                        "options": [
+                            "direct",
+                            "novelai",
+                            "openai"
+                        ],
+                        "labels": [
+                            "nai.sta1n.cn",
+                            "NovelAI 原生",
+                            "OpenAI 兼容"
+                        ]
+                    },
+                    "novelai_service": {
+                        "type": "string",
+                        "default": "starbride",
+                        "description": "NovelAI 服务",
+                        "hint": "仅接入方式为 NovelAI 原生时生效。",
+                        "options": [
+                            "starbride",
+                            "official"
+                        ],
+                        "labels": [
+                            "星桥（Almoon）",
+                            "NAI 官方"
+                        ]
+                    },
+                    "base_url": {
+                        "type": "string",
+                        "default": "",
+                        "description": "站点地址",
+                        "hint": "必填，需 http/https。例如 https://nai.sta1n.cn 或 https://api.almoons.xyz；OpenAI 兼容站可带 /v1。"
+                    },
+                    "api_key": {
+                        "type": "string",
+                        "default": "",
+                        "description": "API Key / Token",
+                        "hint": "留空时沿用插件里该协议已保存的凭据；站点之间可以共用同一凭据。"
+                    },
+                    "priority": {
+                        "type": "int",
+                        "default": 1,
+                        "description": "优先级",
+                        "hint": "数字越小越先用；相同值按列表顺序。",
+                        "min": 1,
+                        "max": 999
+                    },
+                    "enabled": {
+                        "type": "bool",
+                        "default": true,
+                        "description": "启用该站点",
+                        "hint": "关闭后跳过该站点，但保留配置便于随时恢复。"
+                    }
+                }
+            }
+        },
+        "condition": {
+            "enable_site_failover": true
+        }
+    },
     "image_gen_key": {
         "type": "string",
         "default": "",

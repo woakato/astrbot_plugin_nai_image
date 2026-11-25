@@ -42,6 +42,7 @@
     resetBtn: $("resetBtn"),
     tokenBadge: $("tokenBadge"),
     baseUrlBadge: $("baseUrlBadge"),
+    siteFailoverBadge: $("siteFailoverBadge"),
     resultMeta: $("resultMeta"),
     emptyState: $("emptyState"),
     loadingState: $("loadingState"),
@@ -143,6 +144,38 @@
     if (!el) return;
     el.textContent = text;
     el.className = "badge " + (type || "badge-neutral");
+  }
+
+  /**
+   * 渲染站点故障转移状态徽标。
+   * 后端只下发站点名、接入方式与地址；这里仅做只读展示，不参与生图协议选择。
+   * @param {boolean} enabled 插件是否启用站点故障转移
+   * @param {Array<{order:number,name:string,mode:string,mode_label:string,base_url:string,has_key:boolean}>} sites 已启用的站点（按生效顺序）
+   */
+  function renderSiteFailoverBadge(enabled, sites) {
+    if (!els.siteFailoverBadge) return;
+    const list = Array.isArray(sites) ? sites : [];
+    if (!enabled) {
+      hide(els.siteFailoverBadge);
+      els.siteFailoverBadge.textContent = "";
+      return;
+    }
+    show(els.siteFailoverBadge);
+    if (!list.length) {
+      setBadge(els.siteFailoverBadge, "站点转移: 已启用但列表为空", "badge-error");
+      els.siteFailoverBadge.title =
+        "已在插件设置中开启站点故障转移，但站点列表为空，当前仍使用单站点配置。";
+      return;
+    }
+    const summary = list
+      .map((s) => `${s.order}. ${s.name}(${s.mode_label || s.mode})`)
+      .join(" → ");
+    setBadge(
+      els.siteFailoverBadge,
+      `站点转移: ${list.length} 个站点`,
+      "badge-success"
+    );
+    els.siteFailoverBadge.title = `${summary}\n按优先级依次尝试；仅在未出图且未计费时换站。`;
   }
 
   /**
@@ -474,6 +507,10 @@
         setBadge(els.tokenBadge, "Token: 未配置", "badge-error");
       }
       setBadge(els.baseUrlBadge, config.base_url || "--", "badge-info");
+      renderSiteFailoverBadge(
+        config.enable_site_failover,
+        config.site_failover_summary
+      );
       // 点数预估开关（后端下发 show_cost_estimate）：徽标是否展示
       if (typeof config.show_cost_estimate === "boolean") {
         panelShowCostEstimate = config.show_cost_estimate;
