@@ -79,7 +79,12 @@ class NAIImageCompanionExtensionAPI:
         call_mode = str(getattr(plugin, "call_mode", "direct") or "direct")
         if call_mode == "openai":
             # OpenAI 兼容模式只需要接口地址；直连 token 不参与生图。
-            credential_configured = bool(getattr(plugin, "openai_api_base_url", ""))
+            has_channel = getattr(plugin, "_has_openai_channel", None)
+            credential_configured = (
+                bool(has_channel())
+                if callable(has_channel)
+                else bool(getattr(plugin, "openai_api_base_url", ""))
+            )
         else:
             credential_configured = bool(plugin.image_gen_key)
         slot_model = getattr(plugin, "_slot_model", lambda: "")()
@@ -92,7 +97,7 @@ class NAIImageCompanionExtensionAPI:
             "enabled": bool(getattr(plugin, "enable_companion_link", True)),
             "plugin": "astrbot_plugin_nai_image",
             "call_mode": call_mode,
-            "api_profile": getattr(plugin, "openai_api_profile", "compatible"),
+            "api_profile": "starbridge" if call_mode == "openai" else "direct",
             "default_model": slot_model
             or (
                 getattr(plugin, "openai_api_model", "")
@@ -145,7 +150,12 @@ class NAIImageCompanionExtensionAPI:
         call_mode = str(getattr(plugin, "call_mode", "direct") or "direct")
         if call_mode == "openai":
             # OpenAI 兼容模式不依赖直连 token，接口地址缺失才是未就绪。
-            credential_ok = bool(getattr(plugin, "openai_api_base_url", ""))
+            has_channel = getattr(plugin, "_has_openai_channel", None)
+            credential_ok = (
+                bool(has_channel())
+                if callable(has_channel)
+                else bool(getattr(plugin, "openai_api_base_url", ""))
+            )
             credential_reason = "openai_not_configured"
         else:
             credential_ok = bool(plugin.image_gen_key)

@@ -5,6 +5,7 @@ import base64
 import copy
 import io
 import json
+import math
 import secrets
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
@@ -29,6 +30,17 @@ EMOTIONS = set(
 
 class StarbridgeError(ValueError):
     """A request cannot be submitted safely using the native contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        charged: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.charged = charged
 
 
 @dataclass
@@ -185,9 +197,9 @@ async def prepare_starbridge_request(
     if precise and vibes:
         raise StarbridgeError("精准参考和 Vibe 不能在同一次请求中使用。")
     if model.startswith("nai-diffusion-5-"):
-        if precise or vibes:
+        if vibes:
             raise StarbridgeError(
-                "V5 暂不支持精准参考或 Vibe；请明确选择 V4.5，或使用图生图。"
+                "V5 暂不支持 Vibe 参考；请明确选择 V4.5，或使用精准参考/图生图。"
             )
         if params.get("noise_schedule", "karras") != "karras":
             raise StarbridgeError("V5 仅支持 Karras 噪声计划，请调整设置。")
@@ -255,6 +267,33 @@ async def prepare_starbridge_request(
         params["director_reference_images"] = [
             await asyncio.to_thread(_image, value, precise=True) for value in precise
         ]
+        if model.startswith("nai-diffusion-5-"):
+            # Upstream V5 precise reference requires information_extracted=1,
+            # secondary_strength_values=0, and finite strength_values in [0, 5].
+            count_refs = len(params["director_reference_images"])
+            strengths = params.get("director_reference_strength_values")
+            if not isinstance(strengths, list) or len(strengths) != count_refs:
+                strengths = [1.0] * count_refs
+            validated_strengths: list[float] = []
+            for item in strengths:
+                if isinstance(item, bool):
+                    raise StarbridgeError(
+                        "V5 精准参考强度须为 0 到 5 的有限数值。"
+                    )
+                try:
+                    value = float(item)
+                except (TypeError, ValueError) as exc:
+                    raise StarbridgeError(
+                        "V5 精准参考强度须为 0 到 5 的有限数值。"
+                    ) from exc
+                if not math.isfinite(value) or not (0.0 <= value <= 5.0):
+                    raise StarbridgeError(
+                        "V5 精准参考强度须为 0 到 5 的有限数值。"
+                    )
+                validated_strengths.append(value)
+            params["director_reference_strength_values"] = validated_strengths
+            params["director_reference_information_extracted"] = [1] * count_refs
+            params["director_reference_secondary_strength_values"] = [0] * count_refs
     if vibes:
         # Read every image before the first paid request; a malformed later
         # reference must not leave the user with earlier encoding charges.
@@ -287,10 +326,15 @@ async def prepare_starbridge_request(
                         "Vibe 编码失败"
                         + completed
                         + "，未提交生图："
-                        + native_error(detail, response.status)
+                        + native_error(detail, response.status),
+                        status_code=response.status,
+                        charged=bool(encoded),
                     )
                 if not raw:
-                    raise StarbridgeError("Vibe 编码结果为空，未继续生图。")
+                    raise StarbridgeError(
+                        "Vibe 编码结果为空，未继续生图。",
+                        charged=bool(encoded),
+                    )
                 encoded.append(base64.b64encode(raw).decode("ascii"))
         params["reference_image_multiple"] = encoded
     return StarbridgeRequest(

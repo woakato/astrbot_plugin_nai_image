@@ -41,6 +41,12 @@ def test_migrate_invalid_call_mode_keeps_configured_openai():
     assert config["call_mode"] == "openai"
 
 
+def test_migrate_invalid_call_mode_keeps_configured_backup_openai():
+    config = {"call_mode": "openai", "openai_backup_base_url": "https://api.almoons.xyz"}
+    assert migrate_invalid_call_mode(config) is None
+    assert config["call_mode"] == "openai"
+
+
 @pytest.mark.parametrize("value", [None, "", "OpenAI", "未知模式"])
 def test_migrate_invalid_call_mode_normalizes_unknown_value(value):
     config = {"call_mode": value} if value is not None else {}

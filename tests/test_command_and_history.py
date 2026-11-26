@@ -389,6 +389,10 @@ def test_image_history_keeps_newest_managed_files(tmp_path):
     saved_stems = {path.stem for path in saved_files}
     parameter_stems = {path.stem for path in parameter_files}
     assert saved_stems == parameter_stems
+    assert {
+        path.read_text(encoding="utf-8")
+        for path in plugin._image_history_dir.glob("nai_*.prompt.txt")
+    } == {"second prompt", "third prompt"}
     assert unmanaged_file.read_text(encoding="utf-8") == "keep"
     assert not list(plugin._image_history_dir.glob("nai_*.json"))
 
@@ -410,6 +414,7 @@ def test_zero_history_limit_disables_cleanup(tmp_path):
 
     assert len(list(plugin._image_history_dir.glob("nai_*.img"))) == 3
     assert len(list(plugin._image_history_dir.glob("nai_*.yaml"))) == 3
+    assert len(list(plugin._image_history_dir.glob("nai_*.prompt.txt"))) == 3
 
 
 def test_parameter_history_can_be_disabled(tmp_path):
@@ -424,6 +429,9 @@ def test_parameter_history_can_be_disabled(tmp_path):
 
     assert len(list(plugin._image_history_dir.glob("nai_*.img"))) == 1
     assert not list(plugin._image_history_dir.glob("nai_*.yaml"))
+    assert next(plugin._image_history_dir.glob("nai_*.prompt.txt")).read_text(
+        encoding="utf-8"
+    ) == "prompt"
 
 
 def test_parameter_history_uses_yaml_literal_block_for_multiline_prompt(tmp_path):
@@ -684,22 +692,15 @@ def test_quota_command_requires_token():
     assert results == [("plain", "未配置 image_gen_key。")]
 
 
-def test_format_error_director_ref_rejected_gives_targeted_guidance():
-    msg = _format_generate_error("director_ref_rejected")
-
-    assert "精准参考" in msg
-    assert "未开通" in msg or "不兼容" in msg
-    assert "vibe" in msg
-
-    msg_with_detail = _format_generate_error(
-        "director_ref_rejected | 模型 nai-diffusion-4-5-full：参数校验失败"
-    )
-    assert "详情: 模型 nai-diffusion-4-5-full：参数校验失败" in msg_with_detail
-
-
-def test_format_error_generic_http_400_keeps_parameter_hint():
+def test_format_error_http_400_keeps_parameter_hint():
     msg = _format_generate_error("http_400 | invalid image size")
 
     assert "HTTP 400" in msg
     assert "参数错误" in msg
     assert "详情: invalid image size" in msg
+
+
+def test_format_error_starbridge_message_uses_native_protocol_prefix():
+    msg = _format_generate_error("starbridge | 模型不支持")
+    assert "官方协议接口" in msg
+    assert "模型不支持" in msg

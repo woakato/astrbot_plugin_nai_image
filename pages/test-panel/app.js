@@ -30,6 +30,8 @@
     noiseSchedule: $("noiseSchedule"),
     model: $("model"),
     count: $("count"),
+    styleFields: $("styleFields"),
+    stylePresetField: $("stylePresetField"),
     style: $("style"),
     customArtistsWrapper: $("customArtistsWrapper"),
     customArtists: $("customArtists"),
@@ -56,6 +58,10 @@
     callFormatHint: $("callFormatHint"),
     openaiConfigStatus: $("openaiConfigStatus"),
     openaiConfigStatusText: $("openaiConfigStatusText"),
+    openaiChannelWrap: $("openaiChannelWrap"),
+    openaiChannelGroup: $("openaiChannelGroup"),
+    openaiChannelHint: $("openaiChannelHint"),
+    openaiSetDefaultChannelBtn: $("openaiSetDefaultChannelBtn"),
     refUploadWrap: $("refUploadWrap"),
     refFile: $("refFile"),
     refCountTag: $("refCountTag"),
@@ -83,15 +89,60 @@
     usageEmpty: $("usageEmpty"),
     usageDisabled: $("usageDisabled"),
     usageError: $("usageError"),
+    galleryBtn: $("galleryBtn"),
+    galleryDialog: $("galleryDialog"),
+    galleryTitle: $("galleryTitle"),
+    galleryHint: $("galleryHint"),
+    galleryStatus: $("galleryStatus"),
+    galleryGrid: $("galleryGrid"),
+    galleryViewer: $("galleryViewer"),
+    galleryOriginal: $("galleryOriginal"),
+    galleryPrompt: $("galleryPrompt"),
+    galleryMetaList: $("galleryMetaList"),
+    galleryApplyPrompt: $("galleryApplyPrompt"),
+    galleryCopyPrompt: $("galleryCopyPrompt"),
+    galleryDownload: $("galleryDownload"),
+    galleryDelete: $("galleryDelete"),
+    gallerySearch: $("gallerySearch"),
+    gallerySearchClear: $("gallerySearchClear"),
+    galleryBack: $("galleryBack"),
+    galleryRefresh: $("galleryRefresh"),
+    galleryClose: $("galleryClose"),
+    galleryPager: $("galleryPager"),
+    galleryPageInfo: $("galleryPageInfo"),
+    galleryPrev: $("galleryPrev"),
+    galleryNext: $("galleryNext"),
+    galleryImageInfo: $("galleryImageInfo"),
+    galleryImagePrev: $("galleryImagePrev"),
+    galleryImageNext: $("galleryImageNext"),
   };
+  const LEGACY_STYLE_OPTIONS = Array.from(els.style.options, (option) => ({
+    value: option.value,
+    label: option.textContent,
+  }));
 
   // ===== 状态 =====
   let isGenerating = false;
+  let isInitializing = true;
   let lastRequestBody = null;
+  let lastRequestWasTrial = false;
+  let trialStatus = null;
+  let panelConfig = null;
+  let cachedStyle = null;
+  let galleryOffset = 0;
+  let galleryTotal = 0;
+  let galleryAllTotal = 0;
+  let galleryQuery = "";
+  let gallerySearchTimer = null;
+  let galleryItems = [];
+  let galleryIndex = -1;
+  let galleryCurrentImage = null;
+  let galleryRequest = 0;
+  const GALLERY_PAGE_SIZE = 12;
   // 点数用量统计：当前窗口天数与后端快照
   let usageDays = 7;
   let usageData = null;
-  // 本地上传参考图列表（OpenAI 兼容格式）：{ b64, dataUrl, name, strength, caption }
+  // 本地上传参考图列表（官方协议接口）：{ b64, dataUrl, name, strength, caption }
   let referenceImages = [];
   // 精准参考描述默认值（后端配置下发，新参考图卡片初始化用）
   let defaultDirectorCaption = "character&style";
@@ -100,19 +151,17 @@
   let defaultDirectorStrength = 1;
   // 当前调用格式："direct" | "openai"
   let currentCallFormat = "direct";
-  let upstreamLabel = "OpenAI 兼容";
+  // 面板当前选用的官方协议渠道："auto" | "primary" | "backup"
+  let currentOpenaiChannel = "auto";
+  let upstreamLabel = "官方协议接口";
   // 分段切换按钮引用
   let formatToggleBtns = [];
-  // OpenAI 兼容模型列表（后端配置接口下发，用于切换格式时替换模型下拉项）
+  // 官方协议模型列表（后端配置接口下发，用于切换格式时替换模型下拉项）
   let openaiModels = [
     "nai-diffusion-5-full",
     "nai-diffusion-5-curated",
     "nai-diffusion-4-5-full",
     "nai-diffusion-4-5-curated",
-    "nai-diffusion-4-full",
-    "nai-diffusion-4-curated-preview",
-    "nai-diffusion-3",
-    "nai-diffusion-furry-3",
   ];
   // NAI 直连模式可用的模型下拉项
   const DIRECT_MODEL_OPTIONS = [
@@ -377,6 +426,7 @@
 
   let _saveCacheTimer = null;
   function saveCache() {
+    if (isInitializing) return;
     if (_saveCacheTimer) clearTimeout(_saveCacheTimer);
     _saveCacheTimer = setTimeout(async () => {
       try {
@@ -386,6 +436,7 @@
           if (el) data[key] = el.value;
         });
         data.callFormat = currentCallFormat;
+        data.openaiChannel = currentOpenaiChannel;
         const chars = collectCharRows();
         if (chars.length) data.characters = chars;
         const bridge = await getBridge();
@@ -403,6 +454,15 @@
       const data = (resp && resp.data) ? resp.data : resp;
       if (!data || typeof data !== "object") return false;
       let restored = false;
+      if (data.callFormat === "openai" || data.callFormat === "direct") {
+        setCallFormat(data.callFormat);
+        restored = true;
+      }
+      if (data.openaiChannel === "auto" || data.openaiChannel === "primary" || data.openaiChannel === "backup") {
+        currentOpenaiChannel = data.openaiChannel;
+        restored = true;
+      }
+      cachedStyle = data.style == null ? null : String(data.style);
       getCachedFields().forEach((key) => {
         const el = els[key];
         if (el && data[key] != null) {
@@ -413,20 +473,18 @@
             option.textContent = "正在读取画风槽位";
             el.appendChild(option);
           }
-          el.value = data[key];
+          if (el.tagName !== "SELECT" ||
+              Array.from(el.options).some((option) => option.value === String(data[key]))) {
+            el.value = data[key];
+          }
           restored = true;
         }
       });
-      if (data.callFormat === "openai" || data.callFormat === "direct") {
-        currentCallFormat = data.callFormat;
-        setCallFormat(currentCallFormat);
-        restored = true;
-      }
       if (Array.isArray(data.characters) && data.characters.length) {
         clearCharRows();
         data.characters.slice(0, MAX_CHAR_ROWS).forEach((item) => {
           if (!item || typeof item.prompt !== "string" || !item.prompt.trim()) return;
-          addCharRow(item.prompt, Number(item.x) || 0.5, Number(item.y) || 0.5);
+          addCharRow(item.prompt, item.x ?? 0.5, item.y ?? 0.5);
         });
         restored = true;
       }
@@ -447,6 +505,7 @@
       const bridge = await getBridge();
       const resp = await bridge.apiGet("test_panel/config");
       const config = (resp && resp.data) ? resp.data : resp;
+      panelConfig = config;
       if (config.image_gen_key === "已配置") {
         setBadge(els.tokenBadge, "Token: 已配置", "badge-success");
       } else {
@@ -461,7 +520,6 @@
       // 后端下发的 OpenAI 兼容模型列表（对齐接口文档 §9）
       if (Array.isArray(config.openai_models) && config.openai_models.length) {
         openaiModels = config.openai_models;
-        if (currentCallFormat === "openai") updateModelOptionsUI();
       }
       // 精准参考描述默认值：后端配置下发，新参考图卡片以此初始化
       if (config.openai_director_caption) {
@@ -476,38 +534,21 @@
       if (
         !Number.isNaN(directorStrength) &&
         directorStrength >= 0 &&
-        directorStrength <= 1
+        directorStrength <= 5
       ) {
         defaultDirectorStrength = directorStrength;
       }
-      // OpenAI 兼容格式配置状态（仅在 OpenAI 模式下展示）
-      const starbridge = config.openai_api_profile === "starbridge";
-      upstreamLabel = starbridge ? "星桥（Almoon）" : "OpenAI 兼容";
-      const upstreamEndpoint = starbridge ? "/ai" : "/v1/images";
+      // 第三方官方协议配置状态（仅在第三方模式展示）
+      upstreamLabel = "官方协议接口";
+      const upstreamEndpoint = "/ai";
       const upstreamButton = els.callFormat.querySelector('[data-format="openai"]');
       if (upstreamButton) {
         upstreamButton.querySelector(".format-toggle-label").textContent = upstreamLabel;
         upstreamButton.querySelector(".format-toggle-sub").textContent =
-          upstreamEndpoint + " 端点";
+          upstreamEndpoint + " 原生端点";
       }
-      if (els.openaiConfigStatus && currentCallFormat === "openai") {
-        els.callFormatHint.textContent =
-          `使用插件设置中的 ${upstreamLabel} 地址和密钥。`;
-        show(els.openaiConfigStatus);
-        if (config.openai_available) {
-          els.openaiConfigStatusText.textContent =
-            upstreamLabel + " 已配置：" + (config.openai_api_base_url || "");
-          els.openaiConfigStatus.querySelector(".status-dot").className =
-            "status-dot ok";
-        } else {
-          els.openaiConfigStatusText.textContent =
-            upstreamLabel + " 未配置：请在插件设置填写该服务的接口地址和 API Key";
-          els.openaiConfigStatus.querySelector(".status-dot").className =
-            "status-dot error";
-        }
-      } else if (els.openaiConfigStatus) {
-        hide(els.openaiConfigStatus);
-      }
+      renderOpenaiChannelSelector();
+      setCallFormat(currentCallFormat);
     } catch (err) {
       setBadge(els.tokenBadge, "配置加载失败", "badge-error");
     }
@@ -659,11 +700,20 @@
     if (Array.from(els.model.options).some((o) => o.value === curModel)) {
       els.model.value = curModel;
     }
+    if (els.model.value !== curModel && slotState.appliedId) {
+      slotState.appliedId = null;
+      els.style.value = "custom";
+      toggleCustomArtists();
+      refreshSlotStatus();
+    }
   }
 
   // ===== 表单交互 =====
   function toggleCustomArtists() {
-    if (els.style.value === "custom" || els.style.value.startsWith("slot:")) {
+    const custom = els.style.value === "custom";
+    els.styleFields.classList.toggle("hidden", slotState.enabled && !custom);
+    els.stylePresetField.classList.toggle("hidden", slotState.enabled);
+    if (custom) {
       show(els.customArtistsWrapper);
     } else {
       hide(els.customArtistsWrapper);
@@ -701,6 +751,9 @@
     // 强度/精准参考描述、img2img 重绘参数、种子、参考图使用模式与
     // director-tools 动作（对齐接口文档 §4-§8）
     if (body.call_format === "openai") {
+      if (currentOpenaiChannel && currentOpenaiChannel !== "auto") {
+        body.channel = currentOpenaiChannel;
+      }
       const refs = referenceImages;
       if (refs.length) {
         body.reference_image_b64_list = refs.map((r) => r.b64);
@@ -725,8 +778,9 @@
           }
         }
       } else if (refs.length) {
+        const maxStrength = currentRefStrengthMax();
         body.reference_strengths = refs.map((r) =>
-          Math.min(1, Math.max(0, Number(r.strength) || 0))
+          Math.min(maxStrength, Math.max(0, Number(r.strength) || 0))
         );
         if (mode === "director") {
           body.director_captions = refs.map((r) => r.caption);
@@ -772,7 +826,8 @@
     xInput.min = "0";
     xInput.max = "1";
     xInput.step = "0.05";
-    xInput.value = String(x);
+    x = parseFloat(x);
+    xInput.value = String(Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0.5);
     xInput.title = "x 坐标（0-1，从左到右）";
 
     const yInput = document.createElement("input");
@@ -781,7 +836,8 @@
     yInput.min = "0";
     yInput.max = "1";
     yInput.step = "0.05";
-    yInput.value = String(y);
+    y = parseFloat(y);
+    yInput.value = String(Number.isFinite(y) ? Math.min(1, Math.max(0, y)) : 0.5);
     yInput.title = "y 坐标（0-1，从上到下）";
 
     const removeBtn = document.createElement("button");
@@ -836,10 +892,16 @@
     return els.refMode ? els.refMode.value : "vibe";
   }
 
+  function currentRefStrengthMax() {
+    const modelName = els.model ? String(els.model.value || "") : "";
+    return currentRefMode() === "director" && modelName.startsWith("nai-diffusion-5-") ? 5 : 1;
+  }
+
   // 新参考图卡片按模式取插件设置的默认权重：精准参考 1.0（§8.5）、
   // Vibe 参考 0.6，均可在设置中修改
   function defaultRefStrength() {
-    return currentRefMode() === "director" ? defaultDirectorStrength : defaultVibeStrength;
+    const raw = currentRefMode() === "director" ? defaultDirectorStrength : defaultVibeStrength;
+    return Math.min(currentRefStrengthMax(), Math.max(0, raw));
   }
 
   function addRefImages(fileList) {
@@ -905,21 +967,24 @@
       const controls = document.createElement("div");
       controls.className = "ref-item-controls";
 
-      // 逐图强度：vibe 写入 reference_strength_multiple、精准参考写入
-      // director_reference_strength_values（均按下标对应）
+      // 逐图强度：vibe 写入 reference_strength_multiple（0-1），
+      // 精准参考写入 director_reference_strength_values（V4.5 为 0-1，V5 为 0-5）
+      const maxStrength = currentRefStrengthMax();
+      const clampedStrength = Math.min(maxStrength, Math.max(0, Number(item.strength) || 0));
+      item.strength = clampedStrength;
       const strengthInput = document.createElement("input");
       strengthInput.type = "number";
       strengthInput.className =
         "input acrylic-input ref-strength-input";
       strengthInput.min = "0";
-      strengthInput.max = "1";
+      strengthInput.max = String(maxStrength);
       strengthInput.step = "0.05";
-      strengthInput.value = String(item.strength);
-      strengthInput.title = `第 ${idx + 1} 张参考图的强度（0-1）`;
+      strengthInput.value = String(clampedStrength);
+      strengthInput.title = `第 ${idx + 1} 张参考图的强度（0-${maxStrength}）`;
       strengthInput.addEventListener("change", () => {
         const value = parseFloat(strengthInput.value);
         if (!Number.isNaN(value)) {
-          item.strength = Math.min(1, Math.max(0, value));
+          item.strength = Math.min(currentRefStrengthMax(), Math.max(0, value));
         }
         strengthInput.value = String(item.strength);
         saveCache();
@@ -995,7 +1060,7 @@
 
   // ===== 生成图片 =====
   async function generate() {
-    if (isGenerating) return;
+    if (isGenerating || isInitializing) return;
 
     const body = buildRequestBody();
     if (!body.nai_prompt && !body.nl_prompt && !body.director_action) {
@@ -1017,6 +1082,7 @@
     }
 
     lastRequestBody = body;
+    lastRequestWasTrial = false;
     isGenerating = true;
     const refCountText = (body.reference_image_b64_list || []).length
       ? `（含 ${(body.reference_image_b64_list || []).length} 张参考图）`
@@ -1024,12 +1090,12 @@
     els.loadingText.textContent = body.director_action
       ? "正在以 director-tools 处理图片..."
       : body.call_format === "openai"
-        ? `正在通过 ${upstreamLabel} 生成${refCountText}...`
+        ? `正在通过 ${getActiveOpenaiChannelLabel()} 生成${refCountText}...`
         : "正在转译 + 生成图片...";
-    setLoading(true);
     hideError();
     hideResults();
     hideMergeInfo();
+    setLoading(true);
 
     try {
       const bridge = await getBridge();
@@ -1138,13 +1204,12 @@
       hide(els.emptyState);
       hide(els.errorState);
       show(els.loadingState);
-      els.generateBtn.disabled = true;
-      els.trialBtn.disabled = true;
-      els.loadingText.textContent = "正在转译 + 生成图片...";
     } else {
       hide(els.loadingState);
-      els.generateBtn.disabled = false;
     }
+    els.generateBtn.disabled = loading || isInitializing;
+    els.resetBtn.disabled = loading;
+    updateTrialUI(trialStatus);
   }
 
   function showError(msg) {
@@ -1180,7 +1245,7 @@
       galgame: "GalGame风",
       custom: "自定义",
     };
-    const formatLabel = requestBody.call_format === "openai" ? upstreamLabel : "NAI直连";
+    const formatLabel = requestBody.call_format === "openai" ? getActiveOpenaiChannelLabel(requestBody.channel) : "NAI直连";
     const metaText = `${styleNames[requestBody.style] || requestBody.style} · ${sizeDisplayName(requestBody.size)} · ${images.length} UNIT · ${formatLabel}`;
     setBadge(els.resultMeta, metaText, "badge-tech-success");
     show(els.resultMeta);
@@ -1259,7 +1324,8 @@
     els.cfg.value = "1";
     els.noiseSchedule.value = "karras";
     els.model.value = "nai-diffusion-4-5-full";
-    els.style.value = "vertical";
+    slotState.appliedId = null;
+    els.style.value = slotState.enabled ? "custom" : "vertical";
     updateSizeOptionsUI();
     els.size.value = "竖图";
     els.count.value = "1";
@@ -1273,7 +1339,14 @@
     els.directorAction.value = "";
     clearCharRows();
     toggleCustomArtists();
+    currentOpenaiChannel = "auto";
+    renderOpenaiChannelSelector();
     setCallFormat("direct");
+    const active = slotState.enabled && slotState.slots.find(
+      (slot) => String(slot.id) === slotState.activeId
+    );
+    if (active) applySlotToPanel(active);
+    else refreshSlotStatus();
     saveCache();
   }
 
@@ -1292,6 +1365,203 @@
     });
   }
 
+  function getOpenaiChannels() {
+    return Array.isArray(panelConfig?.openai_channels) ? panelConfig.openai_channels : [];
+  }
+
+  function getActiveOpenaiChannelLabel(overrideChannel) {
+    const channels = getOpenaiChannels();
+    if (!channels.length) return upstreamLabel;
+    const target = overrideChannel || currentOpenaiChannel || "auto";
+    if (target === "primary" || target === "backup") {
+      const matched = channels.find((ch) => ch.id === target);
+      if (matched) return matched.name || upstreamLabel;
+    }
+    const active = channels.find((ch) => ch.is_active) || channels.find((ch) => ch.configured) || channels[0];
+    return active?.name || upstreamLabel;
+  }
+
+  function updateOpenaiChannelStatusUI() {
+    if (!els.openaiConfigStatus || !panelConfig) return;
+    const channels = getOpenaiChannels();
+    if (!channels.length) {
+      const available = Boolean(panelConfig.openai_available);
+      els.openaiConfigStatusText.textContent = available
+        ? upstreamLabel + " 已配置：" + (panelConfig.openai_api_base_url || "")
+        : upstreamLabel + " 未配置：请在插件设置填写渠道接口地址和 API Key";
+      els.openaiConfigStatus.querySelector(".status-dot").className =
+        "status-dot " + (available ? "ok" : "error");
+      return;
+    }
+
+    const active = channels.find((ch) => ch.is_active) || channels[0];
+    const configuredList = channels.filter((ch) => ch.configured);
+    if (currentOpenaiChannel === "primary" || currentOpenaiChannel === "backup") {
+      const chosen = channels.find((ch) => ch.id === currentOpenaiChannel);
+      if (chosen && chosen.configured) {
+        const keyHint = chosen.has_key ? "" : "（未填 Key）";
+        els.openaiConfigStatusText.textContent =
+          `当前测试渠道：${chosen.name}${keyHint} · ${chosen.base_url}`;
+        els.openaiConfigStatus.querySelector(".status-dot").className = "status-dot ok";
+      } else {
+        els.openaiConfigStatusText.textContent =
+          `所选渠道未配置：请在插件设置填写「${chosen ? chosen.slot_label : currentOpenaiChannel}」的接口地址`;
+        els.openaiConfigStatus.querySelector(".status-dot").className = "status-dot error";
+      }
+      return;
+    }
+
+    if (configuredList.length) {
+      const primaryTarget = active.configured ? active : configuredList[0];
+      const backupTarget = channels.find((ch) => ch.id !== primaryTarget.id && ch.configured);
+      const fallbackNote =
+        backupTarget && panelConfig.openai_enable_fallback !== false
+          ? `（备选：${backupTarget.name}）`
+          : "";
+      els.openaiConfigStatusText.textContent =
+        `自动主备：优先 ${primaryTarget.name} · ${primaryTarget.base_url}${fallbackNote}`;
+      els.openaiConfigStatus.querySelector(".status-dot").className = "status-dot ok";
+    } else {
+      els.openaiConfigStatusText.textContent =
+        upstreamLabel + " 未配置：请在插件设置填写至少一条渠道的接口地址和 API Key";
+      els.openaiConfigStatus.querySelector(".status-dot").className = "status-dot error";
+    }
+  }
+
+  function renderOpenaiChannelSelector() {
+    const wrap = els.openaiChannelWrap;
+    const group = els.openaiChannelGroup;
+    if (!wrap || !group) return;
+    const channels = getOpenaiChannels();
+    if (!channels.length || currentCallFormat !== "openai") {
+      hide(wrap);
+      if (els.openaiSetDefaultChannelBtn) hide(els.openaiSetDefaultChannelBtn);
+      updateOpenaiChannelStatusUI();
+      return;
+    }
+
+    if (
+      currentOpenaiChannel !== "auto" &&
+      !channels.some((ch) => ch.id === currentOpenaiChannel && ch.configured)
+    ) {
+      currentOpenaiChannel = "auto";
+    }
+
+    show(wrap);
+    group.innerHTML = "";
+
+    const active = channels.find((ch) => ch.is_active) || channels[0];
+    const configuredCount = channels.filter((ch) => ch.configured).length;
+    const autoBtn = document.createElement("button");
+    autoBtn.type = "button";
+    autoBtn.className = "channel-toggle-btn" + (currentOpenaiChannel === "auto" ? " active" : "");
+    autoBtn.dataset.channel = "auto";
+    const autoTop = document.createElement("div");
+    autoTop.className = "channel-toggle-top";
+    const autoDot = document.createElement("span");
+    autoDot.className = "format-toggle-dot";
+    const autoLabel = document.createElement("span");
+    autoLabel.className = "channel-toggle-label";
+    autoLabel.textContent = "自动（主备）";
+    autoTop.append(autoDot, autoLabel);
+    const autoSub = document.createElement("span");
+    autoSub.className = "channel-toggle-sub";
+    autoSub.textContent = configuredCount
+      ? `默认: ${active.configured ? active.name : configuredCount + "条可用"}`
+      : "未配置渠道";
+    autoBtn.append(autoTop, autoSub);
+    autoBtn.addEventListener("click", () => {
+      if (currentOpenaiChannel === "auto") return;
+      currentOpenaiChannel = "auto";
+      renderOpenaiChannelSelector();
+      saveCache();
+    });
+    group.appendChild(autoBtn);
+
+    channels.forEach((ch) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className =
+        "channel-toggle-btn" + (currentOpenaiChannel === ch.id ? " active" : "");
+      btn.dataset.channel = ch.id;
+      btn.disabled = !ch.configured;
+
+      const top = document.createElement("div");
+      top.className = "channel-toggle-top";
+      const dot = document.createElement("span");
+      dot.className = "format-toggle-dot";
+      const label = document.createElement("span");
+      label.className = "channel-toggle-label";
+      label.textContent = ch.name || ch.slot_label;
+      top.append(dot, label);
+
+      if (ch.is_active && ch.configured) {
+        const badge = document.createElement("span");
+        badge.className = "channel-toggle-badge";
+        badge.textContent = "默认";
+        top.appendChild(badge);
+      }
+
+      const sub = document.createElement("span");
+      sub.className = "channel-toggle-sub";
+      sub.textContent = ch.configured ? ch.base_url : `${ch.slot_label} 未配置`;
+
+      btn.append(top, sub);
+      btn.addEventListener("click", () => {
+        if (!ch.configured || currentOpenaiChannel === ch.id) return;
+        currentOpenaiChannel = ch.id;
+        renderOpenaiChannelSelector();
+        saveCache();
+      });
+      group.appendChild(btn);
+    });
+
+    if (els.openaiSetDefaultChannelBtn) {
+      const selected = channels.find((ch) => ch.id === currentOpenaiChannel);
+      const canPromote =
+        selected && selected.configured && !selected.is_active;
+      if (canPromote) {
+        show(els.openaiSetDefaultChannelBtn);
+      } else {
+        hide(els.openaiSetDefaultChannelBtn);
+      }
+    }
+    updateOpenaiChannelStatusUI();
+  }
+
+  async function switchGlobalDefaultChannel() {
+    if (currentOpenaiChannel !== "primary" && currentOpenaiChannel !== "backup") return;
+    const btn = els.openaiSetDefaultChannelBtn;
+    if (btn) btn.disabled = true;
+    try {
+      const bridge = await getBridge();
+      const resp = await bridge.apiPost("test_panel/channel_switch", {
+        channel: currentOpenaiChannel,
+      });
+      const data = (resp && resp.data) ? resp.data : resp;
+      if (panelConfig && data) {
+        if (Array.isArray(data.openai_channels)) {
+          panelConfig.openai_channels = data.openai_channels;
+        }
+        if (data.openai_active_channel) {
+          panelConfig.openai_active_channel = data.openai_active_channel;
+        }
+        if (data.openai_api_base_url) {
+          panelConfig.openai_api_base_url = data.openai_api_base_url;
+        }
+      }
+      renderOpenaiChannelSelector();
+      if (els.openaiConfigStatusText) {
+        els.openaiConfigStatusText.textContent =
+          `已将「${getActiveOpenaiChannelLabel()}」设为全局默认渠道`;
+      }
+    } catch (err) {
+      showError(err?.message || String(err));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   function setCallFormat(fmt) {
     currentCallFormat = fmt;
     formatToggleBtns.forEach(function (btn) {
@@ -1307,8 +1577,7 @@
       show(els.charListWrap);
       if (els.openaiConfigStatus) show(els.openaiConfigStatus);
       els.callFormatHint.textContent =
-        `使用插件设置中的 ${upstreamLabel} 地址和密钥。`;
-      els.trialBtn.disabled = true;
+        `使用插件设置中的 ${upstreamLabel} 渠道地址和密钥。`;
       els.trialBtn.title = "试用生成仅支持 NAI 直连格式";
     } else {
       hide(els.refUploadWrap);
@@ -1319,16 +1588,21 @@
       hide(els.directorActionWrap);
       hide(els.charListWrap);
       if (els.openaiConfigStatus) hide(els.openaiConfigStatus);
+      if (els.openaiChannelWrap) hide(els.openaiChannelWrap);
       els.callFormatHint.textContent =
         "直连 nai.sta1n.cn 原生接口生成。";
-      els.trialBtn.disabled = false;
       els.trialBtn.title = "";
       loadTrialStatus();
     }
+    renderOpenaiChannelSelector();
+    updateTrialUI(trialStatus);
     applyRefModeUI();
     updateModelOptionsUI();
     updateSizeOptionsUI();
     updateCostBadge();
+    if (referenceImages.length) {
+      renderRefGrid();
+    }
   }
 
   function handleReferenceFileChange() {
@@ -1374,33 +1648,36 @@
       const status = (resp && resp.data) ? resp.data : resp;
       updateTrialUI(status);
     } catch (err) {
-      hide(els.trialStatus);
-      els.trialBtn.disabled = true;
+      updateTrialUI(null);
     }
   }
 
   function updateTrialUI(status) {
-    if (!status) return;
+    trialStatus = status;
+    els.trialBtn.disabled = isInitializing || isGenerating ||
+      currentCallFormat !== "direct" || !status?.available;
+    if (!status || currentCallFormat !== "direct") {
+      hide(els.trialStatus);
+      return;
+    }
     const remaining = status.remaining || 0;
     const used = status.used || 0;
     const max = status.max_uses || 3;
 
     if (status.available) {
-      els.trialBtn.disabled = false;
       show(els.trialStatus);
       els.trialStatusText.textContent = `🌟 试用生成可用 · 已用 ${used}/${max} 次 · 剩余 ${remaining} 次`;
     } else if (status.key_loaded && used >= max) {
-      els.trialBtn.disabled = true;
       show(els.trialStatus);
       els.trialStatusText.textContent = `⚠ 试用次数已达上限（${max} 次）。请配置自己的密钥后使用正式生图。`;
     } else {
-      els.trialBtn.disabled = true;
       hide(els.trialStatus);
     }
   }
 
   async function trialGenerate() {
-    if (isGenerating) return;
+    if (isGenerating || isInitializing || currentCallFormat !== "direct" ||
+        !trialStatus?.available) return;
 
     const body = buildRequestBody();
     if (!body.nai_prompt && !body.nl_prompt) {
@@ -1410,11 +1687,12 @@
 
     body.n = 1;
     lastRequestBody = body;
+    lastRequestWasTrial = true;
     isGenerating = true;
-    setLoading(true);
     hideError();
     hideResults();
     hideMergeInfo();
+    setLoading(true);
     els.loadingText.textContent = "正在使用试用密钥转译 + 生成...";
 
     try {
@@ -1631,18 +1909,26 @@
     if (!els.usageBreakdown) return;
     const groups = (payload.breakdowns || {})[String(usageDays)] || {};
     const labels = { model: "MODEL", size: "SIZE", transport: "CHANNEL" };
-    const html = Object.keys(labels)
-      .map((field) => {
-        const items = groups[field] || [];
-        if (!items.length) return "";
-        const chips = items
-          .map((item) => `<span class="usage-bd-item">${item.name} · ${item.cost} 点</span>`)
-          .join("");
-        return `<div class="usage-bd-row"><span class="usage-bd-tag">${labels[field]}</span><span class="usage-bd-items">${chips}</span></div>`;
-      })
-      .filter(Boolean)
-      .join("");
-    els.usageBreakdown.innerHTML = html;
+    els.usageBreakdown.replaceChildren();
+    Object.keys(labels).forEach((field) => {
+      const items = groups[field] || [];
+      if (!items.length) return;
+      const row = document.createElement("div");
+      row.className = "usage-bd-row";
+      const label = document.createElement("span");
+      label.className = "usage-bd-tag";
+      label.textContent = labels[field];
+      const chips = document.createElement("span");
+      chips.className = "usage-bd-items";
+      items.forEach((item) => {
+        const chip = document.createElement("span");
+        chip.className = "usage-bd-item";
+        chip.textContent = `${item.name} · ${item.cost} 点`;
+        chips.appendChild(chip);
+      });
+      row.append(label, chips);
+      els.usageBreakdown.appendChild(row);
+    });
   }
 
   function renderUsage() {
@@ -1690,8 +1976,434 @@
     }
   }
 
+  // ===== Saved image gallery =====
+  function formatGallerySize(value) {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return "";
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ["KB", "MB", "GB"];
+    let size = bytes / 1024;
+    let unit = units[0];
+    for (let index = 1; size >= 1024 && index < units.length; index++) {
+      size /= 1024;
+      unit = units[index];
+    }
+    return `${size.toFixed(size >= 10 ? 0 : 1)} ${unit}`;
+  }
+
+  function updateGalleryImageNavigation() {
+    const absoluteIndex = galleryOffset + galleryIndex;
+    els.galleryImageInfo.textContent = galleryIndex >= 0
+      ? `${absoluteIndex + 1} / ${galleryTotal}`
+      : "";
+    els.galleryImagePrev.disabled = absoluteIndex <= 0;
+    els.galleryImageNext.disabled =
+      galleryIndex < 0 || absoluteIndex >= galleryTotal - 1;
+  }
+
+  async function getGalleryPage(offset, request) {
+    const bridge = await getBridge();
+    const payload = { offset, limit: GALLERY_PAGE_SIZE };
+    if (galleryQuery) payload.query = galleryQuery;
+    const data = unwrapData(await bridge.apiPost("test_panel/gallery", payload)) || {};
+    if (request !== galleryRequest || !els.galleryDialog.open) return null;
+    return data;
+  }
+
+  function renderGalleryMetadata(metadata) {
+    if (!els.galleryMetaList) return;
+    els.galleryMetaList.replaceChildren();
+    if (!metadata || typeof metadata !== "object") {
+      hide(els.galleryMetaList);
+      return;
+    }
+    const labels = [
+      ["model", "模型"],
+      ["size", "尺寸"],
+      ["steps", "步数"],
+      ["scale", "Scale"],
+      ["cfg", "CFG"],
+      ["sampler", "采样器"],
+      ["seed", "Seed"],
+      ["mode", "模式"],
+    ];
+    let count = 0;
+    labels.forEach(([key, label]) => {
+      const value = metadata[key];
+      if (value === undefined || value === null || value === "") return;
+      const chip = document.createElement("span");
+      chip.className = "gallery-meta-chip";
+      chip.textContent = `${label}: ${value}`;
+      els.galleryMetaList.appendChild(chip);
+      count++;
+    });
+    if (count) show(els.galleryMetaList);
+    else hide(els.galleryMetaList);
+  }
+
+  function applyGalleryRecordToPanel(image) {
+    if (!image) return;
+    const prompt = typeof image.prompt === "string" ? image.prompt : "";
+    const meta = image.metadata && typeof image.metadata === "object" ? image.metadata : {};
+    if (prompt) {
+      els.naiPrompt.value = prompt;
+      els.nlPrompt.value = "";
+    }
+    if (meta.artist !== undefined && meta.artist !== null) {
+      slotState.appliedId = null;
+      els.style.value = "custom";
+      els.customArtists.value = String(meta.artist);
+      toggleCustomArtists();
+      refreshSlotStatus();
+    }
+    if (meta.model && Array.from(els.model.options).some((o) => o.value === String(meta.model))) {
+      els.model.value = String(meta.model);
+    }
+    if (meta.size) {
+      const sizeValue = String(meta.size);
+      if (Array.from(els.size.options).some((o) => o.value === sizeValue)) {
+        els.size.value = sizeValue;
+      }
+    }
+    if (meta.steps != null) els.steps.value = String(meta.steps);
+    if (meta.scale != null) els.scale.value = String(meta.scale);
+    if (meta.cfg != null) els.cfg.value = String(meta.cfg);
+    if (meta.sampler && Array.from(els.sampler.options).some((o) => o.value === String(meta.sampler))) {
+      els.sampler.value = String(meta.sampler);
+    }
+    if (meta.negative !== undefined && meta.negative !== null) {
+      els.negative.value = String(meta.negative);
+    }
+    if (meta.seed != null && meta.seed !== "random" && els.openaiSeed) {
+      const parsedSeed = parseInt(meta.seed, 10);
+      if (!Number.isNaN(parsedSeed) && parsedSeed >= 0) {
+        els.openaiSeed.value = String(parsedSeed);
+      }
+    }
+    updateCostBadge();
+    saveCache();
+    els.galleryDialog.close();
+  }
+
+  async function loadGallery(offset = 0, focusName = "") {
+    const request = ++galleryRequest;
+    galleryOffset = offset;
+    galleryItems = [];
+    galleryIndex = -1;
+    galleryCurrentImage = null;
+    els.galleryTitle.textContent = "画廊";
+    els.galleryHint.textContent = "";
+    els.galleryStatus.textContent = "正在读取图片…";
+    els.galleryPageInfo.textContent = "";
+    els.galleryImageInfo.textContent = "";
+    els.galleryGrid.replaceChildren();
+    els.galleryOriginal.removeAttribute("src");
+    els.galleryDownload.removeAttribute("href");
+    renderGalleryMetadata(null);
+    hide(els.galleryBack);
+    hide(els.galleryDownload);
+    hide(els.galleryDelete);
+    hide(els.galleryViewer);
+    show(els.galleryStatus);
+    show(els.galleryGrid);
+    show(els.galleryPager);
+    if (els.gallerySearch?.parentElement?.parentElement) {
+      show(els.gallerySearch.parentElement.parentElement);
+    }
+    if (els.gallerySearchClear) {
+      els.gallerySearchClear.classList.toggle("hidden", !galleryQuery);
+    }
+    els.galleryPrev.disabled = true;
+    els.galleryNext.disabled = true;
+    els.galleryImagePrev.disabled = true;
+    els.galleryImageNext.disabled = true;
+    els.galleryRefresh.disabled = true;
+    try {
+      const data = await getGalleryPage(offset, request);
+      if (!data) return;
+      const items = Array.isArray(data.items) ? data.items : [];
+      galleryTotal = Number(data.total) || 0;
+      galleryAllTotal = data.all_total != null ? Number(data.all_total) || 0 : galleryTotal;
+      galleryOffset = Number.isInteger(Number(data.offset))
+        ? Number(data.offset) : offset;
+      galleryItems = items;
+      const countText = galleryQuery && galleryAllTotal !== galleryTotal
+        ? `匹配 ${galleryTotal} / 共 ${galleryAllTotal} 张`
+        : `共 ${galleryTotal} 张`;
+      els.galleryHint.textContent = countText +
+        (data.saving_enabled === false ? " · 图片历史保存已关闭" : "");
+      items.forEach((item, index) => {
+        const article = document.createElement("article");
+        article.className = "gallery-item";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "gallery-image-btn";
+        button.title = "查看原图";
+        button.dataset.galleryName = item.name;
+        button.setAttribute("aria-label", `查看原图 ${item.name}`);
+        if (item.thumbnail_b64) {
+          const image = document.createElement("img");
+          image.src = "data:image/jpeg;base64," + item.thumbnail_b64;
+          image.alt = item.name;
+          image.loading = "lazy";
+          button.appendChild(image);
+        } else {
+          button.textContent = "预览不可用";
+        }
+        button.addEventListener("click", () => openGalleryImage(item, index));
+        const caption = document.createElement("p");
+        caption.className = "gallery-item-caption";
+        caption.textContent = new Date(item.created_at).toLocaleString("zh-CN") +
+          (item.width && item.height ? ` · ${item.width} × ${item.height}` : "");
+        const prompt = document.createElement("p");
+        prompt.className = "gallery-item-prompt";
+        prompt.textContent = item.prompt_preview || "提示词未记录";
+        article.append(button, prompt, caption);
+        els.galleryGrid.appendChild(article);
+      });
+      if (items.length) hide(els.galleryStatus);
+      else els.galleryStatus.textContent = galleryQuery
+        ? `未找到包含「${galleryQuery}」的图片`
+        : "还没有已保存的图片";
+      els.galleryPageInfo.textContent =
+        `${Math.floor(galleryOffset / GALLERY_PAGE_SIZE) + 1} / ${Math.max(1, Math.ceil(galleryTotal / GALLERY_PAGE_SIZE))}`;
+      els.galleryPrev.disabled = galleryOffset === 0;
+      els.galleryNext.disabled = galleryOffset + items.length >= galleryTotal;
+      if (focusName) {
+        Array.from(els.galleryGrid.querySelectorAll("[data-gallery-name]"))
+          .find((button) => button.dataset.galleryName === focusName)
+          ?.focus();
+      }
+    } catch (err) {
+      if (request === galleryRequest && els.galleryDialog.open) {
+        els.galleryStatus.textContent = `读取画廊失败：${err?.message || err}`;
+      }
+    } finally {
+      if (request === galleryRequest) els.galleryRefresh.disabled = false;
+    }
+  }
+
+  async function openGalleryImage(item, index, focusBack = true) {
+    const request = ++galleryRequest;
+    galleryIndex = index;
+    galleryCurrentImage = null;
+    els.galleryTitle.textContent = "图片预览";
+    const dimensions = item.width && item.height
+      ? `${item.width} × ${item.height}` : "";
+    const fileSize = formatGallerySize(item.size_bytes);
+    els.galleryHint.textContent =
+      [item.name, dimensions, fileSize].filter(Boolean).join(" · ");
+    els.galleryStatus.textContent = "正在读取原图…";
+    els.galleryPrompt.textContent = "";
+    els.galleryPrompt.dataset.value = "";
+    els.galleryCopyPrompt.disabled = true;
+    if (els.galleryApplyPrompt) els.galleryApplyPrompt.disabled = true;
+    if (els.galleryDelete) els.galleryDelete.disabled = true;
+    renderGalleryMetadata(null);
+    els.galleryOriginal.removeAttribute("src");
+    els.galleryDownload.removeAttribute("href");
+    hide(els.galleryGrid);
+    hide(els.galleryPager);
+    hide(els.galleryDownload);
+    hide(els.galleryDelete);
+    hide(els.galleryViewer);
+    if (els.gallerySearch?.parentElement?.parentElement) {
+      hide(els.gallerySearch.parentElement.parentElement);
+    }
+    show(els.galleryBack);
+    show(els.galleryStatus);
+    els.galleryImagePrev.disabled = true;
+    els.galleryImageNext.disabled = true;
+    els.galleryImageInfo.textContent = "读取中…";
+    try {
+      const bridge = await getBridge();
+      const image = unwrapData(await bridge.apiPost("test_panel/gallery_image", { name: item.name }));
+      if (request !== galleryRequest || !els.galleryDialog.open) return;
+      if (!image?.b64_json || !["image/png", "image/jpeg", "image/webp"].includes(image.mime_type)) {
+        throw new Error("图片格式无效");
+      }
+      galleryCurrentImage = image;
+      const src = `data:${image.mime_type};base64,${image.b64_json}`;
+      els.galleryOriginal.src = src;
+      els.galleryOriginal.alt = item.name;
+      const prompt = typeof image.prompt === "string" ? image.prompt : "";
+      els.galleryPrompt.textContent = prompt || "提示词未记录";
+      els.galleryPrompt.dataset.value = prompt;
+      els.galleryCopyPrompt.disabled = !prompt;
+      if (els.galleryApplyPrompt) {
+        els.galleryApplyPrompt.disabled = !(prompt || (image.metadata && Object.keys(image.metadata).length));
+      }
+      if (els.galleryDelete) els.galleryDelete.disabled = false;
+      renderGalleryMetadata(image.metadata);
+      await els.galleryOriginal.decode();
+      if (request !== galleryRequest || !els.galleryDialog.open) return;
+      els.galleryDownload.href = src;
+      els.galleryDownload.download = image.name;
+      hide(els.galleryStatus);
+      show(els.galleryViewer);
+      show(els.galleryDownload);
+      show(els.galleryDelete);
+      updateGalleryImageNavigation();
+      if (focusBack) els.galleryBack.focus();
+    } catch (err) {
+      if (request === galleryRequest && els.galleryDialog.open) {
+        els.galleryStatus.textContent = `读取原图失败：${err?.message || err}`;
+        els.galleryImageInfo.textContent = "";
+      }
+    }
+  }
+
+  async function navigateGalleryImage(direction) {
+    const targetAbsoluteIndex = galleryOffset + galleryIndex + direction;
+    if (targetAbsoluteIndex < 0 || targetAbsoluteIndex >= galleryTotal) return;
+    const currentPageEnd = galleryOffset + galleryItems.length;
+    if (targetAbsoluteIndex >= galleryOffset && targetAbsoluteIndex < currentPageEnd) {
+      await openGalleryImage(
+        galleryItems[targetAbsoluteIndex - galleryOffset],
+        targetAbsoluteIndex - galleryOffset,
+        false
+      );
+      return;
+    }
+
+    const request = ++galleryRequest;
+    els.galleryImagePrev.disabled = true;
+    els.galleryImageNext.disabled = true;
+    els.galleryImageInfo.textContent = "读取中…";
+    try {
+      const targetOffset =
+        Math.floor(targetAbsoluteIndex / GALLERY_PAGE_SIZE) * GALLERY_PAGE_SIZE;
+      const data = await getGalleryPage(targetOffset, request);
+      if (!data) return;
+      const items = Array.isArray(data.items) ? data.items : [];
+      const actualOffset = Number.isInteger(Number(data.offset))
+        ? Number(data.offset) : targetOffset;
+      const targetIndex = targetAbsoluteIndex - actualOffset;
+      const item = items[targetIndex];
+      if (!item) throw new Error("图片列表已变化，请返回画廊刷新");
+      galleryItems = items;
+      galleryOffset = actualOffset;
+      galleryTotal = Number(data.total) || 0;
+      await openGalleryImage(item, targetIndex, false);
+    } catch (err) {
+      if (request === galleryRequest && els.galleryDialog.open) {
+        els.galleryImageInfo.textContent = "读取失败";
+        els.galleryStatus.textContent = err?.message || String(err);
+        show(els.galleryStatus);
+        updateGalleryImageNavigation();
+      }
+    }
+  }
+
   // ===== 事件绑定 =====
   function bindEvents() {
+    els.galleryBtn.addEventListener("click", () => {
+      if (!els.galleryDialog.open) els.galleryDialog.showModal();
+      loadGallery();
+    });
+    els.galleryClose.addEventListener("click", () => els.galleryDialog.close());
+    els.galleryCopyPrompt.addEventListener("click", async () => {
+      const prompt = els.galleryPrompt.dataset.value || "";
+      if (!prompt) return;
+      try {
+        await navigator.clipboard.writeText(prompt);
+        els.galleryStatus.textContent = "提示词已复制";
+        show(els.galleryStatus);
+      } catch {
+        els.galleryStatus.textContent = "复制失败，请检查浏览器剪贴板权限";
+        show(els.galleryStatus);
+      }
+    });
+    if (els.galleryApplyPrompt) {
+      els.galleryApplyPrompt.addEventListener("click", () => {
+        applyGalleryRecordToPanel(galleryCurrentImage);
+      });
+    }
+    if (els.galleryDelete) {
+      els.galleryDelete.addEventListener("click", async () => {
+        const target = galleryItems[galleryIndex];
+        if (!target) return;
+        if (!window.confirm(`确定要从画廊删除「${target.name}」吗？`)) return;
+        els.galleryDelete.disabled = true;
+        try {
+          const bridge = await getBridge();
+          await bridge.apiPost("test_panel/gallery_delete", { name: target.name });
+          await loadGallery(galleryOffset);
+        } catch (err) {
+          els.galleryStatus.textContent = `删除失败：${err?.message || err}`;
+          show(els.galleryStatus);
+          els.galleryDelete.disabled = false;
+        }
+      });
+    }
+    if (els.gallerySearch) {
+      els.gallerySearch.addEventListener("input", () => {
+        galleryQuery = els.gallerySearch.value.trim();
+        if (gallerySearchTimer) clearTimeout(gallerySearchTimer);
+        gallerySearchTimer = setTimeout(() => loadGallery(0), 220);
+      });
+      els.gallerySearch.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          if (gallerySearchTimer) clearTimeout(gallerySearchTimer);
+          galleryQuery = els.gallerySearch.value.trim();
+          loadGallery(0);
+        }
+      });
+    }
+    if (els.gallerySearchClear) {
+      els.gallerySearchClear.addEventListener("click", () => {
+        galleryQuery = "";
+        if (els.gallerySearch) els.gallerySearch.value = "";
+        loadGallery(0);
+      });
+    }
+    els.galleryRefresh.addEventListener("click", () => {
+      if (!els.galleryViewer.classList.contains("hidden") && galleryItems[galleryIndex]) {
+        openGalleryImage(galleryItems[galleryIndex], galleryIndex, false);
+      } else {
+        loadGallery(galleryOffset);
+      }
+    });
+    els.galleryBack.addEventListener("click", () =>
+      loadGallery(galleryOffset, galleryItems[galleryIndex]?.name || ""));
+    els.galleryPrev.addEventListener("click", () =>
+      loadGallery(Math.max(0, galleryOffset - GALLERY_PAGE_SIZE)));
+    els.galleryNext.addEventListener("click", () =>
+      loadGallery(galleryOffset + GALLERY_PAGE_SIZE));
+    els.galleryImagePrev.addEventListener("click", () => navigateGalleryImage(-1));
+    els.galleryImageNext.addEventListener("click", () => navigateGalleryImage(1));
+    els.galleryDialog.addEventListener("keydown", (event) => {
+      if (!els.galleryDialog.open || els.galleryViewer.classList.contains("hidden") ||
+          event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.target.matches("input, textarea, select, [contenteditable='true']")) return;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        navigateGalleryImage(-1);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        navigateGalleryImage(1);
+      }
+    });
+    els.galleryDialog.addEventListener("close", () => {
+      galleryRequest++;
+      galleryItems = [];
+      galleryIndex = -1;
+      galleryCurrentImage = null;
+      els.galleryImageInfo.textContent = "";
+      els.galleryOriginal.removeAttribute("src");
+      els.galleryDownload.removeAttribute("href");
+      renderGalleryMetadata(null);
+      els.galleryGrid.replaceChildren();
+    });
+    els.galleryDialog.addEventListener("click", (event) => {
+      if (event.target !== els.galleryDialog) return;
+      const bounds = els.galleryDialog.getBoundingClientRect();
+      if (event.clientX < bounds.left || event.clientX > bounds.right ||
+          event.clientY < bounds.top || event.clientY > bounds.bottom) {
+        els.galleryDialog.close();
+      }
+    });
     els.model.addEventListener("change", (event) => {
       if (event.isTrusted && slotState.appliedId) {
         slotState.appliedId = null;
@@ -1701,6 +2413,9 @@
       }
       updateSizeOptionsUI();
       updateCostBadge();
+      if (referenceImages.length) {
+        renderRefGrid();
+      }
     });
     // 步数 / 画幅 / 张数变化时实时刷新点数预估
     ["steps", "size", "count"].forEach((key) => {
@@ -1726,6 +2441,9 @@
       }
     });
     initFormatToggle();
+    if (els.openaiSetDefaultChannelBtn) {
+      els.openaiSetDefaultChannelBtn.addEventListener("click", switchGlobalDefaultChannel);
+    }
     els.refFile.addEventListener("change", handleReferenceFileChange);
     els.refRemove.addEventListener("click", clearReferenceImage);
     if (els.refMode) {
@@ -1747,7 +2465,8 @@
     els.retryBtn.addEventListener("click", () => {
       if (lastRequestBody) {
         hideError();
-        generate();
+        if (lastRequestWasTrial) trialGenerate();
+        else generate();
       }
     });
     els.loadDefaultNegative.addEventListener("click", loadDefaultNegative);
@@ -1787,7 +2506,7 @@
   }
 
   // ===== 画风槽位与法典 =====
-  const slotState = { slots: [], activeId: "1", models: [], enabled: false, appliedId: null, autoApplied: false };
+  const slotState = { slots: [], activeId: "1", models: [], enabled: false, appliedId: null, autoApplied: false, saving: false };
 
   function slotEls() {
     return {
@@ -1811,6 +2530,7 @@
     const e = slotEls();
     if (!e.rows) return;
     e.rows.textContent = "";
+    renderSlotOptions();
     if (!slotState.slots.length) {
       const empty = document.createElement("div");
       empty.className = "grimoire-empty";
@@ -1822,7 +2542,6 @@
       ? slotState.models
       : ["nai-diffusion-4-5-full", "nai-diffusion-5-full"];
 
-    renderSlotOptions();
     slotState.slots.forEach((slot) => {
       const row = document.createElement("div");
       row.className = "slot-row";
@@ -1874,10 +2593,13 @@
 
       const apply = document.createElement("button");
       apply.type = "button";
-      apply.className = "btn btn-primary";
-      apply.textContent = "应用";
-      apply.title = "把该画风的模型与画师串套到本面板";
-      apply.addEventListener("click", () => applySlotToPanel(slot));
+      const active = slotState.enabled && String(slot.id) === slotState.activeId;
+      apply.className = "btn btn-primary btn-slot-apply" + (active ? " is-active" : "");
+      apply.textContent = active ? "全局生效" : "全局启用";
+      apply.setAttribute("aria-pressed", String(active));
+      apply.title = "保存槽位并将该画风设为全局默认";
+      apply.disabled = !slotState.enabled || slotState.saving;
+      apply.addEventListener("click", () => saveSlots(slot.id));
 
       const del = document.createElement("button");
       del.type = "button";
@@ -1901,20 +2623,28 @@
 
   function renderSlotOptions() {
     const selected = els.style.value;
-    els.style.querySelectorAll('[data-slot-option]').forEach((option) => option.remove());
-    if (slotState.enabled) {
-      slotState.slots.forEach((slot) => {
-        const option = document.createElement("option");
-        option.dataset.slotOption = "true";
-        option.value = `slot:${slot.id}`;
-        option.textContent = slot.name || `槽位 ${slot.id}`;
-        els.style.appendChild(option);
-      });
-    }
-    els.style.value = selected;
+    const options = slotState.enabled
+      ? [
+          ...slotState.slots.map((slot) => ({
+            value: `slot:${slot.id}`,
+            label: slot.name || `槽位 ${slot.id}`,
+          })),
+          ...LEGACY_STYLE_OPTIONS.filter((option) => option.value === "custom"),
+        ]
+      : LEGACY_STYLE_OPTIONS;
+    els.style.replaceChildren(...options.map((item) => {
+      const option = document.createElement("option");
+      option.value = item.value;
+      option.textContent = item.label;
+      return option;
+    }));
+    els.style.value = options.some((option) => option.value === selected)
+      ? selected
+      : "custom";
+    toggleCustomArtists();
   }
 
-  // Keep the selected slot and the visible generation fields in sync.
+  // Keep the selected slot and generation parameters in sync.
   function applySlotToPanel(slot) {
     const e = slotEls();
     if (!slot) return;
@@ -1945,13 +2675,6 @@
     updateCostBadge();
     slotState.appliedId = String(slot.id);
     refreshSlotStatus();
-    if (e.status) {
-      const name = slot.name || `槽位 ${slot.id}`;
-      e.status.textContent =
-        `已套用画风「${name}」：模型 ${modelValue || "默认"}，画师串 ${
-          String(slot.artists || "").trim() ? "已填入" : "为空（不拼画师串）"
-        }。改动上方「画风 / 画师串」即脱离该槽位。`;
-    }
   }
 
   function refreshSlotStatus() {
@@ -1972,9 +2695,9 @@
     );
     const appliedText = applied
       ? `本面板已套用「${applied.name || `槽位 ${applied.id}`}」。`
-      : "点槽位右侧「应用」即可用该画风出图。";
+      : "";
     e.status.textContent =
-      `聊天生图使用槽位 ${slotState.activeId}（${activeName}），共 ${slotState.slots.length} 个。` +
+      `全局画风：${activeName}（槽位 ${slotState.activeId}），共 ${slotState.slots.length} 个。` +
       appliedText;
   }
 
@@ -2004,28 +2727,37 @@
         const active = slotState.slots.find(
           (s) => String(s.id) === String(slotState.activeId)
         );
-        if (selected || active) applySlotToPanel(selected || active);
+        if (selected) applySlotToPanel(selected);
+        else if (cachedStyle !== "custom" && active) applySlotToPanel(active);
       }
     } catch (err) {
       if (e.status) e.status.textContent = `读取槽位失败：${err && err.message ? err.message : err}`;
     }
   }
 
-  async function saveSlots() {
+  async function saveSlots(activeSlotId = null) {
     const e = slotEls();
+    if (slotState.saving) return;
     if (!slotState.slots.length) {
       if (e.status) e.status.textContent = "至少保留一个槽位。";
       return;
     }
+    slotState.saving = true;
+    if (e.save) e.save.disabled = true;
     try {
       const appliedIndex = slotState.slots.findIndex(
-        (slot) => String(slot.id) === String(slotState.appliedId)
+        (slot) => String(slot.id) === String(activeSlotId ?? slotState.appliedId)
+      );
+      const activeIndex = slotState.slots.findIndex(
+        (slot) => String(slot.id) === String(activeSlotId ?? slotState.activeId)
       );
       const bridge = await getBridge();
       const resp = await bridge.apiPost("test_panel/slots_save", {
         slots: slotState.slots,
+        active_slot_id: String(Math.max(0, activeIndex) + 1),
       });
       const data = unwrapData(resp) || {};
+      slotState.activeId = String(data.active_slot_id || slotState.activeId);
       if (Array.isArray(data.slots) && data.slots.length) {
         slotState.slots = data.slots.map((s) => ({
           id: Number(s.id) || 0,
@@ -2038,9 +2770,14 @@
           applySlotToPanel(slotState.slots[appliedIndex]);
         }
       }
-      if (e.status) e.status.textContent = "槽位已保存。";
+      refreshSlotStatus();
+      if (e.status) e.status.textContent = `槽位已保存。${e.status.textContent}`;
     } catch (err) {
       if (e.status) e.status.textContent = `保存失败：${err && err.message ? err.message : err}`;
+    } finally {
+      slotState.saving = false;
+      if (e.save) e.save.disabled = false;
+      renderSlotRows();
     }
   }
 
@@ -2105,6 +2842,7 @@
       const resp = await bridge.apiPost("test_panel/grimoire_search", {
         query,
         limit: 12,
+        model: els.model.value,
       });
       const payload = unwrapData(resp) || {};
       if (payload.message && !(payload.items && payload.items.length)) {
@@ -2134,7 +2872,7 @@
         renderSlotRows();
       });
     }
-    if (e.save) e.save.addEventListener("click", saveSlots);
+    if (e.save) e.save.addEventListener("click", () => saveSlots());
     if (e.reset) {
       e.reset.addEventListener("click", async () => {
         if (!window.confirm("会用内置画风重建槽位表，当前槽位（含自定义）会被覆盖，确定吗？")) {
@@ -2145,6 +2883,7 @@
           const resp = await bridge.apiPost("test_panel/slots_reset", {});
           const data = unwrapData(resp) || {};
           if (Array.isArray(data.slots)) {
+            slotState.activeId = String(data.active_slot_id || "1");
             slotState.slots = data.slots.map((s) => ({
               id: Number(s.id) || 0,
               name: String(s.name || ""),
@@ -2153,8 +2892,14 @@
             }));
             renderSlotRows();
             slotState.appliedId = null;
-            els.style.value = "custom";
-            toggleCustomArtists();
+            const active = slotState.enabled && slotState.slots.find(
+              (slot) => String(slot.id) === slotState.activeId
+            );
+            if (active) applySlotToPanel(active);
+            else {
+              els.style.value = "custom";
+              toggleCustomArtists();
+            }
             refreshSlotStatus();
           }
           if (e.status) e.status.textContent = "已恢复为内置画风。";
@@ -2186,6 +2931,7 @@
     // 启动高可见度等高线拓扑地形动画引擎
     initContourEngine();
 
+    els.generateBtn.disabled = true;
     bindEvents();
     // 从后端恢复面板状态
     await loadCache();
@@ -2195,13 +2941,15 @@
     updateCostBadge();
     // 仅加载 token 状态 badge（不填表单）
     await loadTokenStatus();
-    // 加载试用状态
-    await loadTrialStatus();
-    // 加载点数用量台账
-    await loadUsageStats();
     // 加载画风槽位与法典面板
     bindSlotEvents();
     await loadSlots();
+    isInitializing = false;
+    setLoading(false);
+    saveCache();
+    // Metadata must not delay restoring the generation form.
+    loadTrialStatus();
+    loadUsageStats();
   }
 
   // DOM 就绪后启动

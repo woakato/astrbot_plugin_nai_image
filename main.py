@@ -8,7 +8,7 @@ import time
 from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 import yaml
@@ -32,6 +32,11 @@ if __package__:
         strip_image_command_prefix,
     )
     from .companion_api import NAIImageCompanionExtensionAPI
+    from .gallery_service import (
+        delete_gallery_image,
+        list_gallery_images,
+        read_gallery_image,
+    )
     from .grimoire_service import (
         build_grimoire_translation_hint,
         expand_grimoire_macros,
@@ -78,6 +83,11 @@ else:
         normalize_image_style,
         parse_image_command,
         strip_image_command_prefix,
+    )
+    from gallery_service import (
+        delete_gallery_image,
+        list_gallery_images,
+        read_gallery_image,
     )
     from grimoire_service import (
         build_grimoire_translation_hint,
@@ -328,19 +338,15 @@ OPENAI_TOOL_SIZES = (
 # 像素分辨率写法 "1024x1536"（含 ×/* 变体）。
 _PIXEL_SIZE_RE = re.compile(r"^\s*(\d{1,5})\s*[x×*]\s*(\d{1,5})\s*$", re.IGNORECASE)
 
-# OpenAI 兼容接口的模型列表（对齐接口文档 §9）。
+# 第三方官方协议接口的模型列表。
 OPENAI_COMPATIBLE_MODELS = [
     "nai-diffusion-5-full",
     "nai-diffusion-5-curated",
     "nai-diffusion-4-5-full",
     "nai-diffusion-4-5-curated",
-    "nai-diffusion-4-full",
-    "nai-diffusion-4-curated-preview",
-    "nai-diffusion-3",
-    "nai-diffusion-furry-3",
 ]
 
-# director-tools 图片处理动作（对齐接口文档 §8）。
+# director-tools 图片处理动作（对齐官方 augment-image）。
 OPENAI_DIRECTOR_ACTIONS = {
     "bg-removal": "去除背景",
     "lineart": "提取线稿",
@@ -350,31 +356,11 @@ OPENAI_DIRECTOR_ACTIONS = {
     "declutter": "清理画面元素",
 }
 
-# 参考图单次请求张数上限（§5.2）：vibe 的 reference_image_multiple 与
-# 精准参考的 director_reference_* 数组均按此收敛。
+# 参考图单次请求张数上限（vibe 与精准参考数组均按此收敛）。
 OPENAI_MAX_REFERENCE_IMAGES = 8
 
-# 支持精准参考（director_reference_*）的模型集合：NAI 4.5 与 NAI 5 全系
-# 实测均支持精准参考。其他模型携带精准参考字段会被服务端拒绝，仍自动切换
-# 为 nai-diffusion-4-5-full。
-OPENAI_DIRECTOR_MODELS = {
-    "nai-diffusion-4-5-full",
-    "nai-diffusion-4-5-curated",
-    "nai45",
-    "nai45-curated",
-    "nai-diffusion-5-full",
-    "nai-diffusion-5-curated",
-    "nai5",
-    "nai5-curated",
-}
-
-# 精准参考 base_caption 仅允许的枚举值（新文档 §8.4）。
+# 精准参考 base_caption 仅允许的枚举值。
 OPENAI_DIRECTOR_CAPTIONS = ("character", "style", "character&style")
-
-# OpenAI 兼容生图允许自动重试的状态码（对齐接口文档 §14）；
-# 400/401/403 一律不重试，重试间隔为 2/4/8 秒指数退避。
-OPENAI_RETRYABLE_STATUS = {408, 429, 502, 503, 504}
-OPENAI_RETRY_DELAYS = (2.0, 4.0, 8.0)
 
 # 任务接口（POST /api/web/jobs）轮询参数：提交/单次轮询/总等待的秒数上限。
 # 总等待上限自 v2.7.3 起跟随「请求超时」配置（request_timeout，默认 180s），
@@ -384,20 +370,6 @@ WEB_JOB_SUBMIT_TIMEOUT = 30
 WEB_JOB_POLL_INTERVAL = 2.0
 WEB_JOB_POLL_REQUEST_TIMEOUT = 15
 WEB_JOB_TOTAL_TIMEOUT = 180
-
-# 中转网关会把 NovelAI 上游的瞬时故障（如 vibe 编码"服务繁忙"）包装成
-# HTTP 400（type=bad_response_status_code），错误文案本身提示"请稍后重试"；
-# 错误信息命中下列任一关键词时，即便状态码不可重试也按可重试处理。
-OPENAI_TRANSIENT_MARKERS = (
-    "服务繁忙",
-    "请稍后重试",
-    "稍后再试",
-    "try again later",
-    "service busy",
-    "temporarily unavailable",
-    "too many requests",
-    "overloaded",
-)
 
 DEFAULT_ARTISTS = {
     "vertical": "[[[artist:dishwasher1910]]], {{yd_(orange_maru)}}, [artist:ciloranko], [artist:sho_(sho_lwlw)], [ningen mame], year 2024,",
@@ -522,9 +494,13 @@ def _format_generate_error(reason: str) -> str:
         "no_token": "❌ 插件未配置 image_gen_key，请先在插件管理面板填入 token。",
         "no_session": "❌ 插件 session 未初始化，请重载插件。",
         "openai_not_configured": (
-            "❌ 未配置当前生图服务的接口地址，"
-            "请在插件设置中选择对应的生图服务并填写地址。"
+            "❌ 未配置第三方官方协议接口地址，"
+            "请在插件设置中填写至少一条渠道的接口地址与 API Key。"
         ),
+        "openai_channel_not_configured": (
+            "❌ 所选官方协议渠道尚未配置接口地址，请在插件设置中填写该渠道地址或改用另一条已配置渠道。"
+        ),
+        "openai_channel_not_found": "❌ 指定的官方协议渠道不存在。",
         "web_job_failed": (
             "🚫 上游生成任务失败（失败任务的点数会自动退回），请查看日志或稍后重试。"
         ),
@@ -538,21 +514,8 @@ def _format_generate_error(reason: str) -> str:
     if reason in _map:
         return _map[reason]
     if reason.startswith("starbridge | "):
-        return "🚫 星桥：" + reason.split(" | ", 1)[1]
-    # 精准参考（§6）被上游拒绝：参数已按文档格式提交，多为能力未开通
-    if reason.startswith("director_ref_rejected"):
-        detail = reason.split(" | ", 1)[1] if " | " in reason else ""
-        msg = (
-            "🚫 精准参考（director）被上游拒绝：参数已按接口文档 §6 格式提交，"
-            "中转/上游仍判定参数校验失败。这通常表示当前 Key 未开通精准参考能力，"
-            "或该中转站的 director 转换暂不兼容（文档 §6：若模型不支持该能力，"
-            "服务会返回参数错误或模型能力错误）。建议联系服务方确认是否已开通"
-            "精准参考；在此之前可改用 vibe 参考或 img2img 模式。"
-        )
-        if detail:
-            msg += f"\n详情: {detail}"
-        return msg
-    # OpenAI 兼容模式的具体状态码（形如 "http_400 | invalid image size"）
+        return "🚫 官方协议接口：" + reason.split(" | ", 1)[1]
+    # 第三方接口的具体状态码（形如 "http_400 | invalid image size"）
     _status_match = re.match(r"http_(\d{3})", reason)
     if _status_match:
         status = int(_status_match.group(1))
@@ -707,20 +670,21 @@ def migrate_legacy_translate_config(config: dict) -> str | None:
 
 
 def migrate_invalid_call_mode(config: dict) -> str | None:
-    """Repair invalid modes and legacy defaults without overriding service selection.
+    """Repair invalid modes without overriding a configured native endpoint.
 
     Args:
         config: Plugin configuration, updated in place if a repair is needed.
 
     Returns:
-        The repaired mode, or None when unchanged. Configurations with separated
+        The repaired mode, or None when unchanged. Configurations with migrated
         credentials keep their selected mode even when its address is empty.
     """
     mode = str(config.get("call_mode") or "").strip()
-    profile = str(config.get("openai_api_profile") or "compatible").strip().casefold()
-    base_url = config.get("openai_api_base_url")
-    if profile == "starbridge":
-        base_url = config.get("starbridge_api_base_url") or base_url
+    base_url = (
+        config.get("openai_api_base_url")
+        or config.get("openai_backup_base_url")
+        or config.get("starbridge_api_base_url")
+    )
     if (
         mode == "openai"
         and not str(base_url or "").strip()
@@ -762,9 +726,9 @@ class NAIGenerateImagePlugin(Star):
         self.bot_reply_mode: str = config.get("bot_reply_mode") or "完整"
         if self.bot_reply_mode not in BOT_REPLY_MODES:
             self.bot_reply_mode = "完整"
-        self.save_image_history: bool = bool(config.get("save_image_history", False))
+        self.save_image_history: bool = bool(config.get("save_image_history", True))
         self.save_generation_parameters: bool = bool(
-            config.get("save_generation_parameters", False)
+            config.get("save_generation_parameters", True)
         )
         try:
             history_limit = config.get("image_history_limit")
@@ -780,7 +744,7 @@ class NAIGenerateImagePlugin(Star):
         self._image_history_lock = asyncio.Lock()
         self.custom_artists: str = config.get("custom_artists") or ""
         self.model: str = config.get("model") or "nai-diffusion-4-5-full"
-        # 正式生图启用的槽位（槽位表本身存在插件数据目录的 artist_slots.json）。
+        # The active slot and slot table share the plugin configuration.
         self.active_artist_slot: str = (
             str(config.get("active_artist_slot") or "1").strip() or "1"
         )
@@ -827,30 +791,50 @@ class NAIGenerateImagePlugin(Star):
         self.negative: str = neg if neg else DEFAULT_NEGATIVE
         self.enable_template: bool = bool(config.get("enable_template", True))
         self.character_preset: str = (config.get("character_preset") or "").strip()
-        # 调用模式：direct（传统 GET nai.sta1n.cn）/ openai（OpenAI 兼容站点）。
-        # 先归一化被污染/非法的 call_mode（如 openai 但未配置接口地址），再读取；
-        # 迁移结果在 init 末尾统一持久化。
+        # 调用模式：direct（传统 GET nai.sta1n.cn）/ openai（第三方 NovelAI 官方 /ai/ 协议）。
+        # 原有适配星渊站的 OpenAI 兼容格式已取消；若旧配置里把地址和密钥保存在
+        # starbridge_api_* 中，启动时一次性合并回 openai_api_*，并默认开启画廊保存。
         healed_call_mode = migrate_invalid_call_mode(config)
-        self.openai_api_profile: str = (
-            str(config.get("openai_api_profile") or "compatible").strip().casefold()
-        )
-        if self.openai_api_profile not in ("compatible", "starbridge"):
-            self.openai_api_profile = "compatible"
+        self.openai_api_profile: str = "starbridge"
         credential_updates: dict[str, Any] = {}
-        if not config.get("_api_credentials_version"):
-            # Move the old shared pair once, before users can switch services.
-            if self.openai_api_profile == "starbridge" and not any(
-                str(config.get(key) or "").strip()
-                for key in ("starbridge_api_base_url", "starbridge_api_key")
-            ):
-                credential_updates.update(
-                    starbridge_api_base_url=config.get("openai_api_base_url") or "",
-                    starbridge_api_key=config.get("openai_api_key") or "",
-                    openai_api_base_url="",
-                    openai_api_key="",
-                )
-            credential_updates["_api_credentials_version"] = 1
+        starbridge_url = str(config.get("starbridge_api_base_url") or "").strip()
+        starbridge_key = str(config.get("starbridge_api_key") or "").strip()
+        if int(config.get("_api_credentials_version") or 0) < 2:
+            if starbridge_url or starbridge_key:
+                primary_url = str(config.get("openai_api_base_url") or "").strip()
+                primary_key = str(config.get("openai_api_key") or "").strip()
+                backup_url = str(config.get("openai_backup_base_url") or "").strip()
+                backup_key = str(config.get("openai_backup_key") or "").strip()
+                if not primary_url and not primary_key:
+                    credential_updates.update(
+                        openai_api_base_url=starbridge_url,
+                        openai_api_key=starbridge_key,
+                        starbridge_api_base_url="",
+                        starbridge_api_key="",
+                    )
+                elif not backup_url and not backup_key:
+                    credential_updates.update(
+                        openai_backup_base_url=starbridge_url,
+                        openai_backup_key=starbridge_key,
+                        starbridge_api_base_url="",
+                        starbridge_api_key="",
+                    )
+                else:
+                    credential_updates.update(
+                        starbridge_api_base_url="",
+                        starbridge_api_key="",
+                    )
+            credential_updates["_api_credentials_version"] = 2
             config.update(credential_updates)
+        if not config.get("_gallery_defaults_version"):
+            credential_updates.update(
+                save_image_history=True,
+                save_generation_parameters=True,
+                _gallery_defaults_version=1,
+            )
+            config.update(credential_updates)
+            self.save_image_history = True
+            self.save_generation_parameters = True
         if healed_call_mode is not None:
             credential_updates["call_mode"] = healed_call_mode
         self.call_mode: str = (config.get("call_mode") or "direct").strip()
@@ -879,20 +863,39 @@ class NAIGenerateImagePlugin(Star):
             self.upstream_billing_sync_interval = 10
         self._upstream_billing_task: asyncio.Task | None = None
         self._upstream_billing_last_error = ""
-        # Keep the existing runtime attributes bound to the selected service.
-        credential_prefix = (
-            "starbridge" if self.openai_api_profile == "starbridge" else "openai"
+        self.openai_active_channel: str = (
+            str(config.get("openai_active_channel") or "primary").strip().casefold()
         )
-        self.openai_api_base_url: str = (
-            (config.get(f"{credential_prefix}_api_base_url") or "").strip().rstrip("/")
+        if self.openai_active_channel not in ("primary", "backup"):
+            self.openai_active_channel = "primary"
+        self.openai_enable_fallback: bool = bool(
+            config.get("openai_enable_fallback", True)
         )
-        self.openai_api_key: str = (
-            config.get(f"{credential_prefix}_api_key") or ""
+        self.openai_api_name: str = str(config.get("openai_api_name") or "").strip()
+        self.openai_primary_base_url: str = (
+            (config.get("openai_api_base_url") or starbridge_url or "")
+            .strip()
+            .rstrip("/")
+        )
+        self.openai_primary_key: str = (
+            config.get("openai_api_key") or starbridge_key or ""
         ).strip()
+        self.openai_backup_name: str = str(
+            config.get("openai_backup_name") or ""
+        ).strip()
+        self.openai_backup_base_url: str = (
+            str(config.get("openai_backup_base_url") or "").strip().rstrip("/")
+        )
+        self.openai_backup_key: str = str(
+            config.get("openai_backup_key") or ""
+        ).strip()
+        self._refresh_active_openai_attributes()
         # model 为接口必填字段，留空时回退文档推荐的 nai-diffusion-5-full。
         self.openai_api_model: str = (
             config.get("openai_api_model") or "nai-diffusion-5-full"
         ).strip() or "nai-diffusion-5-full"
+        if self.openai_api_model not in OPENAI_COMPATIBLE_MODELS:
+            self.openai_api_model = "nai-diffusion-5-full"
         # 参考图模式：vibe（风格参考，走 generations 的 reference_* 参数）、
         # img2img（图生图，走 /v1/images/edits）或 director（精准参考，走
         # generations 的 director_reference_* 参数，§6）。
@@ -910,11 +913,13 @@ class NAIGenerateImagePlugin(Star):
 
         # 参考图默认权重（§5/§8）：聊天指令、LLM 工具与陪伴联动等未显式
         # 给逐图强度时使用；面板逐图设置优先于这些默认值。
-        def _load_ref_strength(key: str, default: float) -> float:
+        def _load_ref_strength(
+            key: str, default: float, *, max_value: float = 1.0
+        ) -> float:
             try:
                 value = config.get(key)
                 return (
-                    round(max(0.0, min(1.0, float(value))), 2)
+                    round(max(0.0, min(max_value, float(value))), 2)
                     if value not in (None, "")
                     else default
                 )
@@ -925,7 +930,7 @@ class NAIGenerateImagePlugin(Star):
             "openai_vibe_strength", 0.6
         )
         self.openai_director_strength: float = _load_ref_strength(
-            "openai_director_strength", 1.0
+            "openai_director_strength", 1.0, max_value=5.0
         )
         self.openai_director_secondary_strength: float = _load_ref_strength(
             "openai_director_secondary_strength", 0.5
@@ -953,13 +958,7 @@ class NAIGenerateImagePlugin(Star):
             self.request_timeout: int = max(30, min(600, int(_timeout_cfg or 180)))
         except (TypeError, ValueError):
             self.request_timeout = 180
-        try:
-            _retries_cfg = config.get("openai_max_retries")
-            self.openai_max_retries: int = max(
-                0, min(3, int(_retries_cfg) if _retries_cfg not in (None, "") else 2)
-            )
-        except (TypeError, ValueError):
-            self.openai_max_retries = 2
+        self.openai_max_retries: int = 0
         self._session: aiohttp.ClientSession | None = None
         self.proxy_runner: web.AppRunner | None = None
         try:
@@ -1023,6 +1022,8 @@ class NAIGenerateImagePlugin(Star):
         )
         # 法典词库：开启后才做检索、宏展开与转译参考注入。
         self.enable_grimoire: bool = bool(config.get("enable_grimoire", False))
+        # 内置 nai-prompting Skill 分级：默认 SFW；开启后切换为 NSFW 完整版。
+        self.enable_nsfw_skill: bool = bool(config.get("enable_nsfw_skill", False))
         # 画风槽位：开启后槽位绑定的模型/画师串才覆盖原来的配置。
         self.enable_artist_slots: bool = bool(config.get("enable_artist_slots", False))
 
@@ -1092,6 +1093,7 @@ class NAIGenerateImagePlugin(Star):
             f"bypass_system_proxy={'ON' if self.bypass_system_proxy else 'OFF'} "
             f"proxy_port={self.proxy_port} | "
             f"usage_stats={'ON' if self.enable_usage_stats else 'OFF'} "
+            f"nsfw_skill={'ON' if self.enable_nsfw_skill else 'OFF'} "
             f"billing_sync={'ON' if self.enable_upstream_billing_sync else 'OFF'}"
             f"({self.upstream_billing_sync_interval}m) | "
             f"call_mode={self.call_mode} "
@@ -1210,6 +1212,83 @@ class NAIGenerateImagePlugin(Star):
 
     def _schema_path(self) -> Path:
         return Path(__file__).resolve().parent / "_conf_schema.json"
+
+    def _plugin_root_dir(self) -> Path:
+        return Path(__file__).resolve().parent
+
+    @staticmethod
+    def _collect_skill_tree_files(root: Path) -> dict[str, bytes]:
+        """收集 Skill 目录下的有效文件（忽略缓存与隐藏临时文件）用于差异比较。"""
+        files: dict[str, bytes] = {}
+        if not root.is_dir():
+            return files
+        for item in sorted(root.rglob("*")):
+            if not item.is_file():
+                continue
+            rel = item.relative_to(root)
+            if any(
+                part == "__pycache__" or part.startswith(".") for part in rel.parts
+            ) or item.suffix == ".pyc":
+                continue
+            files[rel.as_posix()] = item.read_bytes()
+        return files
+
+    def _sync_prompt_skill_variant(self) -> bool:
+        """按 enable_nsfw_skill 开关同步插件内置的 skills/nai-prompting 内容。
+
+        默认使用 SFW 版本；开启时切换为 NSFW 版本，关闭时恢复 SFW 版本。
+        内容一致时不改写磁盘，只读部署下写失败只提醒一次。
+        返回 True 表示实际更新了内置 Skill 文件。
+        """
+        variant = "nsfw" if getattr(self, "enable_nsfw_skill", False) else "sfw"
+        plugin_root = self._plugin_root_dir()
+        src_dir = plugin_root / "skill_variants" / variant
+        if not (src_dir / "SKILL.md").is_file():
+            return False
+
+        skills_root = plugin_root / "skills"
+        dst_dir = skills_root / "nai-prompting"
+        try:
+            src_files = self._collect_skill_tree_files(src_dir)
+            dst_files = self._collect_skill_tree_files(dst_dir)
+            if src_files == dst_files:
+                return False
+
+            skills_root.mkdir(parents=True, exist_ok=True)
+            staging_dir = skills_root / f".nai-prompting.staging-{int(time.time() * 1000)}"
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            shutil.copytree(src_dir, staging_dir)
+            backup_dir = skills_root / f".nai-prompting.backup-{int(time.time() * 1000)}"
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+            try:
+                if dst_dir.exists():
+                    dst_dir.replace(backup_dir)
+                staging_dir.replace(dst_dir)
+            except Exception:
+                if not dst_dir.exists() and backup_dir.exists():
+                    backup_dir.replace(dst_dir)
+                raise
+            finally:
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+                if backup_dir.exists():
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+
+            logger.info(
+                f"{LOG_TAG} 内置提示词 Skill 已切换为 {variant.upper()} 版本 | "
+                f"path={dst_dir}"
+            )
+            return True
+        except Exception as exc:
+            if not getattr(self, "_skill_sync_warned", False):
+                self._skill_sync_warned = True
+                logger.warning(
+                    f"{LOG_TAG} 同步内置提示词 Skill（{variant.upper()}）失败"
+                    f"（插件目录可能只读）: {exc!r}"
+                )
+            return False
 
     def _read_plugin_config(self) -> Any:
         """读取插件配置（带 schema，保证缺省键有值）。"""
@@ -1376,17 +1455,55 @@ class NAIGenerateImagePlugin(Star):
         self._slots_cache_mtime = self._slots_cache_key()
         return slots
 
-    def _save_artist_slots(self, slots: list[dict[str, Any]]) -> None:
-        """保存画风槽位表，并同步「正式生图启用槽位」下拉里显示的名字。"""
+    def _save_artist_slots(
+        self,
+        slots: list[dict[str, Any]],
+        *,
+        active_slot_id: Any = None,
+    ) -> None:
+        """Save slots and the global selection in one configuration write.
+
+        Args:
+            slots: Slot records, optionally retaining their previous IDs.
+            active_slot_id: Selected ID in the normalized table, or None to
+                preserve the active record across renumbering.
+
+        Raises:
+            ValueError: If the table is empty or the selected ID is invalid.
+        """
 
         normalized = self._normalize_slots(slots)
         if not normalized:
             raise ValueError("槽位表不能为空")
 
-        self._write_plugin_config({"artist_slots": self._to_config_items(normalized)})
+        if active_slot_id not in (None, ""):
+            active = str(active_slot_id).strip()
+            if active not in {str(slot["id"]) for slot in normalized}:
+                raise ValueError("正式生效槽位不存在")
+        else:
+            active = "1"
+            previous = str(getattr(self, "active_artist_slot", "1"))
+            index = 0
+            for slot in slots:
+                if self._normalize_slot(slot) is None:
+                    continue
+                index += 1
+                if str(slot.get("id", index)) == previous:
+                    active = str(index)
+                    break
+
+        self._write_plugin_config(
+            {
+                "artist_slots": self._to_config_items(normalized),
+                "active_artist_slot": active,
+            }
+        )
+        self.active_artist_slot = active
         self._slots_cache = normalized
         self._slots_cache_mtime = self._slots_cache_key()
         self._sync_slot_labels(normalized)
+        if getattr(self, "context", None) is not None:
+            self._refresh_llm_tool_schema()
 
     def _sync_slot_labels(self, slots: list[dict[str, Any]]) -> None:
         """把槽位名写进 schema 下拉的 labels，让设置页显示改后的画风名。
@@ -1429,6 +1546,239 @@ class NAIGenerateImagePlugin(Star):
 
         slots = self._load_artist_slots()
         self._sync_slot_labels(slots)
+
+    # ------------------------------------------------------------------
+    # 官方协议双渠道管理（主渠道 / 备选渠道切换与安全兜底）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _infer_openai_channel_name(
+        custom_name: str, base_url: str, default_label: str
+    ) -> str:
+        """返回渠道展示名：优先用户自定义名称，留空时按域名识别星渊/星桥。"""
+
+        name = str(custom_name or "").strip()
+        if name:
+            return name
+        raw_url = str(base_url or "").strip()
+        if raw_url:
+            try:
+                host = (urlsplit(raw_url).hostname or "").casefold()
+            except Exception:
+                host = ""
+            if "syuan" in host:
+                return "星渊"
+            if "almoon" in host:
+                return "星桥"
+            if host:
+                return host
+        return default_label
+
+    def _openai_channels(self) -> list[dict[str, Any]]:
+        """返回渠道 1（primary）与渠道 2（backup）的结构化配置列表。"""
+
+        if not hasattr(self, "openai_primary_base_url"):
+            legacy_url = str(getattr(self, "openai_api_base_url", "") or "").strip().rstrip("/")
+            legacy_key = str(getattr(self, "openai_api_key", "") or "").strip()
+            return [
+                {
+                    "id": "primary",
+                    "slot_label": "渠道 1",
+                    "name": self._infer_openai_channel_name("", legacy_url, "渠道 1"),
+                    "base_url": legacy_url,
+                    "api_key": legacy_key,
+                    "configured": bool(legacy_url),
+                    "has_key": bool(legacy_key),
+                    "is_active": True,
+                },
+                {
+                    "id": "backup",
+                    "slot_label": "渠道 2",
+                    "name": "渠道 2",
+                    "base_url": "",
+                    "api_key": "",
+                    "configured": False,
+                    "has_key": False,
+                    "is_active": False,
+                },
+            ]
+
+        active_id = (
+            str(getattr(self, "openai_active_channel", "primary") or "primary")
+            .strip()
+            .casefold()
+        )
+        if active_id not in ("primary", "backup"):
+            active_id = "primary"
+        primary_url = str(getattr(self, "openai_primary_base_url", "") or "").strip().rstrip("/")
+        primary_key = str(getattr(self, "openai_primary_key", "") or "").strip()
+        backup_url = str(getattr(self, "openai_backup_base_url", "") or "").strip().rstrip("/")
+        backup_key = str(getattr(self, "openai_backup_key", "") or "").strip()
+        return [
+            {
+                "id": "primary",
+                "slot_label": "渠道 1",
+                "name": self._infer_openai_channel_name(
+                    getattr(self, "openai_api_name", ""),
+                    primary_url,
+                    "渠道 1",
+                ),
+                "base_url": primary_url,
+                "api_key": primary_key,
+                "configured": bool(primary_url),
+                "has_key": bool(primary_key),
+                "is_active": active_id == "primary",
+            },
+            {
+                "id": "backup",
+                "slot_label": "渠道 2",
+                "name": self._infer_openai_channel_name(
+                    getattr(self, "openai_backup_name", ""),
+                    backup_url,
+                    "渠道 2",
+                ),
+                "base_url": backup_url,
+                "api_key": backup_key,
+                "configured": bool(backup_url),
+                "has_key": bool(backup_key),
+                "is_active": active_id == "backup",
+            },
+        ]
+
+    def _refresh_active_openai_attributes(self) -> None:
+        """同步 self.openai_api_base_url / self.openai_api_key 到当前生效渠道。"""
+
+        channels = self._openai_channels()
+        by_id = {ch["id"]: ch for ch in channels}
+        active_id = (
+            str(getattr(self, "openai_active_channel", "primary") or "primary")
+            .strip()
+            .casefold()
+        )
+        if active_id not in by_id:
+            active_id = "primary"
+        other_id = "backup" if active_id == "primary" else "primary"
+        selected = by_id[active_id]
+        if not selected["configured"] and getattr(self, "openai_enable_fallback", True):
+            if by_id[other_id]["configured"]:
+                selected = by_id[other_id]
+        self.openai_api_base_url = selected["base_url"] if selected["configured"] else ""
+        self.openai_api_key = selected["api_key"] if selected["configured"] else ""
+        self._synced_openai_base_url = self.openai_api_base_url
+        self._synced_openai_key = self.openai_api_key
+
+    def _has_openai_channel(self) -> bool:
+        """判断当前是否有可用的官方协议渠道（含测试桩直接注入的 URL）。"""
+
+        candidates, _ = self._resolve_openai_channel_candidates()
+        return bool(candidates)
+
+    def _resolve_openai_channel_candidates(
+        self, channel: str | None = None
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """解析本次请求按顺序尝试的官方协议渠道列表及错误原因。"""
+
+        req = str(channel or "").strip()
+        req_lower = req.casefold()
+
+        # 兼容测试桩直接设置或修改 plugin.openai_api_base_url / openai_api_key
+        if (not req or req_lower == "auto") and (
+            not hasattr(self, "openai_primary_base_url")
+            or getattr(self, "openai_api_base_url", "")
+            != getattr(self, "_synced_openai_base_url", None)
+            or getattr(self, "openai_api_key", "")
+            != getattr(self, "_synced_openai_key", None)
+        ):
+            direct_url = (
+                str(getattr(self, "openai_api_base_url", "") or "").strip().rstrip("/")
+            )
+            direct_key = str(getattr(self, "openai_api_key", "") or "").strip()
+            if not direct_url:
+                return [], "openai_not_configured"
+            return [
+                {
+                    "id": getattr(self, "openai_active_channel", "primary") or "primary",
+                    "slot_label": "渠道 1",
+                    "name": self._infer_openai_channel_name("", direct_url, "当前渠道"),
+                    "base_url": direct_url,
+                    "api_key": direct_key,
+                    "configured": True,
+                    "has_key": bool(direct_key),
+                    "is_active": True,
+                }
+            ], None
+
+        channels = self._openai_channels()
+        by_id = {ch["id"]: ch for ch in channels}
+
+        if req and req_lower != "auto":
+            target: dict[str, Any] | None = None
+            if req_lower in ("primary", "1", "channel_1", "渠道1", "渠道 1", "主渠道"):
+                target = by_id["primary"]
+            elif req_lower in ("backup", "2", "channel_2", "渠道2", "渠道 2", "备选", "备选渠道"):
+                target = by_id["backup"]
+            else:
+                for ch in channels:
+                    if str(ch["name"]).strip().casefold() == req_lower:
+                        target = ch
+                        break
+            if target is None:
+                return [], "openai_channel_not_found"
+            if not target["configured"]:
+                return [], "openai_channel_not_configured"
+            return [target], None
+
+        active_id = (
+            str(getattr(self, "openai_active_channel", "primary") or "primary")
+            .strip()
+            .casefold()
+        )
+        if active_id not in by_id:
+            active_id = "primary"
+        other_id = "backup" if active_id == "primary" else "primary"
+        order = [by_id[active_id]]
+        if getattr(self, "openai_enable_fallback", True):
+            order.append(by_id[other_id])
+        configured = [ch for ch in order if ch["configured"]]
+        if not configured:
+            if any(ch["configured"] for ch in channels):
+                return [], "openai_channel_not_configured"
+            return [], "openai_not_configured"
+        return configured, None
+
+    def _sync_channel_labels(self) -> None:
+        """把渠道别名/自动识别名同步进 schema 的 openai_active_channel 下拉标签。"""
+
+        try:
+            schema_path = self._schema_path()
+            schema = json.loads(schema_path.read_text(encoding="utf-8-sig"))
+            node = schema.get("openai_active_channel")
+            if not isinstance(node, dict):
+                return
+            channels = self._openai_channels()
+            labels: list[str] = []
+            for ch in channels:
+                default_tag = "主用" if ch["id"] == "primary" else "备选"
+                display = ch["name"]
+                if display == ch["slot_label"]:
+                    labels.append(f"{ch['slot_label']}（{default_tag}）")
+                else:
+                    labels.append(f"{ch['slot_label']}（{display}）")
+            if node.get("labels") == labels:
+                return
+            node["labels"] = labels
+            tmp_path = schema_path.with_name(schema_path.name + ".tmp")
+            tmp_path.write_text(
+                json.dumps(schema, ensure_ascii=False, indent=4) + "\n",
+                encoding="utf-8",
+            )
+            tmp_path.replace(schema_path)
+            logger.debug(f"{LOG_TAG} 已同步官方协议渠道下拉标签 | {labels}")
+        except Exception as exc:
+            if not getattr(self, "_channel_label_warned", False):
+                self._channel_label_warned = True
+                logger.warning(
+                    f"{LOG_TAG} 同步官方协议渠道下拉标签失败（插件目录可能只读）: {exc!r}"
+                )
 
     # ------------------------------------------------------------------
     # 提示词转译：关闭时相关配置整块隐藏、且运行时完全不参与请求
@@ -1586,16 +1936,6 @@ class NAIGenerateImagePlugin(Star):
                 return slot
         return None
 
-    def _persist_active_slot(self, slot_id: str) -> None:
-        """把「正式生图启用槽位」写回插件配置；失败只告警。"""
-
-        try:
-            self._write_plugin_config({"active_artist_slot": str(slot_id)})
-            self.active_artist_slot = str(slot_id)
-            logger.info(f"{LOG_TAG} 正式生图槽位已切换为 {slot_id}")
-        except Exception as exc:
-            logger.warning(f"{LOG_TAG} 写入生效槽位失败: {exc!r}")
-
     def _migrate_legacy_data_dir(self) -> None:
         """把旧版工作目录下的数据整体迁移到 AstrBot 插件数据目录。"""
 
@@ -1648,8 +1988,9 @@ class NAIGenerateImagePlugin(Star):
         img_bytes: bytes,
         generation_parameters: dict[str, Any] | None,
         history_limit: int,
+        prompt: str | None = None,
     ) -> tuple[Path, Path | None, int]:
-        """同步写入图片和可选 YAML 参数，并按数量清理最旧记录。
+        """同步写入图片、提示词和可选 YAML 参数，并清理最旧记录。
 
         文件先写入同目录临时文件再原子替换，避免异常中断留下半份记录。
         只统计本插件生成的 ``nai_`` 图片；``history_limit=0`` 表示不清理。
@@ -1663,6 +2004,15 @@ class NAIGenerateImagePlugin(Star):
             image_temp_path.replace(image_path)
         finally:
             image_temp_path.unlink(missing_ok=True)
+
+        if prompt is not None:
+            prompt_path = image_path.with_suffix(".prompt.txt")
+            prompt_temp_path = history_dir / f".{prompt_path.name}.tmp"
+            try:
+                prompt_temp_path.write_text(prompt, encoding="utf-8")
+                prompt_temp_path.replace(prompt_path)
+            finally:
+                prompt_temp_path.unlink(missing_ok=True)
 
         parameters_path: Path | None = None
         if generation_parameters is not None:
@@ -1705,6 +2055,7 @@ class NAIGenerateImagePlugin(Star):
                     removed += 1
                 except FileNotFoundError:
                     continue
+                old_path.with_suffix(".prompt.txt").unlink(missing_ok=True)
                 old_path.with_suffix(".yaml").unlink(missing_ok=True)
                 # 同时删除同名参数文件，并兼容清理旧版本生成的 JSON 伴随文件。
                 old_path.with_suffix(".json").unlink(missing_ok=True)
@@ -1730,6 +2081,8 @@ class NAIGenerateImagePlugin(Star):
                 if getattr(self, "save_generation_parameters", False)
                 else None
             )
+            raw_prompt = generation_parameters.get("tag")
+            prompt_to_save = str(raw_prompt) if raw_prompt is not None else None
             # 锁覆盖写入和清理的完整事务，保证并发请求看到一致的历史数量。
             async with self._image_history_lock:
                 image_path, parameters_path, removed = await asyncio.to_thread(
@@ -1738,9 +2091,11 @@ class NAIGenerateImagePlugin(Star):
                     img_bytes,
                     parameters_to_save,
                     self.image_history_limit,
+                    prompt_to_save,
                 )
             logger.info(
                 f"{LOG_TAG} [history] 已保存 {image_path} | "
+                f"prompt={'ON' if prompt_to_save is not None else 'OFF'} "
                 f"parameters={parameters_path or 'OFF'} "
                 f"cleanup={removed} limit={self.image_history_limit}"
             )
@@ -1981,11 +2336,35 @@ class NAIGenerateImagePlugin(Star):
         except Exception as exc:
             logger.warning(f"{LOG_TAG} [initialize] 画风槽位初始化异常: {exc!r}")
 
+        # 1.55) 同步官方协议渠道名称到设置页的「当前启用渠道」下拉。
+        try:
+            await asyncio.to_thread(self._sync_channel_labels)
+        except Exception as exc:
+            logger.warning(f"{LOG_TAG} [initialize] 渠道标签同步异常: {exc!r}")
+
         # 1.6) 转译关闭时，把转译专属配置从设置页整块隐藏。
         try:
             await asyncio.to_thread(self._sync_translate_visibility)
         except Exception as exc:
             logger.warning(f"{LOG_TAG} [initialize] 转译配置显隐同步异常: {exc!r}")
+
+        # 1.7) 按开关切换内置 nai-prompting Skill（默认 SFW / 开启 NSFW）。
+        skill_changed = False
+        try:
+            skill_changed = await asyncio.to_thread(self._sync_prompt_skill_variant)
+        except Exception as exc:
+            logger.warning(f"{LOG_TAG} [initialize] 内置 Skill 同步异常: {exc!r}")
+        if skill_changed:
+            try:
+                from astrbot.core.computer.computer_client import (
+                    sync_skills_to_active_sandboxes,
+                )
+
+                await sync_skills_to_active_sandboxes()
+            except Exception as exc:
+                logger.debug(
+                    f"{LOG_TAG} [initialize] 沙箱 Skill 同步跳过或失败: {exc!r}"
+                )
 
         # 2) aiohttp session —— 失败也继续，至少把代理先起来
         #    trust_env：开启「绕过系统代理」时忽略环境变量代理，强制直连
@@ -2089,6 +2468,24 @@ class NAIGenerateImagePlugin(Star):
                 "NAI 测试面板：点数用量统计（按日期）",
             )
             self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/gallery",
+                self._test_panel_gallery,
+                ["POST"],
+                "NAI panel: browse saved images",
+            )
+            self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/gallery_image",
+                self._test_panel_gallery_image,
+                ["POST"],
+                "NAI panel: read one saved image",
+            )
+            self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/gallery_delete",
+                self._test_panel_gallery_delete,
+                ["POST"],
+                "NAI panel: delete one saved image",
+            )
+            self.context.register_web_api(
                 f"{PAGE_API_PREFIX}/slots",
                 self._test_panel_slots,
                 ["GET"],
@@ -2111,6 +2508,12 @@ class NAIGenerateImagePlugin(Star):
                 self._test_panel_grimoire_search,
                 ["POST"],
                 "NAI 测试面板：检索内置法典词库",
+            )
+            self.context.register_web_api(
+                f"{PAGE_API_PREFIX}/channel_switch",
+                self._test_panel_switch_channel,
+                ["POST"],
+                "NAI 测试面板：切换全局默认官方协议渠道",
             )
             logger.info(
                 f"{LOG_TAG} [initialize] 测试面板 Web API 已注册 | prefix={PAGE_API_PREFIX}"
@@ -2191,7 +2594,33 @@ class NAIGenerateImagePlugin(Star):
             self._outfit_cache_clear()
         logger.info(f"{LOG_TAG} [terminate] 阶段完成")
 
-    def _resolve_artists(self, style: str) -> str:
+    def _resolve_artists(
+        self,
+        style: str,
+        custom_artists: str | None = None,
+        *,
+        use_slot_artists: bool = True,
+    ) -> str:
+        """Resolve explicit artists, the active slot, then the style fallback.
+
+        Args:
+            style: Built-in style key used when no slot applies.
+            custom_artists: Request override; an empty string disables artists.
+            use_slot_artists: Whether to inherit the global slot.
+
+        Returns:
+            The artist string, including an explicitly configured empty string.
+        """
+        if custom_artists is not None:
+            return str(custom_artists)
+        if (
+            use_slot_artists
+            and self._artist_slots_enabled()
+            and hasattr(self, "active_artist_slot")
+        ):
+            slot = self._active_artist_slot()
+            if slot is not None:
+                return str(slot.get("artists") or "")
         if style == "custom":
             return self.custom_artists if self.custom_artists is not None else ""
         return DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
@@ -2349,25 +2778,6 @@ class NAIGenerateImagePlugin(Star):
             logger.info(f"{LOG_TAG} [openai_generate] 尺寸校正: {size} -> {normalized}")
         return normalized
 
-    def _openai_endpoint(self, target: str) -> str:
-        """拼接 OpenAI 兼容端点，兼容 base_url 是否带 ``/v1``。
-
-        Args:
-            target: "generations" 或 "edits"。
-
-        Returns:
-            完整端点 URL，例如 ``https://api1.syuan.org/v1/images/edits``。
-        """
-        base = self.openai_api_base_url.rstrip("/")
-        target = "edits" if target == "edits" else "generations"
-        if base.endswith(f"/images/{target}"):
-            return base
-        if re.search(r"/images/(?:generations|edits)$", base):
-            return re.sub(r"/images/(?:generations|edits)$", f"/images/{target}", base)
-        if re.search(r"/v1/?$", base) or "/v1/" in base:
-            return f"{base}/images/{target}"
-        return f"{base}/v1/images/{target}"
-
     def _openai_prompt(
         self,
         prompt: str,
@@ -2378,8 +2788,9 @@ class NAIGenerateImagePlugin(Star):
         """把画师串作为风格前缀拼进 OpenAI 兼容格式的 prompt。
 
         OpenAI 兼容格式没有独立的 artist 参数，画师串需要并入 prompt 文本。
-        ``custom`` 风格可用 ``custom_artists`` 覆盖（面板独立字段），否则用
-        插件配置的 ``self.custom_artists``；其余风格回退到对应预设。
+        Explicit artists override the global slot, including empty strings.
+        With no slot, custom style uses the configured artists and other styles
+        use their built-in presets.
 
         Args:
             prompt: 已转译/合并后的主体提示词。
@@ -2390,25 +2801,11 @@ class NAIGenerateImagePlugin(Star):
         Returns:
             拼接了画师串的最终 prompt 文本。
         """
-        if style == "custom":
-            artists = (
-                custom_artists if custom_artists is not None else self.custom_artists
+        artists = normalize_prompt(
+            self._resolve_artists(
+                style, custom_artists, use_slot_artists=use_slot_artists
             )
-            artists = normalize_prompt(artists or "")
-        else:
-            artists = normalize_prompt(
-                DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
-            )
-        # 槽位绑定的画师串优先级高于风格预设，但低于本次显式指定的画师串。
-        # 面板已按明确选中的槽位套用时传 use_slot_artists=False 关掉这层回退，
-        # 否则「该槽位画师串为空」会被全局生效槽位的画师串顶掉。
-        if use_slot_artists and custom_artists is None:
-            try:
-                slot_artists = self._slot_artists()
-            except Exception:
-                slot_artists = ""
-            if slot_artists:
-                artists = normalize_prompt(slot_artists)
+        )
         if not artists:
             return normalize_prompt(prompt)
         return normalize_prompt(f"{artists}, {prompt}")
@@ -2433,7 +2830,7 @@ class NAIGenerateImagePlugin(Star):
         Args:
             prompt: 用户原始提示词。
             style: NAI 画风键。
-            custom_artists: 单次自定义画师串，仅 ``custom`` 风格生效。
+            custom_artists: Request artist override, including an empty string.
             enable_template: 单次模板开关；None 时使用插件配置。
             enable_translate: 单次转译模式；None 时使用插件配置。
             apply_outfit: Whether to inherit standalone outfit defaults and cache.
@@ -2498,62 +2895,16 @@ class NAIGenerateImagePlugin(Star):
         director_caption: str | None = None,
         director_captions: Sequence[str] | None = None,
         characters: Sequence[tuple[str, float, float]] | None = None,
+        channel: str | None = None,
     ) -> tuple[list[bytes], str]:
-        """OpenAI 兼容格式生图（文生图 / 图生图 / 参考图 / 图片处理）。
-
-        对齐接口文档：高级参数统一放入 ``parameters`` 对象（§3.2/§10.2）；
-        带参考图时按 ``reference_mode`` 选择 ``vibe``（generations 的
-        ``reference_image_multiple``，§5）、``img2img``（``/v1/images/edits``
-        的 JSON ``image`` 字段，§4）或 ``director``（generations 的
-        ``director_reference_*`` 精准参考，§6）。vibe / director 支持一次
-        提交最多 8 张参考图（§5.2），五个数组按下标一一对应；``director_action``
-        对应 director-tools 图片处理（§8）；``characters`` 非空时附加多角色
-        坐标控制（§7）。对 408/429/502/503/504 按 2/4/8 秒指数退避选择性重试；
-        超时不自动重试（上游可能仍在生成并扣费）；400/401/403 默认不重
-        试，但错误文案提示"稍后重试"的瞬时故障除外。
-
-        Args:
-            prompt: 主体提示词（已合并画师串）。
-            size: NAI 尺寸键（竖图/方图/...）或像素尺寸 "WxH"。
-            n: 生成张数。
-            reference_image_path: 单张参考图本地路径（旧参数，与多图列表合并）。
-            reference_image_bytes: 单张参考图字节内容（旧参数，与多图列表合并）。
-            reference_image_paths: 多张参考图本地路径列表，最多取前 8 张。
-            reference_image_bytes_list: 多张参考图字节内容列表，优先于路径，
-                最多取前 8 张；img2img 仅使用第一张（§5.3 主输入图）。
-            strength: img2img 重绘强度、vibe/精准参考统一强度，0-1；被
-                reference_strengths 覆盖。vibe 默认 0.6，精准参考默认 1.0。
-            reference_strengths: 每张参考图的强度列表（vibe 的
-                reference_strength_multiple / 精准参考的
-                director_reference_strength_values），不足位数用 strength 默认值补齐。
-            noise: img2img 附加噪声强度，0-1。
-            steps / scale / sampler / noise_schedule / seed / negative:
-                高级参数，留 None 时使用插件全局配置。
-            model: 模型覆盖，默认 self.openai_api_model。
-            reference_mode: "vibe" / "img2img" / "director"，默认
-                self.openai_reference_mode。
-            director_action: director-tools 动作（bg-removal/lineart/sketch/
-                colorize/emotion/declutter），指定时 model 强制 director-tools。
-            director_caption: 精准参考描述（新文档 §8.4 的 base_caption），仅
-                允许 character / style / character&style，默认
-                self.openai_director_caption；被 director_captions 逐项覆盖。
-                精准参考仅支持 NAI 4.5 / NAI 5 模型，其他模型会自动切换为
-                nai-diffusion-4-5-full。
-            director_captions: 每张精准参考图的 base_caption 列表，非法值回退
-                director_caption / 插件配置。
-            characters: 多角色坐标列表 (提示词, x, y)，坐标 0-1（§7），
-                最多取前 6 个；仅对 generations 类请求生效。
-
-        Returns:
-            (images_bytes, reason) — reason 为 "ok" 或错误码。
-        """
+        """官方 /ai/ 协议生图（文生图 / 图生图 / 参考图 / 图片处理），支持主备渠道切换。"""
         import json
 
         import aiohttp
 
-        base = self.openai_api_base_url
-        if not base:
-            return [], "openai_not_configured"
+        candidates, resolve_err = self._resolve_openai_channel_candidates(channel)
+        if not candidates:
+            return [], resolve_err or "openai_not_configured"
         if not self._session:
             return [], "no_session"
 
@@ -2564,12 +2915,11 @@ class NAIGenerateImagePlugin(Star):
         except ValueError:
             target_w, target_h = 1024, 1024
 
-        # director-tools 图片处理：model / action 由动作唯一决定（§8）
+        # director-tools 图片处理：model / action 由动作唯一决定
         is_director = director_action in OPENAI_DIRECTOR_ACTIONS
-        starbridge = getattr(self, "openai_api_profile", "compatible") == "starbridge"
         starbridge_tool_model = (
             (model or self._slot_model() or self.openai_api_model or "").strip()
-            if starbridge and is_director
+            if is_director
             else None
         )
         model = (
@@ -2577,7 +2927,6 @@ class NAIGenerateImagePlugin(Star):
             if is_director
             else (model or self._slot_model() or self.openai_api_model or "").strip()
         )
-        api_key = self.openai_api_key
         timeout = aiohttp.ClientTimeout(total=self.request_timeout)
 
         # ==== 参考图收集：多图列表优先，兼容旧单图参数（§5.2 上限 8 张） ====
@@ -2791,15 +3140,24 @@ class NAIGenerateImagePlugin(Star):
         # 强度：reference_strengths 按下标逐张生效，缺位或非法值回退统一
         # strength 参数，仍缺失时用模式默认值补齐（vibe 默认 0.6、精准参考
         # 默认 1.0），保证数组与参考图严格等长。
+        # V5 精准参考支持 0–5（且 secondary 固定为 0），V4.5 / Vibe 为 0–1。
+        is_v5_director = (
+            ref_mode == "director"
+            and not is_director
+            and model.startswith("nai-diffusion-5-")
+        )
+        _ref_strength_max = 5.0 if is_v5_director else 1.0
         _strength_default = (
-            self.openai_director_strength
+            min(_ref_strength_max, self.openai_director_strength)
             if ref_mode == "director"
             else self.openai_vibe_strength
         )
         _scalar_strength: float | None = None
         if strength is not None:
             try:
-                _scalar_strength = round(max(0.0, min(1.0, float(strength))), 2)
+                _scalar_strength = round(
+                    max(0.0, min(_ref_strength_max, float(strength))), 2
+                )
             except (TypeError, ValueError):
                 _scalar_strength = None
         ref_strength_values: list[float] = []
@@ -2810,7 +3168,7 @@ class NAIGenerateImagePlugin(Star):
             if reference_strengths and i < len(reference_strengths):
                 try:
                     per_value = float(reference_strengths[i])
-                    if 0 <= per_value <= 1:
+                    if 0 <= per_value <= _ref_strength_max:
                         value = round(per_value, 2)
                 except (TypeError, ValueError):
                     pass
@@ -2851,30 +3209,17 @@ class NAIGenerateImagePlugin(Star):
             if noise is not None:
                 parameters["noise"] = max(0.0, min(1.0, float(noise)))
         elif ref_mode == "director" and ref_uris:
-            # 精准参考（新文档 §8）：五个 director_reference_* 数组严格等长、
-            # 按下标一一对应；参考图由服务端自动规范化（§8.6），客户端无需
-            # 预处理。information_extracted 固定 1.0：实测其他取值（如 0.7）
-            # 会被上游参数校验拒绝（HTTP 400），与 §8 各示例保持一致。
+            # 精准参考：五个 director_reference_* 数组严格等长、按下标一一对应；
+            # NAI 4.5 与 NAI 5 均直接走官方协议，不做自动回退路由。
+            # V5 上游契约固定 information_extracted=1、secondary_strength=0。
+            secondary_value = 0 if is_v5_director else self.openai_director_secondary_strength
             payload["action"] = "generate"
-            # 精准参考仅支持 NAI 4.5 / NAI 5 模型（实测），其余模型会被服务端
-            # 拒绝；当前模型不满足时自动切换到 4-5-full 以保证能力可用。
-            if (
-                not starbridge
-                and (model or "").strip().casefold() not in OPENAI_DIRECTOR_MODELS
-            ):
-                logger.info(
-                    f"{LOG_TAG} [openai_generate] 精准参考不支持当前模型 {model or '(none)'}"
-                    "（仅 4.5 / 5 系列），自动切换为 nai-diffusion-4-5-full"
-                )
-                model = "nai-diffusion-4-5-full"
-                payload["model"] = model
             parameters["director_reference_images"] = ref_uris
             parameters["director_reference_strength_values"] = ref_strength_values
-            # 次级特征强度（§8.5 推荐 0.35-0.7），默认取插件设置
             parameters["director_reference_secondary_strength_values"] = [
-                self.openai_director_secondary_strength
+                secondary_value
             ] * len(ref_uris)
-            parameters["director_reference_information_extracted"] = [1.0] * len(
+            parameters["director_reference_information_extracted"] = [1] * len(
                 ref_uris
             )
             parameters["director_reference_descriptions"] = [
@@ -2919,38 +3264,7 @@ class NAIGenerateImagePlugin(Star):
                 "use_order": True,
             }
         payload["parameters"] = parameters
-
-        endpoint = self._openai_endpoint("edits" if is_edit else "generations")
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        requested_count = payload["n"]
-        request_options = {}
-        if starbridge:
-            try:
-                prepared = await prepare_starbridge_request(
-                    self._session,
-                    base,
-                    payload,
-                    headers=headers,
-                    timeout=timeout,
-                    image_model=starbridge_tool_model,
-                )
-            except asyncio.TimeoutError:
-                return (
-                    [],
-                    "starbridge | 参考图编码超时，未继续生图；编码可能已计费，请确认后再试。",
-                )
-            except StarbridgeError as exc:
-                return [], "starbridge | " + str(exc)
-            except (aiohttp.ClientError, OSError):
-                return (
-                    [],
-                    "starbridge | 参考图处理请求中断，未自动重试；请确认编码费用后再试。",
-                )
-            endpoint, payload = prepared.endpoint, prepared.payload
-            headers["Accept"] = "application/json"
-            request_options["allow_redirects"] = False
+        base_payload = payload
 
         if is_director:
             mode_desc = f"director/{director_action}"
@@ -2962,239 +3276,278 @@ class NAIGenerateImagePlugin(Star):
             mode_desc = "vibe"
         else:
             mode_desc = "t2i"
-        logger.info(
-            f"{LOG_TAG} [openai_generate] endpoint={endpoint} model={model or '(none)'} "
-            f"mode={mode_desc} size={size} n={requested_count} steps={_steps} scale={_scale} "
-            f"seed={_seed if _seed >= 0 else 'random'} chars={len(char_entries)} "
-            f"refs={len(ref_uris)} ref_bytes={sum(len(b) for b in ref_bytes_list)}"
-        )
 
-        # ==== 发送请求：可重试状态码按 2/4/8 秒指数退避（§14）；超时不重试 ====
-        status = 0
-        text = ""
-        # Native generation and Vibe encoding are billable POSTs. A failed
-        # delivery must not silently submit another paid request.
-        max_attempts = 1 if starbridge else self.openai_max_retries + 1
-        for attempt in range(1, max_attempts + 1):
-            if attempt > 1:
-                delay = OPENAI_RETRY_DELAYS[
-                    min(attempt - 2, len(OPENAI_RETRY_DELAYS) - 1)
-                ]
-                logger.info(
-                    f"{LOG_TAG} [openai_generate] 第 {attempt - 1}/{self.openai_max_retries} "
-                    f"次重试，等待 {delay:g}s（last_status={status or 'timeout'}）"
+        requested_count = base_payload["n"]
+        last_reason = "openai_not_configured"
+        vibe_will_charge = bool(
+            ref_uris and ref_mode == "vibe" and not is_director and not is_edit
+        )
+        _fallback_statuses = {401, 403, 429, 502, 503}
+
+        for cand_idx, cand in enumerate(candidates):
+            has_next = cand_idx + 1 < len(candidates)
+            cand_base = cand["base_url"]
+            cand_key = cand["api_key"]
+            cand_name = cand["name"]
+            headers = {"Content-Type": "application/json"}
+            if cand_key:
+                headers["Authorization"] = f"Bearer {cand_key}"
+
+            try:
+                prepared = await prepare_starbridge_request(
+                    self._session,
+                    cand_base,
+                    base_payload,
+                    headers=headers,
+                    timeout=timeout,
+                    image_model=starbridge_tool_model,
                 )
-                await asyncio.sleep(delay)
+            except asyncio.TimeoutError:
+                return (
+                    [],
+                    "starbridge | 参考图编码超时，未继续生图；编码可能已计费，请确认后再试。",
+                )
+            except StarbridgeError as exc:
+                last_reason = "starbridge | " + str(exc)
+                can_fallback = (
+                    has_next
+                    and not getattr(exc, "charged", False)
+                    and (
+                        getattr(exc, "status_code", None) in _fallback_statuses
+                        or "站点地址" in str(exc)
+                    )
+                )
+                if can_fallback:
+                    next_name = candidates[cand_idx + 1]["name"]
+                    logger.warning(
+                        f"{LOG_TAG} [openai_generate] 渠道 {cand_name} 准备阶段失败"
+                        f"（{exc}），自动切换备选渠道 {next_name}"
+                    )
+                    continue
+                return [], last_reason
+            except aiohttp.ClientConnectorError as exc:
+                last_reason = (
+                    "starbridge | 参考图处理请求中断，未自动重试；请确认编码费用后再试。"
+                )
+                if has_next and not vibe_will_charge:
+                    next_name = candidates[cand_idx + 1]["name"]
+                    logger.warning(
+                        f"{LOG_TAG} [openai_generate] 渠道 {cand_name} 连接失败"
+                        f"（{exc}），自动切换备选渠道 {next_name}"
+                    )
+                    continue
+                return [], last_reason
+            except (aiohttp.ClientError, OSError):
+                return (
+                    [],
+                    "starbridge | 参考图处理请求中断，未自动重试；请确认编码费用后再试。",
+                )
+
+            endpoint, payload = prepared.endpoint, prepared.payload
+            headers["Accept"] = "application/json"
+
+            logger.info(
+                f"{LOG_TAG} [openai_generate] channel={cand_name}({cand['id']}) "
+                f"endpoint={endpoint} model={model or '(none)'} "
+                f"mode={mode_desc} size={size} n={requested_count} steps={_steps} scale={_scale} "
+                f"seed={_seed if _seed >= 0 else 'random'} chars={len(char_entries)} "
+                f"refs={len(ref_uris)} ref_bytes={sum(len(b) for b in ref_bytes_list)}"
+            )
+
+            # ==== 发送请求：付费 POST 不自动重试，也不跟随重定向 ====
+            status = 0
+            text = ""
+            connect_failed = False
             try:
                 async with self._session.post(
                     endpoint,
                     json=payload,
                     headers=headers,
                     timeout=timeout,
-                    **request_options,
+                    allow_redirects=False,
                 ) as resp:
                     text = await resp.text()
                     status = resp.status
             except asyncio.TimeoutError:
-                # 超时不自动重试：生图请求超时后上游通常仍在继续生成并照常
-                # 扣费，自动重试会导致一次需求被多次扣费。直接失败并提示
-                # 用户稍后手动重试。
                 status, text = 0, ""
                 logger.warning(
-                    f"{LOG_TAG} [openai_generate] 请求超时（第 {attempt}/{max_attempts} 次），"
-                    "上游可能仍在生成（可能已扣费），不再自动重试"
+                    f"{LOG_TAG} [openai_generate] 请求超时，上游可能仍在生成（可能已扣费），不再自动重试"
                 )
-                break
+            except aiohttp.ClientConnectorError as exc:
+                connect_failed = True
+                logger.warning(
+                    f"{LOG_TAG} [openai_generate] 渠道 {cand_name} 连接失败: "
+                    f"{type(exc).__name__}: {exc}"
+                )
             except Exception as exc:
                 logger.warning(
                     f"{LOG_TAG} [openai_generate] 异常: {type(exc).__name__}: {exc}"
                 )
                 return [], "exception"
-            if status < 400:
-                break
-            retryable = status in OPENAI_RETRYABLE_STATUS
-            if not retryable:
-                # 网关会把上游瞬时故障包装成 400（bad_response_status_code），
-                # 错误文案明确提示"请稍后重试"时同样按可重试处理。
-                _low = text.casefold()
-                retryable = any(marker in _low for marker in OPENAI_TRANSIENT_MARKERS)
-                if retryable:
-                    logger.info(
-                        f"{LOG_TAG} [openai_generate] HTTP {status} 错误文案提示稍后重试，"
-                        "按可重试处理"
-                    )
-            if not retryable:
-                break
-            logger.warning(
-                f"{LOG_TAG} [openai_generate] HTTP {status}（第 {attempt}/{max_attempts} 次）| "
-                f"body={text[:300]}"
-            )
 
-        if status == 0:
-            return [], "timeout"
-        if starbridge and 300 <= status < 400:
-            return [], "starbridge | 接口发生重定向，请填写最终的 HTTPS 站点地址。"
-        if status >= 400:
-            # 尽量提取上游 error.message，透传给用户（如"降低尺寸、步数"建议）
-            err_msg = ""
-            try:
-                _err = json.loads(text)
-                if isinstance(_err, dict):
-                    _err_item = _err.get("error")
-                    if isinstance(_err_item, dict):
-                        err_msg = str(_err_item.get("message") or "").strip()
-                    elif isinstance(_err_item, str):
-                        err_msg = _err_item.strip()
-                    if starbridge:
+            if connect_failed:
+                last_reason = "exception"
+                if has_next and not vibe_will_charge:
+                    next_name = candidates[cand_idx + 1]["name"]
+                    logger.warning(
+                        f"{LOG_TAG} [openai_generate] 渠道 {cand_name} 无法连接，"
+                        f"自动切换备选渠道 {next_name}"
+                    )
+                    continue
+                return [], last_reason
+            if status == 0:
+                return [], "timeout"
+            if 300 <= status < 400:
+                return [], "starbridge | 接口发生重定向，请填写最终的 HTTPS 站点地址。"
+            if status >= 400:
+                err_msg = ""
+                try:
+                    _err = json.loads(text)
+                    if isinstance(_err, dict):
                         err_msg = native_error(_err, status)
-            except Exception:
-                pass
-            reason = f"http_{status}"
-            if err_msg:
-                reason += f" | {err_msg[:200]}"
-            # 精准参考（§6）按文档格式提交仍被上游 400 拒绝：通常是该 Key/中转
-            # 未开通精准参考能力，单独标记以便给出针对性提示。
-            if (
-                status == 400
-                and ref_uris
-                and ref_mode == "director"
-                and not director_action
-                and not starbridge
-            ):
-                reason = "director_ref_rejected"
+                except Exception:
+                    pass
+                reason = f"http_{status}"
                 if err_msg:
                     reason += f" | {err_msg[:200]}"
-            logger.warning(
-                f"{LOG_TAG} [openai_generate] HTTP {status} | body={text[:300]}"
-            )
-            return [], reason
-
-        # 手动解析 JSON：上游异常时可能返回 text/html 页面，resp.json()
-        # 会因 mimetype 不匹配抛 ContentTypeError，这里改为读取文本解析。
-        try:
-            _data = json.loads(text)
-        except Exception:
-            logger.warning(
-                f"{LOG_TAG} [openai_generate] 响应非 JSON（status={status}） | "
-                f"body={text[:300]}"
-            )
-            return [], "invalid_response"
-
-        if starbridge:
-            _data = normalize_starbridge_response(_data)
-        items = _data.get("data") if isinstance(_data, dict) else []
-        if not isinstance(items, list) or not items:
-            return [], "empty_response"
-
-        images: list[bytes] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            b64 = str(item.get("b64_json") or "").strip()
-            url = str(item.get("url") or "").strip()
-            if b64:
-                # 文档要求 b64_json 不带 data URI 前缀（§12），但部分中转会
-                # 原样透传 data:image/...;base64, 前缀，这里兼容两种情况。
-                if b64.startswith("data:"):
-                    b64 = b64.split(",", 1)[-1]
-                try:
-                    decoded = base64.b64decode(b64)
-                    if decoded:
-                        images.append(decoded)
-                    else:
-                        logger.warning(
-                            f"{LOG_TAG} [openai_generate] b64_json 解码结果为空"
-                        )
-                except Exception as exc:
+                logger.warning(
+                    f"{LOG_TAG} [openai_generate] HTTP {status} | channel={cand_name} | body={text[:300]}"
+                )
+                last_reason = reason
+                if has_next and not vibe_will_charge and status in _fallback_statuses:
+                    next_name = candidates[cand_idx + 1]["name"]
                     logger.warning(
-                        f"{LOG_TAG} [openai_generate] b64_json 解码失败: {type(exc).__name__}"
+                        f"{LOG_TAG} [openai_generate] 渠道 {cand_name} 返回 HTTP {status}，"
+                        f"自动切换备选渠道 {next_name}"
                     )
-            elif url:
-                if url.startswith("data:"):
+                    continue
+                return [], reason
+
+            # 手动解析 JSON：上游异常时可能返回 text/html 页面，resp.json()
+            # 会因 mimetype 不匹配抛 ContentTypeError，这里改为读取文本解析。
+            try:
+                _data = json.loads(text)
+            except Exception:
+                logger.warning(
+                    f"{LOG_TAG} [openai_generate] 响应非 JSON（status={status}） | "
+                    f"body={text[:300]}"
+                )
+                return [], "invalid_response"
+
+            _data = normalize_starbridge_response(_data)
+            items = _data.get("data") if isinstance(_data, dict) else []
+            if not isinstance(items, list) or not items:
+                return [], "empty_response"
+
+            images: list[bytes] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                b64 = str(item.get("b64_json") or "").strip()
+                url = str(item.get("url") or "").strip()
+                if b64:
+                    # 文档要求 b64_json 不带 data URI 前缀（§12），但部分中转会
+                    # 原样透传 data:image/...;base64, 前缀，这里兼容两种情况。
+                    if b64.startswith("data:"):
+                        b64 = b64.split(",", 1)[-1]
                     try:
-                        decoded = base64.b64decode(url.split(",", 1)[-1])
+                        decoded = base64.b64decode(b64)
                         if decoded:
                             images.append(decoded)
                         else:
                             logger.warning(
-                                f"{LOG_TAG} [openai_generate] data URI 内容为空"
+                                f"{LOG_TAG} [openai_generate] b64_json 解码结果为空"
                             )
                     except Exception as exc:
                         logger.warning(
-                            f"{LOG_TAG} [openai_generate] data URI 解码失败: "
-                            f"{type(exc).__name__}"
+                            f"{LOG_TAG} [openai_generate] b64_json 解码失败: {type(exc).__name__}"
                         )
-                    continue
-                try:
-                    async with self._session.get(
-                        url, timeout=aiohttp.ClientTimeout(total=60)
-                    ) as dl_resp:
-                        if dl_resp.status == 200:
-                            downloaded = await dl_resp.read()
-                            if downloaded:
-                                images.append(downloaded)
+                elif url:
+                    if url.startswith("data:"):
+                        try:
+                            decoded = base64.b64decode(url.split(",", 1)[-1])
+                            if decoded:
+                                images.append(decoded)
                             else:
                                 logger.warning(
-                                    f"{LOG_TAG} [openai_generate] url 下载内容为空"
+                                    f"{LOG_TAG} [openai_generate] data URI 内容为空"
                                 )
-                except Exception as exc:
-                    logger.warning(
-                        f"{LOG_TAG} [openai_generate] 下载 url 失败: {type(exc).__name__}"
-                    )
-        if images:
-            # OpenAI 兼容端点的实际计费由中转站决定，这里按像素画幅推断档位，
-            # 仅作为用量统计的估算值（与直连档位表口径不同，分开记录）。
-            _openai_size = str(payload.get("size") or size or "")
-            _estimated_cost = estimate_openai_cost(_openai_size, model)
-            # 历史归档与直连模式保持一致：所有成功出图的调用点（聊天指令、
-            # LLM 工具、陪伴直连、测试面板、本地代理）都会走到这里，因此
-            # 只需在 _openai_generate 内统一归档一次。
-            generation_parameters: dict[str, Any] = {
-                "tag": prompt,
-                "model": str(model or ""),
-                "size": _openai_size,
-                "steps": _steps,
-                "scale": _scale,
-                "sampler": _sampler,
-                "noise_schedule": _noise_schedule,
-                "negative": _negative,
-                "seed": _seed if _seed >= 0 else "random",
-                "mode": mode_desc,
-                "transport": "openai",
-                "estimated_cost": _estimated_cost,
-            }
-            if starbridge:
-                generation_parameters["api_profile"] = "starbridge"
-                generation_parameters["seed"] = payload.get("parameters", {}).get(
-                    "seed", "random"
+                        except Exception as exc:
+                            logger.warning(
+                                f"{LOG_TAG} [openai_generate] data URI 解码失败: "
+                                f"{type(exc).__name__}"
+                            )
+                        continue
+                    try:
+                        async with self._session.get(
+                            url, timeout=aiohttp.ClientTimeout(total=60)
+                        ) as dl_resp:
+                            if dl_resp.status == 200:
+                                downloaded = await dl_resp.read()
+                                if downloaded:
+                                    images.append(downloaded)
+                                else:
+                                    logger.warning(
+                                        f"{LOG_TAG} [openai_generate] url 下载内容为空"
+                                    )
+                    except Exception as exc:
+                        logger.warning(
+                            f"{LOG_TAG} [openai_generate] 下载 url 失败: {type(exc).__name__}"
+                        )
+            if images:
+                # OpenAI 兼容端点的实际计费由中转站决定，这里按像素画幅推断档位，
+                # 仅作为用量统计的估算值（与直连档位表口径不同，分开记录）。
+                _openai_size = str(payload.get("size") or size or "")
+                _estimated_cost = estimate_openai_cost(_openai_size, model)
+                # 历史归档与直连模式保持一致：所有成功出图的调用点（聊天指令、
+                # LLM 工具、陪伴直连、测试面板、本地代理）都会走到这里，因此
+                # 只需在 _openai_generate 内统一归档一次。
+                generation_parameters: dict[str, Any] = {
+                    "tag": prompt,
+                    "model": str(model or ""),
+                    "size": _openai_size,
+                    "steps": _steps,
+                    "scale": _scale,
+                    "sampler": _sampler,
+                    "noise_schedule": _noise_schedule,
+                    "negative": _negative,
+                    "seed": payload.get("parameters", {}).get("seed", "random"),
+                    "mode": mode_desc,
+                    "transport": "openai",
+                    "api_profile": "starbridge",
+                    "api_channel": cand_name,
+                    "api_channel_id": cand["id"],
+                    "estimated_cost": _estimated_cost,
+                }
+                if ref_uris:
+                    if is_director:
+                        reference_mode_label = f"director-tools/{director_action}"
+                    elif is_edit:
+                        reference_mode_label = "img2img"
+                    else:
+                        reference_mode_label = ref_mode
+                    generation_parameters["reference_mode"] = reference_mode_label
+                    generation_parameters["reference_count"] = len(ref_uris)
+                    if not is_director:
+                        generation_parameters["reference_strengths"] = ref_strength_values
+                if char_entries:
+                    generation_parameters["characters"] = [
+                        {"prompt": c_prompt, "x": c_x, "y": c_y}
+                        for c_prompt, c_x, c_y in char_entries
+                    ]
+                for img_bytes in images:
+                    await self._archive_generated_image(img_bytes, generation_parameters)
+                await self._record_usage_stat(
+                    _estimated_cost * len(images),
+                    count=len(images),
+                    transport="openai",
+                    model=str(model or ""),
+                    size=_openai_size,
                 )
-            if ref_uris:
-                if is_director:
-                    reference_mode_label = f"director-tools/{director_action}"
-                elif is_edit:
-                    reference_mode_label = "img2img"
-                else:
-                    reference_mode_label = ref_mode
-                generation_parameters["reference_mode"] = reference_mode_label
-                generation_parameters["reference_count"] = len(ref_uris)
-                if not is_director:
-                    generation_parameters["reference_strengths"] = ref_strength_values
-            if char_entries:
-                generation_parameters["characters"] = [
-                    {"prompt": c_prompt, "x": c_x, "y": c_y}
-                    for c_prompt, c_x, c_y in char_entries
-                ]
-            for img_bytes in images:
-                await self._archive_generated_image(img_bytes, generation_parameters)
-            await self._record_usage_stat(
-                _estimated_cost * len(images),
-                count=len(images),
-                transport="openai",
-                model=str(model or ""),
-                size=_openai_size,
-            )
-            return images, "ok"
-        return [], "empty_response"
+                return images, "ok"
+            return [], "empty_response"
+
+        return [], last_reason
 
     async def _generate_one_custom(
         self,
@@ -3255,15 +3608,7 @@ class NAIGenerateImagePlugin(Star):
             enable_translate if enable_translate is not None else self.translate_mode
         )
 
-        # artists 解析：自定义风格允许空画师串（不强制回退预设）
-        if style == "custom":
-            _artists = (
-                custom_artists if custom_artists is not None else self.custom_artists
-            )
-            if _artists is None:
-                _artists = ""
-        else:
-            _artists = DEFAULT_ARTISTS.get(style, DEFAULT_ARTISTS["vertical"])
+        _artists = self._resolve_artists(style, custom_artists, use_slot_artists=False)
 
         # character_preset
         _char_preset = (
@@ -3660,6 +4005,83 @@ class NAIGenerateImagePlugin(Star):
             logger.warning(f"{LOG_TAG} [panel_cache] 加载失败: {e!r}")
             return json_response({"status": "ok", "data": None})
 
+    async def _test_panel_gallery(self) -> Any:
+        """Return a page of thumbnails from the saved image history.
+
+        Returns:
+            Gallery records and whether new images are being archived.
+        """
+        try:
+            body = await web_request.json(default={})
+            if not isinstance(body, dict):
+                raise ValueError("Expected an object")
+            offset = max(0, int(body.get("offset", 0)))
+            limit = max(1, min(24, int(body.get("limit", 12))))
+            raw_query = body.get("query", "")
+            if raw_query is None:
+                raw_query = ""
+            if not isinstance(raw_query, str):
+                raise ValueError("Expected a string query")
+            query = raw_query.strip()[:120]
+        except (TypeError, ValueError, OverflowError):
+            return error_response("画廊分页参数无效", status_code=400)
+        try:
+            data = await asyncio.to_thread(
+                list_gallery_images,
+                self._get_image_history_dir(),
+                offset,
+                limit,
+                query,
+            )
+        except OSError as exc:
+            logger.warning(f"{LOG_TAG} [gallery] Failed to list saved images: {exc!r}")
+            return error_response("读取画廊失败，请稍后重试", status_code=500)
+        data["saving_enabled"] = bool(getattr(self, "save_image_history", True))
+        return json_response({"status": "ok", "data": data})
+
+    async def _test_panel_gallery_image(self) -> Any:
+        """Return an original image from the saved image history.
+
+        Returns:
+            Image content or a validation/not-found response.
+        """
+        try:
+            body = await web_request.json(default={})
+            if not isinstance(body, dict) or not isinstance(body.get("name"), str):
+                raise ValueError("Expected an image filename")
+            data = await asyncio.to_thread(
+                read_gallery_image, self._get_image_history_dir(), body["name"]
+            )
+        except FileNotFoundError:
+            return error_response("图片已不存在，请刷新画廊", status_code=404)
+        except (TypeError, ValueError):
+            return error_response("图片名称或格式无效", status_code=400)
+        except OSError as exc:
+            logger.warning(f"{LOG_TAG} [gallery] Failed to read saved image: {exc!r}")
+            return error_response("读取原图失败，请稍后重试", status_code=500)
+        return json_response({"status": "ok", "data": data})
+
+    async def _test_panel_gallery_delete(self) -> Any:
+        """Delete one saved image and its sidecars from the image history."""
+        try:
+            body = await web_request.json(default={})
+            if not isinstance(body, dict) or not isinstance(body.get("name"), str):
+                raise ValueError("Expected an image filename")
+            async with self._image_history_lock:
+                deleted = await asyncio.to_thread(
+                    delete_gallery_image, self._get_image_history_dir(), body["name"]
+                )
+        except FileNotFoundError:
+            return error_response("图片已不存在，请刷新画廊", status_code=404)
+        except (TypeError, ValueError):
+            return error_response("图片名称或格式无效", status_code=400)
+        except OSError as exc:
+            logger.warning(
+                f"{LOG_TAG} [gallery] Failed to delete saved image: {exc!r}"
+            )
+            return error_response("删除图片失败，请稍后重试", status_code=500)
+        return json_response({"status": "ok", "data": {"deleted": deleted}})
+
     async def _test_panel_usage(self) -> Any:
         """Web API: 点数用量统计（7/30/90 日窗口 + 90 日逐日序列）。
 
@@ -3738,14 +4160,14 @@ class NAIGenerateImagePlugin(Star):
         if not isinstance(raw_slots, list) or not raw_slots:
             return error_response("slots 必须是非空数组", status_code=400)
         try:
-            await asyncio.to_thread(self._save_artist_slots, raw_slots)
+            await asyncio.to_thread(
+                self._save_artist_slots,
+                raw_slots,
+                active_slot_id=body.get("active_slot_id"),
+            )
         except Exception as exc:
             logger.warning(f"{LOG_TAG} [panel:slots] 保存失败: {exc!r}")
             return error_response(f"保存槽位失败: {exc!r}", status_code=400)
-
-        active = body.get("active_slot_id")
-        if active not in (None, ""):
-            await asyncio.to_thread(self._persist_active_slot, str(active))
 
         slots = await asyncio.to_thread(self._load_artist_slots)
         logger.info(
@@ -3794,14 +4216,14 @@ class NAIGenerateImagePlugin(Star):
         if not isinstance(body, dict):
             body = {}
         query = str(body.get("query") or "").strip()
+        model = str(body.get("model") or "").strip()
+        model_ver = normalize_model_ver(model) if model else self._active_model_ver()
         try:
             limit = int(body.get("limit") or 12)
         except (TypeError, ValueError):
             limit = 12
         try:
-            hits = await asyncio.to_thread(
-                search_grimoire, query, limit, self._active_model_ver()
-            )
+            hits = await asyncio.to_thread(search_grimoire, query, limit, model_ver)
         except Exception as exc:
             logger.warning(f"{LOG_TAG} [panel:grimoire] 检索失败: {exc!r}")
             return error_response(f"检索失败: {exc!r}", status_code=500)
@@ -3810,7 +4232,7 @@ class NAIGenerateImagePlugin(Star):
                 "status": "ok",
                 "data": {
                     "items": hits,
-                    "model_ver": self._active_model_ver(),
+                    "model_ver": model_ver,
                     "total_db": 19663,
                 },
             }
@@ -3818,6 +4240,25 @@ class NAIGenerateImagePlugin(Star):
 
     async def _test_panel_get_config(self) -> Any:
         """Web API: 返回当前插件配置（脱敏 token）。"""
+        await asyncio.to_thread(self._sync_channel_labels)
+        channels = [
+            {
+                "id": ch["id"],
+                "slot_label": ch["slot_label"],
+                "name": ch["name"],
+                "base_url": ch["base_url"],
+                "configured": ch["configured"],
+                "has_key": ch["has_key"],
+                "is_active": ch["is_active"],
+            }
+            for ch in self._openai_channels()
+        ]
+        active_ch = next((ch for ch in channels if ch["is_active"]), channels[0])
+        openai_available = (
+            any(ch["configured"] and ch["has_key"] for ch in channels)
+            if getattr(self, "openai_enable_fallback", True)
+            else bool(active_ch["configured"] and active_ch["has_key"])
+        )
         return json_response(
             {
                 "image_gen_key": "已配置" if self.image_gen_key else "未配置",
@@ -3856,10 +4297,15 @@ class NAIGenerateImagePlugin(Star):
                 "image_size_options": IMAGE_SIZES,
                 "default_negative": DEFAULT_NEGATIVE,
                 "openai_api_base_url": self.openai_api_base_url or "未配置",
-                "openai_api_profile": getattr(self, "openai_api_profile", "compatible"),
+                "openai_api_profile": "starbridge",
                 "openai_api_model": self.openai_api_model or "未配置",
-                "openai_available": bool(
-                    self.openai_api_base_url and self.openai_api_key
+                "openai_available": openai_available,
+                "openai_channels": channels,
+                "openai_active_channel": getattr(
+                    self, "openai_active_channel", "primary"
+                ),
+                "openai_enable_fallback": getattr(
+                    self, "openai_enable_fallback", True
                 ),
                 "openai_reference_mode": self.openai_reference_mode,
                 "openai_director_caption": self.openai_director_caption,
@@ -3872,6 +4318,65 @@ class NAIGenerateImagePlugin(Star):
                 "openai_models": OPENAI_COMPATIBLE_MODELS,
                 "openai_director_actions": OPENAI_DIRECTOR_ACTIONS,
                 "call_mode": self.call_mode,
+            }
+        )
+
+    async def _test_panel_switch_channel(self) -> Any:
+        """Web API: 切换全局默认官方协议渠道（写入插件配置）。"""
+        try:
+            body = await web_request.json(default={})
+        except Exception:
+            return error_response("请求体解析失败", status_code=400)
+        if not isinstance(body, dict):
+            return error_response("请求体格式错误", status_code=400)
+
+        target = str(body.get("channel") or "").strip().casefold()
+        if target not in ("primary", "backup"):
+            return error_response("channel 必须是 primary 或 backup", status_code=400)
+
+        channels_by_id = {ch["id"]: ch for ch in self._openai_channels()}
+        if not channels_by_id[target]["configured"]:
+            return error_response(
+                f"{channels_by_id[target]['name']} 尚未配置接口地址，请先在插件设置中填写",
+                status_code=400,
+            )
+
+        try:
+            await asyncio.to_thread(
+                self._write_plugin_config, {"openai_active_channel": target}
+            )
+            self.openai_active_channel = target
+            self._refresh_active_openai_attributes()
+            await asyncio.to_thread(self._sync_channel_labels)
+        except Exception as exc:
+            logger.warning(f"{LOG_TAG} [panel:channel_switch] 切换失败: {exc!r}")
+            return error_response(f"切换默认渠道失败: {exc!r}", status_code=500)
+
+        channels = [
+            {
+                "id": ch["id"],
+                "slot_label": ch["slot_label"],
+                "name": ch["name"],
+                "base_url": ch["base_url"],
+                "configured": ch["configured"],
+                "has_key": ch["has_key"],
+                "is_active": ch["is_active"],
+            }
+            for ch in self._openai_channels()
+        ]
+        active_ch = next((ch for ch in channels if ch["is_active"]), channels[0])
+        logger.info(
+            f"{LOG_TAG} [panel:channel_switch] 全局默认渠道已切换为 "
+            f"{active_ch['name']}({target}) | url={active_ch['base_url']}"
+        )
+        return json_response(
+            {
+                "status": "ok",
+                "data": {
+                    "openai_active_channel": target,
+                    "openai_api_base_url": self.openai_api_base_url or "未配置",
+                    "openai_channels": channels,
+                },
             }
         )
 
@@ -4035,9 +4540,11 @@ class NAIGenerateImagePlugin(Star):
         if not nai_prompt and not nl_prompt and not director_action:
             return error_response("请至少填写一个提示词框", status_code=400)
 
-        if not self.openai_api_base_url:
+        channel = str(body.get("channel") or "").strip() or None
+        candidates, resolve_err = self._resolve_openai_channel_candidates(channel)
+        if not candidates:
             return error_response(
-                "未配置当前生图服务的接口地址，请在插件设置中选择对应服务并填写地址。",
+                _format_generate_error(resolve_err or "openai_not_configured"),
                 status_code=400,
             )
 
@@ -4091,8 +4598,8 @@ class NAIGenerateImagePlugin(Star):
             except (TypeError, ValueError):
                 strength = None
 
-        # 逐图参考强度（vibe / 精准参考）：与参考图按下标对应，0-1。
-        # 非法项保留 None 占位，避免后面的参考图强度整体前移。
+        # 逐图参考强度（vibe / 精准参考）：与参考图按下标对应。
+        # V5 精准参考支持 0-5，其余模式 0-1；非法项保留 None 占位，避免偏移。
         reference_strengths: list[float | None] | None = None
         raw_strengths = body.get("reference_strengths")
         if isinstance(raw_strengths, (list, tuple)):
@@ -4103,7 +4610,7 @@ class NAIGenerateImagePlugin(Star):
                 except (TypeError, ValueError):
                     parsed_strengths.append(None)
                     continue
-                parsed_strengths.append(round(value, 2) if 0 <= value <= 1 else None)
+                parsed_strengths.append(round(value, 2) if 0 <= value <= 5 else None)
             reference_strengths = parsed_strengths or None
 
         noise: float | None = None
@@ -4250,6 +4757,7 @@ class NAIGenerateImagePlugin(Star):
                 director_caption=director_caption,
                 director_captions=director_captions,
                 characters=characters,
+                channel=channel,
             )
         except Exception as exc:
             logger.warning(
@@ -5001,21 +5509,7 @@ class NAIGenerateImagePlugin(Star):
             )
         full_prompt = normalize_prompt(full_prompt)
 
-        # 自定义风格允许空画师串（不强制回退预设）。
-        # 优先级：本次显式指定 > 槽位绑定 > 自定义/风格预设。
-        slot_artists = self._slot_artists()
-        if custom_artists is not None and str(custom_artists).strip():
-            artists = str(custom_artists)
-        elif slot_artists:
-            artists = slot_artists
-        elif style == "custom":
-            artists = (
-                custom_artists if custom_artists is not None else self.custom_artists
-            )
-            if artists is None:
-                artists = ""
-        else:
-            artists = self._resolve_artists(style)
+        artists = self._resolve_artists(style, custom_artists)
 
         logger.info(
             f"{LOG_TAG} [generate] 开始 | style={style} size={size} | "
@@ -5215,7 +5709,7 @@ class NAIGenerateImagePlugin(Star):
         # 按调用模式校验所需凭据
         missing = ""
         if self.call_mode == "openai":
-            if not self.openai_api_base_url:
+            if not self._has_openai_channel():
                 missing = "当前生图服务的接口地址"
         else:
             if not self.image_gen_key:
@@ -5285,6 +5779,9 @@ class NAIGenerateImagePlugin(Star):
 
         try:
             if self.call_mode == "openai":
+                prompt, _, _ = await self._prepare_openai_prompt(
+                    prompt, self.image_style
+                )
                 images, reason = await self._openai_generate(
                     prompt,
                     size,
@@ -5366,7 +5863,7 @@ class NAIGenerateImagePlugin(Star):
         # 按调用模式校验所需凭据
         missing = ""
         if self.call_mode == "openai":
-            if not self.openai_api_base_url:
+            if not self._has_openai_channel():
                 missing = "当前生图服务的接口地址"
         else:
             if not self.image_gen_key:
@@ -5513,6 +6010,9 @@ class NAIGenerateImagePlugin(Star):
                 f"image_bytes={len(image_bytes) if image_bytes else 0}"
             )
             try:
+                prompt, _, _ = await self._prepare_openai_prompt(
+                    prompt, self.image_style
+                )
                 images, reason = await self._openai_generate(
                     prompt,
                     size,
@@ -5680,10 +6180,10 @@ class NAIGenerateImagePlugin(Star):
 
         # 按调用模式校验凭据
         if self.call_mode == "openai":
-            if not self.openai_api_base_url:
+            if not self._has_openai_channel():
                 logger.warning(f"{LOG_TAG} [cmd:image] OpenAI 接口未配置")
                 yield event.plain_result(
-                    "未配置当前生图服务的接口地址，请在插件设置中选择对应服务并填写地址。"
+                    "未配置官方协议生图渠道地址，请在插件设置中填写渠道 1 或渠道 2 的接口地址。"
                 )
                 return
         else:
@@ -6207,7 +6707,7 @@ class NAIGenerateImagePlugin(Star):
             )
         else:
             slot_model = ""
-            slot_artists = ""
+            slot_artists = None
             # 「开启画风参数」关闭或未传画风时，固定使用插件设置里选好的默认画风；
             # 工具 schema 会同步隐藏 style 字段（见 _refresh_llm_tool_schema）。
             style = (
@@ -6222,9 +6722,9 @@ class NAIGenerateImagePlugin(Star):
 
         # 按调用模式校验凭据
         if self.call_mode == "openai":
-            if not self.openai_api_base_url:
+            if not self._has_openai_channel():
                 logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] OpenAI 接口未配置")
-                yield "生成失败，未配置当前生图服务的接口地址，请告知用户在插件设置中选择对应服务并填写地址。"
+                yield "生成失败，未配置官方协议生图渠道地址，请告知用户在插件设置中填写渠道 1 或渠道 2 的接口地址。"
                 return
         else:
             if not self.image_gen_key:
@@ -6350,7 +6850,7 @@ class NAIGenerateImagePlugin(Star):
         try:
             if self.call_mode == "openai":
                 openai_prompt, _, _ = await self._prepare_openai_prompt(
-                    prompt, style, custom_artists=slot_artists or None
+                    prompt, style, custom_artists=slot_artists
                 )
                 images, reason = await self._openai_generate(
                     openai_prompt,
@@ -6366,7 +6866,7 @@ class NAIGenerateImagePlugin(Star):
                     style,
                     size,
                     model=slot_model or None,
-                    custom_artists=slot_artists or None,
+                    custom_artists=slot_artists,
                 )
         except Exception as exc:
             logger.warning(f"{LOG_TAG} [tool:NAI_Generate_Image] 生成异常: {exc!r}")
@@ -6590,10 +7090,20 @@ class NAIGenerateImagePlugin(Star):
             f"本地代理 127.0.0.1:{self.proxy_port}: {'✅ 在线' if proxy_ok else '❌ 离线'} {proxy_msg}"
         )
         if self.call_mode == "openai":
+            channels = self._openai_channels()
+            ch_parts = []
+            for ch in channels:
+                mark = "★当前" if ch["is_active"] else "备选"
+                url_text = ch["base_url"] or "❌ 未配置"
+                key_text = "✅" if ch["has_key"] else "⚠️无Key"
+                ch_parts.append(f"{mark} {ch['name']}: {url_text} ({key_text})")
+            fallback_text = (
+                "✅ 开启" if getattr(self, "openai_enable_fallback", True) else "❌ 关闭"
+            )
             lines.append(
-                f"上游 OpenAI 兼容接口: {self.openai_api_base_url or '❌ 未配置'}"
-                f" | key={'✅ 已配置' if self.openai_api_key else '⚠️ 未配置'}"
-                f" | model={self.openai_api_model}"
+                "上游官方协议渠道: "
+                + " | ".join(ch_parts)
+                + f" | model={self.openai_api_model} | 自动备选={fallback_text}"
             )
         else:
             lines.append(

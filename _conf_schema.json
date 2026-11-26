@@ -3,14 +3,14 @@
         "type": "string",
         "default": "direct",
         "description": "生图接入方式",
-        "hint": "聊天指令和陪伴联动使用此方式。选择第三方接口后，再选择 OpenAI 兼容或星桥。",
+        "hint": "聊天指令和陪伴联动使用此方式。「官方协议接口」适用于星桥（Almoon）及已切换为 NovelAI 官方 /ai/ 协议的中转站。",
         "options": [
             "direct",
             "openai"
         ],
         "labels": [
             "nai.sta1n.cn 直连",
-            "第三方接口（OpenAI / 星桥）"
+            "第三方接口（NovelAI 官方协议）"
         ],
         "obvious": true
     },
@@ -36,7 +36,7 @@
         "type": "int",
         "default": 180,
         "description": "请求超时（秒）",
-        "hint": "两种调用模式共用：OpenAI 兼容模式为单次请求超时；直连模式为任务接口排队+生成的总等待上限与 GET 兜底的单请求超时。范围 30-600 秒，大尺寸或上游繁忙时可调大。旧配置的 openai_timeout 值会自动迁移。",
+        "hint": "两种调用模式共用：官方协议接口为单次请求超时；直连模式为任务接口排队+生成的总等待上限与 GET 兜底的单请求超时。范围 30-600 秒，大尺寸或上游繁忙时可调大。旧配置的 openai_timeout 值会自动迁移。",
         "min": 30,
         "max": 600
     },
@@ -76,19 +76,37 @@
             "enable_upstream_billing_sync": true
         }
     },
-    "openai_api_profile": {
+    "openai_active_channel": {
         "type": "string",
-        "default": "compatible",
-        "description": "生图服务",
-        "hint": "各服务分别保存接口地址和密钥，切换后使用所选服务的配置。",
+        "default": "primary",
+        "description": "当前启用渠道",
+        "hint": "聊天指令、LLM 工具与陪伴联动默认使用的官方协议渠道；测试面板可随时单独切换。",
         "options": [
-            "compatible",
-            "starbridge"
+            "primary",
+            "backup"
         ],
         "labels": [
-            "OpenAI 兼容接口",
-            "星桥（Almoon）"
+            "渠道 1（apiauto.starbridge.zone）",
+            "渠道 2（备选）"
         ],
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_enable_fallback": {
+        "type": "bool",
+        "default": true,
+        "description": "主渠道不可用时自动切换备选",
+        "hint": "开启后，若当前启用渠道未配置、连接失败或返回 401/403/429/502/503（鉴权、限流、余额不足或网关不可用），自动改用另一条已配置渠道；超时与 400 参数错误不会自动切换，且 Vibe 参考编码已发生扣费后不再切换，避免重复扣费。",
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_api_name": {
+        "type": "string",
+        "default": "",
+        "description": "渠道 1 名称（选填）",
+        "hint": "例如：星渊 或 星桥。留空时按接口地址自动识别显示名称，用于渠道切换与测试面板展示。",
         "condition": {
             "call_mode": "openai"
         }
@@ -96,42 +114,59 @@
     "openai_api_base_url": {
         "type": "string",
         "default": "",
-        "description": "OpenAI 接口地址",
-        "hint": "填写服务商提供的地址，例如 https://api1.syuan.org/v1。仅供 OpenAI 兼容接口使用。",
+        "description": "渠道 1 接口地址",
+        "hint": "填写支持 NovelAI 官方 /ai/ 协议的中转站地址，例如 https://api1.syuan.org 或 https://api.almoons.xyz。",
         "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "compatible"
+            "call_mode": "openai"
         }
     },
     "openai_api_key": {
         "type": "string",
         "default": "",
-        "description": "OpenAI API Key",
-        "hint": "填写该 OpenAI 兼容服务商提供的 API Key。",
+        "description": "渠道 1 API Key",
+        "hint": "填写渠道 1 提供的 API Key。Vibe 参考会逐图付费编码；编码与生图请求均不自动重试。",
         "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "compatible"
+            "call_mode": "openai"
+        }
+    },
+    "openai_backup_name": {
+        "type": "string",
+        "default": "",
+        "description": "渠道 2 名称（备选，选填）",
+        "hint": "例如：星桥 或 星渊。留空时按接口地址自动识别显示名称。",
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_backup_base_url": {
+        "type": "string",
+        "default": "",
+        "description": "渠道 2 接口地址（备选）",
+        "hint": "填写第二条支持 NovelAI 官方 /ai/ 协议的中转站地址（如同时配置星渊与星桥），留空则仅使用渠道 1。",
+        "condition": {
+            "call_mode": "openai"
+        }
+    },
+    "openai_backup_key": {
+        "type": "string",
+        "default": "",
+        "description": "渠道 2 API Key（备选）",
+        "hint": "填写渠道 2 提供的 API Key。",
+        "condition": {
+            "call_mode": "openai"
         }
     },
     "starbridge_api_base_url": {
         "type": "string",
         "default": "",
-        "description": "星桥接口地址",
-        "hint": "填写 https://api.almoons.xyz 或 https://aiapi.almoons.xyz。仅供星桥使用。",
-        "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "starbridge"
-        }
+        "description": "旧版星桥接口地址（已自动迁移）",
+        "invisible": true
     },
     "starbridge_api_key": {
         "type": "string",
         "default": "",
-        "description": "星桥 API Key",
-        "hint": "填写星桥的 NewAPI Key。Vibe 参考会逐图付费编码；编码与生图请求均不自动重试。",
-        "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "starbridge"
-        }
+        "description": "旧版星桥 API Key（已自动迁移）",
+        "invisible": true
     },
     "_api_credentials_version": {
         "type": "int",
@@ -139,20 +174,22 @@
         "description": "接口凭据配置版本",
         "invisible": true
     },
+    "_gallery_defaults_version": {
+        "type": "int",
+        "default": 0,
+        "description": "画廊默认配置版本",
+        "invisible": true
+    },
     "openai_api_model": {
         "type": "string",
         "default": "nai-diffusion-5-full",
-        "description": "第三方接口生图模型",
-        "hint": "接口必填字段。nai-diffusion-5-full 为文档推荐的通用动漫插画模型；精准参考支持 nai-diffusion-4-5 与 nai-diffusion-5 系列，其他模型会自动回退 4.5。director-tools（图片处理）由面板动作自动选用，无需在此配置。 星桥适配仅支持 V4.5/V5 的 Full/Curated；Vibe 和精准参考仅限 V4.5。",
+        "description": "官方协议生图模型",
+        "hint": "接口必填字段。支持 V4.5 / V5 的 Full 与 Curated 模型（nai-diffusion-5-full 为推荐通用模型）。V4.5 与 V5 均支持图生图和精准参考；Vibe 参考目前仅限 V4.5。director-tools（图片处理）由面板动作自动选用，无需在此配置。",
         "options": [
             "nai-diffusion-5-full",
             "nai-diffusion-5-curated",
             "nai-diffusion-4-5-full",
-            "nai-diffusion-4-5-curated",
-            "nai-diffusion-4-full",
-            "nai-diffusion-4-curated-preview",
-            "nai-diffusion-3",
-            "nai-diffusion-furry-3"
+            "nai-diffusion-4-5-curated"
         ],
         "condition": {
             "call_mode": "openai"
@@ -278,8 +315,8 @@
             "4. 2.5D唯美风",
             "5. 本子里番风",
             "6. GalGame风",
-            "7. 自定义",
-            "8. 111"
+            "7. 群友画风",
+            "8. 最精美"
         ]
     },
     "image_style": {
@@ -323,7 +360,7 @@
         "type": "int",
         "default": 24,
         "description": "采样步数",
-        "hint": "直连模式经任务接口支持 1-50 步（29 步起按档位加价，46-50 步单价最高）；OpenAI 兼容模式同样限 1-50，超出自动收敛。",
+        "hint": "直连模式经任务接口支持 1-50 步（29 步起按档位加价，46-50 步单价最高）；官方协议接口同样限 1-50，超出自动收敛。",
         "min": 1,
         "max": 50
     },
@@ -331,7 +368,7 @@
         "type": "float",
         "default": 6,
         "description": "提示词引导强度（scale）",
-        "hint": "Prompt 引导强度，数值越高越贴合提示词、越高越锐利，一般 5-7 即可。直连模式限 1-20，OpenAI 兼容模式限 0-10，超出自动收敛。注意别和下面的「CFG Rescale」混淆：那是压暗提亮对比的系数，通常保持默认。",
+        "hint": "Prompt 引导强度，数值越高越贴合提示词、越高越锐利，一般 5-7 即可。直连模式限 1-20，官方协议接口限 0-10，超出自动收敛。注意别和下面的「CFG Rescale」混淆：那是压暗提亮对比的系数，通常保持默认。",
         "min": 0,
         "max": 20
     },
@@ -367,7 +404,7 @@
         "type": "string",
         "default": "vibe",
         "description": "参考图使用模式",
-        "hint": "决定聊天/陪伴发来的参考图如何使用（最多 8 张，面板可逐图设强度）。Vibe 参考：把参考图作为风格/角色氛围参考，适合「照着这张的感觉画」；img2img：以第一张参考图为底图重绘，适合「在这张图基础上改」；精准参考：从参考图精确提取角色/画风信息（仅 V4.5/V5 系列模型），适合「保持这个角色不变」。 星桥适配时，V5 仅可使用图生图，Vibe/精准参考须明确选择 V4.5。",
+        "hint": "决定聊天/陪伴发来的参考图如何使用（最多 8 张，面板可逐图设强度）。Vibe 参考：把参考图作为风格/角色氛围参考（仅限 V4.5），适合「照着这张的感觉画」；img2img：以第一张参考图为底图重绘，适合「在这张图基础上改」；精准参考：从参考图精确提取角色/画风信息（V4.5 与 V5 均支持），适合「保持这个角色不变」。",
         "options": [
             "vibe",
             "img2img",
@@ -418,9 +455,9 @@
         "type": "float",
         "default": 1.0,
         "description": "精准参考权重",
-        "hint": "范围 0-1，越大越接近参考图。保持角色外观建议 0.9-1.0。",
+        "hint": "V4.5 范围 0-1，V5 支持 0-5（超出当前模型上限时自动截断）；越大越接近参考图，保持角色外观建议 0.9-1.0。",
         "min": 0,
-        "max": 1,
+        "max": 5,
         "condition": {
             "call_mode": "openai",
             "openai_reference_mode": "director"
@@ -430,7 +467,7 @@
         "type": "float",
         "default": 0.5,
         "description": "精准参考次级特征权重",
-        "hint": "控制画风细节的保留程度，建议 0.35-0.7。不确定时保持默认 0.5。",
+        "hint": "仅 V4.5 生效（V5 固定为 0）：控制画风细节的保留程度，建议 0.35-0.7。不确定时保持默认 0.5。",
         "min": 0,
         "max": 1,
         "condition": {
@@ -462,18 +499,6 @@
         "min": -1,
         "condition": {
             "call_mode": "openai"
-        }
-    },
-    "openai_max_retries": {
-        "type": "int",
-        "default": 2,
-        "description": "失败重试次数",
-        "hint": "对 408/429/502/503/504 及上游繁忙类瞬时错误按 2/4/8 秒指数退避重试；400/401/403 与请求超时不重试（超时可能仍在生成并扣费，避免重复扣费）。设为 0 不重试。 星桥原生适配的付费 POST 不自动重试，此项仅作用于原有兼容接口。",
-        "min": 0,
-        "max": 3,
-        "condition": {
-            "call_mode": "openai",
-            "openai_api_profile": "compatible"
         }
     },
     "enable_template": {
@@ -566,15 +591,15 @@
     },
     "save_image_history": {
         "type": "bool",
-        "default": false,
+        "default": true,
         "description": "保存生图历史",
-        "hint": "开启后将所有成功生成的图片保存到 plugin_data/astrbot_plugin_nai_image/image_history。"
+        "hint": "默认开启。开启后将所有成功生成的图片（包含测试面板和日常聊天/陪伴生图）及对应提示词保存到 plugin_data/astrbot_plugin_nai_image/image_history，可在测试面板画廊查看。"
     },
     "save_generation_parameters": {
         "type": "bool",
-        "default": false,
+        "default": true,
         "description": "保存生图参数",
-        "hint": "配合「保存生图历史」使用。开启后为每张图片保存同名 YAML 文档，记录实际生图参数；不会保存 Token，提示词换行会在生图前转为逗号。",
+        "hint": "默认开启，配合「保存生图历史」使用。开启后为每张图片保存同名 YAML 文档，记录完整生图参数（可在画廊查看详情并复用）；关闭时仍会单独记录画廊展示所需的提示词。不会保存 Token。",
         "condition": {
             "save_image_history": true
         }
@@ -583,7 +608,7 @@
         "type": "int",
         "default": 0,
         "description": "历史保留数量",
-        "hint": "仅在保存生图历史时生效。每次保存后自动删除最旧图片及其同名参数文档，仅保留指定数量；设为 0 不清理。",
+        "hint": "仅在保存生图历史时生效。每次保存后自动删除最旧图片及其提示词和参数文档，仅保留指定数量；设为 0 不清理。",
         "min": 0,
         "condition": {
             "save_image_history": true
@@ -618,6 +643,12 @@
         "default": false,
         "description": "启用内置法典词库",
         "hint": "开启后可用 /法典 指令与 NAI_Search_Grimoire 工具检索 19,663 条实测 Tag，并支持在提示词里写【法典:词条名】自动展开；开启提示词转译时会额外带上命中的实测词条作为参考。关闭时不做任何检索，提示词原样处理，行为与升级前完全一致。"
+    },
+    "enable_nsfw_skill": {
+        "type": "bool",
+        "default": false,
+        "description": "启用 NSFW 提示词 Skill",
+        "hint": "默认关闭，内置 nai-prompting Skill 使用全年龄（SFW）提示词规范。开启并保存后，插件会自动将内置 Skill 切换为包含成人向规范与实测配方的 NSFW 版本；关闭后恢复 SFW 版本。"
     },
     "enable_companion_link": {
         "type": "bool",

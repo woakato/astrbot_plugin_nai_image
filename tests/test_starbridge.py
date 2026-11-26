@@ -108,23 +108,24 @@ def test_native_base_url_rejects_embedded_credentials_and_non_http_urls(base):
         native_endpoint(base, "generate-image")
 
 
-def test_existing_configuration_defaults_to_compatible_profile():
+def test_schema_no_longer_exposes_compatible_profile():
     schema = json.loads(
         (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(
             encoding="utf-8"
         )
     )
-    assert schema["openai_api_profile"]["default"] == "compatible"
-    value = plugin("compatible")
-    del value.openai_api_profile
-    images, reason = generate(value, n=6)
+    assert "openai_api_profile" not in schema
+    assert schema["save_image_history"]["default"] is True
+    assert schema["save_generation_parameters"]["default"] is True
+    value = plugin("starbridge")
+    images, reason = generate(value, n=4)
     assert images and reason == "ok"
     call = value._session.calls[0]
-    assert call["endpoint"] == "https://api.almoons.xyz/v1/images/generations"
+    assert call["endpoint"] == "https://api.almoons.xyz/ai/generate-image"
     assert call["body"]["action"] == "generate"
-    assert call["body"]["n"] == 6
-    assert "Accept" not in call["headers"]
-    assert "allow_redirects" not in call
+    assert call["body"]["parameters"]["n_samples"] == 4
+    assert call["headers"]["Accept"] == "application/json"
+    assert call["allow_redirects"] is False
 
 
 def test_native_generation_preserves_zero_values_roles_and_history():
@@ -268,15 +269,67 @@ def test_malformed_later_reference_is_rejected_before_paid_encoding():
 
 
 @pytest.mark.parametrize("model", ["nai-diffusion-5-full", "nai-diffusion-5-curated"])
-@pytest.mark.parametrize("mode", ["vibe", "director"])
-def test_v5_reference_modes_fail_before_encoding_or_model_fallback(model, mode):
+def test_v5_vibe_mode_fails_before_encoding_or_model_fallback(model):
     value = plugin()
     images, reason = generate(
-        value, model=model, reference_mode=mode, reference_image_bytes=png()
+        value, model=model, reference_mode="vibe", reference_image_bytes=png()
     )
     assert images == [] and "V5" in reason
-    assert "星桥" in _format_generate_error(reason)
+    assert "官方协议接口" in _format_generate_error(reason)
     assert value._session.calls == []
+
+
+@pytest.mark.parametrize("model", ["nai-diffusion-5-full", "nai-diffusion-5-curated"])
+def test_v5_precise_references_submit_natively(model):
+    value = plugin()
+    value.openai_director_secondary_strength = 0.5
+    images, reason = generate(
+        value,
+        model=model,
+        reference_mode="director",
+        reference_image_bytes_list=[png(), png((8, 16), "blue")],
+        reference_strengths=[0.8, 3.2],
+        director_captions=["character", "style"],
+    )
+    assert images and reason == "ok"
+    call = value._session.calls[0]
+    assert call["endpoint"] == "https://api.almoons.xyz/ai/generate-image"
+    body = call["body"]
+    assert body["model"] == model
+    params = body["parameters"]
+    assert params["director_reference_strength_values"] == [0.8, 3.2]
+    assert params["director_reference_secondary_strength_values"] == [0, 0]
+    assert params["director_reference_information_extracted"] == [1, 1]
+    assert [
+        item["caption"]["base_caption"]
+        for item in params["director_reference_descriptions"]
+    ] == ["character", "style"]
+
+
+@pytest.mark.parametrize("bad_strength", [-0.1, 5.1, float("nan"), float("inf"), True])
+def test_v5_precise_reference_rejects_invalid_strength_in_prepare(bad_strength):
+    body = {
+        "model": "nai-diffusion-5-full",
+        "prompt": "a red apple",
+        "action": "generate",
+        "size": "1024x1024",
+        "n": 1,
+        "parameters": {
+            "director_reference_images": [base64.b64encode(png()).decode()],
+            "director_reference_descriptions": [
+                {"caption": {"base_caption": "character", "char_captions": []}, "legacy_uc": False}
+            ],
+            "director_reference_strength_values": [bad_strength],
+            "director_reference_secondary_strength_values": [0.5],
+            "director_reference_information_extracted": [0.7],
+        },
+    }
+    with pytest.raises(StarbridgeError, match="0 到 5"):
+        asyncio.run(
+            prepare_starbridge_request(
+                Session(), "https://api.almoons.xyz", body, headers={}, timeout=None
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -402,29 +455,17 @@ def test_emotion_prefix_survives_artist_prompt_merging(prompt):
     assert value._session.calls[0]["body"]["prompt"].startswith("happy;;")
 
 
-def test_existing_profile_keeps_v5_director_payload_and_transient_retries(monkeypatch):
-    calls = 0
-
+def test_v5_director_payload_does_not_retry_on_http_error(monkeypatch):
     def handler(endpoint, body):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return Response({"error": {"message": "busy"}}, status=503)
-        return Response(
-            {"data": [{"b64_json": base64.b64encode(png()).decode()}]}, status=200
-        )
+        return Response({"error": {"message": "busy"}}, status=503)
 
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
-    value = plugin("compatible", handler)
+    value = plugin("starbridge", handler)
     images, reason = generate(
         value, reference_mode="director", reference_image_bytes=png()
     )
-    assert images and reason == "ok"
-    assert len(value._session.calls) == 2
-    body = value._session.calls[1]["body"]
-    assert body["model"] == "nai-diffusion-5-full"
-    assert body["action"] == "generate"
-    assert body["parameters"]["director_reference_images"][0].startswith("data:")
+    assert images == [] and reason == "http_503 | busy"
+    assert len(value._session.calls) == 1
 
 
 def test_request_conversion_does_not_mutate_caller_payload():

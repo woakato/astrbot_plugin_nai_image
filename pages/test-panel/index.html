@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NAI 生图控制终端 // ENDFIELD PROTOCOL</title>
-  <link rel="stylesheet" href="./app.css?v=4.9.6" />
+  <link rel="stylesheet" href="./app.css?v=4.9.9" />
 </head>
 <body>
   <!-- 终末地等高线动态地形 Canvas + 底部工业网格 -->
@@ -36,6 +36,16 @@
         </div>
       </div>
       <div class="header-right">
+        <button id="galleryBtn" type="button" class="btn-secondary tactical-btn gallery-entry">
+          <!-- Lucide Images icon, ISC license; see lucide-LICENSE.txt. -->
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m22 11-1.296-1.296a2.4 2.4 0 0 0-3.408 0L11 16"/>
+            <path d="M4 8a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2"/>
+            <circle cx="13" cy="7" r="1" fill="currentColor"/>
+            <rect x="8" y="2" width="14" height="14" rx="2"/>
+          </svg>
+          <span>画廊</span>
+        </button>
         <div class="status-pill-group acrylic-sub">
           <div class="tech-label">SYS.NET</div>
           <span id="tokenBadge" class="badge badge-neutral">Token: 校验中...</span>
@@ -71,8 +81,8 @@
               </button>
               <button type="button" class="format-toggle-btn" data-format="openai">
                 <span class="format-toggle-dot"></span>
-                <span class="format-toggle-label">OpenAI 兼容</span>
-                <span class="format-toggle-sub">/v1/images 端点</span>
+                <span class="format-toggle-label">官方协议接口</span>
+                <span class="format-toggle-sub">/ai 原生端点</span>
               </button>
             </div>
             <div class="field-hint" style="margin-top: 10px;">
@@ -81,7 +91,22 @@
             </div>
             <div id="openaiConfigStatus" class="openai-config-status hidden">
               <span class="status-dot error"></span>
-              <span id="openaiConfigStatusText">未配置 OpenAI 接口</span>
+              <span id="openaiConfigStatusText">未配置官方协议接口</span>
+            </div>
+
+            <!-- 官方协议渠道选择（仅官方协议格式显示） -->
+            <div id="openaiChannelWrap" class="field hidden" style="margin-top: 10px;">
+              <div class="field-header">
+                <label class="field-label">官方协议渠道 // API CHANNEL</label>
+                <button id="openaiSetDefaultChannelBtn" type="button" class="btn-link hidden">
+                  <span class="link-icon">★</span> 设为全局默认
+                </button>
+              </div>
+              <div class="channel-toggle-group" id="openaiChannelGroup"></div>
+              <div class="field-hint">
+                <span class="hint-icon">◈</span>
+                <span id="openaiChannelHint">可在主/备渠道间临时切换；点击「设为全局默认」会同步到插件设置。</span>
+              </div>
             </div>
 
             <!-- 参考图上传（仅 OpenAI 兼容格式显示，最多 8 张） -->
@@ -143,7 +168,7 @@
               </div>
               <div class="field-hint">
                 <span class="hint-icon">◈</span>
-                <span>vibe：reference_* 风格/角色参考（支持多张）；img2img：/v1/images/edits 重绘（仅取第一张）；director：精准参考（§6，支持 4.5 / 5 系列，可多张并逐图设权重）。未上传参考图时本项无效。</span>
+                <span>vibe：风格/角色氛围参考（仅 V4.5，支持多张）；img2img：图生图重绘（仅取第一张）；director：精准参考（V4.5 与 V5 均支持，可多张并逐图设权重）。未上传参考图时本项无效。</span>
               </div>
             </div>
 
@@ -396,71 +421,6 @@
           </div>
         </div>
 
-        <!-- 风格与负面限制 -->
-        <div class="card tactical-card acrylic-card">
-          <div class="card-header acrylic-header">
-            <div class="card-num-box">
-              <span class="card-number">03</span>
-              <span class="card-sec-tag">STYL</span>
-            </div>
-            <div class="card-title-group">
-              <h2 class="card-title">美学与负面过滤器 // FILTER & STYLE</h2>
-              <span class="card-sub-code">RESTRICTION_MASK</span>
-            </div>
-          </div>
-
-          <div class="card-body">
-            <div class="field">
-              <label class="field-label" for="style">预置风格前缀 // ARTIST PRESET</label>
-              <div class="select-wrap">
-                <select id="style" class="select acrylic-input">
-                  <option value="vertical">韩漫小清新风 (Vertical Crisp)</option>
-                  <option value="comicDoujin">漫画同人风 (Comic / Doujin)</option>
-                  <option value="r18">2.5D 唯美风 (Aesthetic 2.5D)</option>
-                  <option value="lolita25d">2.5D 唯美风（萝）</option>
-                  <option value="anime">本子里番风 (Anime Focus)</option>
-                  <option value="galgame">GalGame 风 (Novel CG)</option>
-                  <option value="custom">自定义画师配置 [CUSTOM]</option>
-                </select>
-              </div>
-            </div>
-
-            <div id="customArtistsWrapper" class="field hidden">
-              <label class="field-label" for="customArtists">自定义画师与画质串</label>
-              <div class="input-wrap">
-                <textarea
-                  id="customArtists"
-                  class="textarea acrylic-input"
-                  rows="3"
-                  placeholder="masterpiece, best quality, artist:xxx, intricate details..."
-                  spellcheck="false"
-                ></textarea>
-              </div>
-            </div>
-
-            <div class="field">
-              <div class="field-header">
-                <label class="field-label" for="negative">负面抑制词 // NEGATIVE PROMPT</label>
-                <button id="loadDefaultNegative" type="button" class="btn-link">
-                  <span class="link-icon">⚡</span> 载入战术预置负面
-                </button>
-              </div>
-              <div class="input-wrap">
-                <textarea
-                  id="negative"
-                  class="textarea acrylic-input"
-                  rows="3"
-                  placeholder="留空则调用系统默认抑制词集..."
-                  spellcheck="false"
-                ></textarea>
-              </div>
-              <div class="field-hint">
-                <span id="negativeHint">填入需剔除的畸变特征与不良画质标签</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <!-- 战术执行控制条 -->
         <div class="action-bar-container">
           <div class="action-bar">
@@ -604,7 +564,121 @@
         </div>
       </section>
 
-      <!-- 底部：点数用量统计（按日期聚合，柱状图 + 趋势线） -->
+      <!-- Style slots, negative prompt and tag library -->
+      <section class="style-section">
+        <div class="card tactical-card acrylic-card">
+          <div class="card-header acrylic-header">
+            <div class="card-num-box">
+              <span class="card-number">03</span>
+              <span class="card-sec-tag">SLOT</span>
+            </div>
+            <div class="card-title-group">
+              <h2 class="card-title">画风与负面配置 // STYLE &amp; NEGATIVE</h2>
+              <span class="card-sub-code">STYLE_AND_PROMPT_LIBRARY</span>
+            </div>
+          </div>
+
+          <div class="card-body">
+            <div class="field">
+              <label class="field-label">画风槽位 // ARTIST SLOTS</label>
+              <div class="slot-head">
+                <span>画风名</span>
+                <span>适用模型</span>
+                <span>对应画师串</span>
+                <span></span>
+              </div>
+              <div id="slotRows" class="slot-rows"></div>
+              <div class="slot-actions">
+                <button id="btnSlotAdd" type="button" class="btn btn-secondary">
+                  <span class="btn-text-wrap"><span class="btn-main-text">＋ 新增槽位</span></span>
+                </button>
+                <button id="btnSlotSave" type="button" class="btn btn-primary">
+                  <span class="btn-text-wrap"><span class="btn-main-text">保存槽位</span></span>
+                </button>
+                <button id="btnSlotReset" type="button" class="btn btn-secondary">
+                  <span class="btn-text-wrap"><span class="btn-main-text">恢复内置画风</span></span>
+                </button>
+              </div>
+              <div class="field-hint" id="slotStatus">
+                正在读取全局画风…
+              </div>
+            </div>
+
+            <div id="styleFields" class="field hidden">
+              <div id="stylePresetField" class="field">
+                <label class="field-label" for="style">预置风格前缀 // ARTIST PRESET</label>
+                <div class="select-wrap">
+                  <select id="style" class="select acrylic-input">
+                    <option value="vertical">韩漫小清新风 (Vertical Crisp)</option>
+                    <option value="comicDoujin">漫画同人风 (Comic / Doujin)</option>
+                    <option value="r18">2.5D 唯美风 (Aesthetic 2.5D)</option>
+                    <option value="lolita25d">2.5D 唯美风（萝）</option>
+                    <option value="anime">本子里番风 (Anime Focus)</option>
+                    <option value="galgame">GalGame 风 (Novel CG)</option>
+                    <option value="custom">自定义画师配置 [CUSTOM]</option>
+                  </select>
+                </div>
+              </div>
+
+              <div id="customArtistsWrapper" class="field hidden">
+                <label class="field-label" for="customArtists">自定义画师与画质串</label>
+                <div class="input-wrap">
+                  <textarea
+                    id="customArtists"
+                    class="textarea acrylic-input"
+                    rows="3"
+                    placeholder="masterpiece, best quality, artist:xxx, intricate details..."
+                    spellcheck="false"
+                  ></textarea>
+                </div>
+              </div>
+            </div>
+
+            <div class="field">
+              <div class="field-header">
+                <label class="field-label" for="negative">负面抑制词 // NEGATIVE PROMPT</label>
+                <button id="loadDefaultNegative" type="button" class="btn-link">
+                  <span class="link-icon">⚡</span> 载入战术预置负面
+                </button>
+              </div>
+              <div class="input-wrap">
+                <textarea
+                  id="negative"
+                  class="textarea acrylic-input"
+                  rows="3"
+                  placeholder="留空则调用系统默认抑制词集..."
+                  spellcheck="false"
+                ></textarea>
+              </div>
+              <div class="field-hint">
+                <span id="negativeHint">填入需剔除的畸变特征与不良画质标签</span>
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="field-label">法典检索 // GRIMOIRE LOOKUP</label>
+              <div class="grimoire-search-row">
+                <input
+                  id="grimQuery"
+                  class="input acrylic-input"
+                  type="text"
+                  placeholder="中文关键词，如 死库水 / 旗袍 / 自拍 / 丝袜"
+                />
+                <button id="btnGrimSearch" type="button" class="btn btn-primary">
+                  <span class="btn-text-wrap"><span class="btn-main-text">检索</span></span>
+                </button>
+              </div>
+              <div id="grimResults" class="grimoire-results"></div>
+              <div class="field-hint grimoire-hint">
+                需要在插件设置里打开「启用内置法典词库」才能检索；聊天里也可以直接用
+                <code>【法典:词条名】</code> 让生图自动展开成实测标签。
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Usage statistics stay at the bottom of the page -->
       <section class="usage-section">
         <div class="card tactical-card usage-card acrylic-card">
           <div class="card-header usage-card-header acrylic-header">
@@ -644,72 +718,112 @@
             <div id="usageError" class="usage-empty hidden"></div>
           </div>
         </div>
-
-        <div class="card tactical-card acrylic-card">
-          <div class="card-header acrylic-header">
-            <div class="card-num-box">
-              <span class="card-number">06</span>
-              <span class="card-sec-tag">SLOT</span>
-            </div>
-            <div class="card-title-group">
-              <h2 class="card-title">画风槽位与法典 // SLOTS &amp; GRIMOIRE</h2>
-              <span class="card-sub-code">PRESET_SLOT_AND_TAG_LIBRARY</span>
-            </div>
-          </div>
-
-          <div class="card-body">
-            <div class="field">
-              <label class="field-label">画风槽位 // ARTIST SLOTS</label>
-              <div class="slot-head">
-                <span>画风名</span>
-                <span>适用模型</span>
-                <span>对应画师串</span>
-                <span></span>
-              </div>
-              <div id="slotRows" class="slot-rows"></div>
-              <div class="slot-actions">
-                <button id="btnSlotAdd" type="button" class="btn btn-secondary">
-                  <span class="btn-text-wrap"><span class="btn-main-text">＋ 新增槽位</span></span>
-                </button>
-                <button id="btnSlotSave" type="button" class="btn btn-primary">
-                  <span class="btn-text-wrap"><span class="btn-main-text">保存槽位</span></span>
-                </button>
-                <button id="btnSlotReset" type="button" class="btn btn-secondary">
-                  <span class="btn-text-wrap"><span class="btn-main-text">恢复内置画风</span></span>
-                </button>
-              </div>
-              <div class="field-hint" id="slotStatus">
-                每个槽位就是一个画风：起个「画风名」、选它适用的模型、贴上对应的画师串。
-                聊天生图用插件设置里「正式生图启用槽位」选中的那一个；本面板点右侧「应用」
-                即按该画风的模型与画师串出图。
-              </div>
-            </div>
-
-            <div class="field">
-              <label class="field-label">法典检索 // GRIMOIRE LOOKUP</label>
-              <div class="grimoire-search-row">
-                <input
-                  id="grimQuery"
-                  class="input acrylic-input"
-                  type="text"
-                  placeholder="中文关键词，如 死库水 / 旗袍 / 自拍 / 丝袜"
-                />
-                <button id="btnGrimSearch" type="button" class="btn btn-primary">
-                  <span class="btn-text-wrap"><span class="btn-main-text">检索</span></span>
-                </button>
-              </div>
-              <div id="grimResults" class="grimoire-results"></div>
-              <div class="field-hint">
-                需要在插件设置里打开「启用内置法典词库」才能检索；聊天里也可以直接用
-                <code>【法典:词条名】</code> 让生图自动展开成实测标签。
-              </div>
-            </div>
-          </div>
-        </div>
       </section>
     </main>
   </div>
 
-  <script src="./app.js?v=4.9.6"></script>
+  <dialog id="galleryDialog" class="gallery-dialog" aria-labelledby="galleryTitle">
+    <div class="gallery-header">
+      <button id="galleryBack" type="button" class="gallery-icon-btn hidden" title="返回画廊" aria-label="返回画廊">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m15 18-6-6 6-6"/>
+          <path d="M20 12H9"/>
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+        </svg>
+      </button>
+      <div class="gallery-heading">
+        <h2 id="galleryTitle" class="gallery-title">画廊</h2>
+        <p id="galleryHint" class="gallery-hint"></p>
+      </div>
+      <a id="galleryDownload" class="btn-secondary tactical-btn gallery-download hidden" title="下载原图" aria-label="下载原图" download>
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 15V3"/>
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <path d="m7 10 5 5 5-5"/>
+        </svg>
+        <span>下载</span>
+      </a>
+      <button id="galleryDelete" type="button" class="gallery-icon-btn gallery-delete-btn hidden" title="删除图片" aria-label="删除图片">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 6h18"/>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+          <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+        </svg>
+      </button>
+      <button id="galleryRefresh" type="button" class="gallery-icon-btn" title="刷新画廊" aria-label="刷新画廊">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+          <path d="M21 3v5h-5"/>
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+          <path d="M8 16H3v5"/>
+        </svg>
+      </button>
+      <button id="galleryClose" type="button" class="gallery-icon-btn" title="关闭画廊" aria-label="关闭画廊">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 6 6 18"/>
+          <path d="m6 6 12 12"/>
+        </svg>
+      </button>
+    </div>
+    <div class="gallery-toolbar">
+      <div class="gallery-search-wrap">
+        <input id="gallerySearch" type="search" class="input acrylic-input gallery-search-input" placeholder="按提示词或文件名搜索画廊…" aria-label="搜索画廊" />
+        <button id="gallerySearchClear" type="button" class="btn-secondary tactical-btn btn-sm hidden">清除</button>
+      </div>
+    </div>
+    <div class="gallery-body">
+      <p id="galleryStatus" class="gallery-status" role="status"></p>
+      <div id="galleryGrid" class="gallery-grid"></div>
+      <div id="galleryViewer" class="gallery-viewer hidden">
+        <div class="gallery-image-stage">
+          <img id="galleryOriginal" alt="画廊原图" />
+          <nav class="gallery-image-nav" aria-label="图片浏览">
+            <button id="galleryImagePrev" type="button" class="gallery-icon-btn" title="上一张" aria-label="上一张">
+              <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m15 18-6-6 6-6"/>
+              </svg>
+            </button>
+            <span id="galleryImageInfo" class="gallery-hint" aria-live="polite"></span>
+            <button id="galleryImageNext" type="button" class="gallery-icon-btn" title="下一张" aria-label="下一张">
+              <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m9 18 6-6-6-6"/>
+              </svg>
+            </button>
+          </nav>
+        </div>
+        <aside class="gallery-prompt-panel">
+          <div class="gallery-prompt-head">
+            <h3 class="gallery-prompt-title">提示词</h3>
+            <div class="gallery-prompt-actions">
+              <button id="galleryApplyPrompt" type="button" class="btn-secondary tactical-btn btn-sm" title="将提示词和已保存参数填入面板">填入面板</button>
+              <button id="galleryCopyPrompt" type="button" class="gallery-copy-btn" title="复制提示词" aria-label="复制提示词">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="8" y="8" width="13" height="13" rx="2"/>
+                  <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <p id="galleryPrompt" class="gallery-prompt"></p>
+          <div id="galleryMetaList" class="gallery-meta-list hidden"></div>
+        </aside>
+      </div>
+    </div>
+    <div id="galleryPager" class="gallery-pager">
+      <span id="galleryPageInfo" class="gallery-hint"></span>
+      <button id="galleryPrev" type="button" class="gallery-icon-btn" title="上一页" aria-label="上一页">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m15 18-6-6 6-6"/>
+        </svg>
+      </button>
+      <button id="galleryNext" type="button" class="gallery-icon-btn" title="下一页" aria-label="下一页">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m9 18 6-6-6-6"/>
+        </svg>
+      </button>
+    </div>
+  </dialog>
+
+  <script src="./app.js?v=4.9.9"></script>
 </body>
 </html>
