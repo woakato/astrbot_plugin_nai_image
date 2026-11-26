@@ -6654,30 +6654,19 @@ class NAIGenerateImagePlugin(Star):
         char1_prompt: str = "",
         char2_prompt: str = "",
     ) -> AsyncGenerator[str, None]:
-        """用NovelAI生成1张图片并直接发送给当前用户。
+        """用 NovelAI 生成 1 张图片并直接发送给当前用户。
 
-        每个用户消息最多调用一次本工具。不要在同一响应中重复调用，也不要同时
-        调用send_message_to_user；生成成功后本工具会直接发送图片。
-        画风与尺寸留空时，固定使用插件设置里选择的默认画风与默认尺寸。
+        调用前请先阅读内置 `nai-prompting` Skill（及其 references）以按 NAI V4.5 / V5
+        规范编写提示词、权重与角色互动语法。每个用户消息最多调用一次本工具；不要在
+        同一响应中重复调用，也不要同时调用 send_message_to_user，生成成功后本工具会
+        直接发送图片。画风与尺寸留空时使用插件默认配置。
 
         Args:
-            prompt(string): NovelAI 4.5 提示词，标签化格式，标签间用英文逗号隔开。规范：
-                - 质量词放前面：masterpiece, best quality, highly detailed
-                - 角色描述：1girl/1boy, solo, 外貌特征；人物用 人物名(作品名) 形式（如 texas the omertosa (arknights)），特征不全就补充描述词
-                - 画师风格引用：artist:画师名
-                - 权重语法：{tag} 加强，[tag] 减弱；(tag:1.5) 为旧版权重；推荐新版 权重::标签:: 格式，可组合多标签如 1.5::red dress, long dress::，支持高权重（2、5、10 以上）
-                - 负向权重（NAI4 精髓）：可移除物体或翻转概念，如 -2::标签::
-                - 多角色：用 {人物 [tags], {位置}, ntags = [ntags] 人物} 包裹每个角色，最多 6 名，位置可选 左/中/右/上/下 组合；{人物 与 人物} 是占位符不可删除
-                - 角色互动：source#动作 发起者 / target#动作 承受者 / mutual#动作 互相（如 source#hug, target#hug, mutual#hug）
-                - 渲染文字：Text: HAVE FUN! 指定角色说出文字；no text 减少文本生成
-                - 情绪词：可加入情绪描述增强表现力
-                - 多风格混合：-2::artist collaboration:: 可融合 3 个以上画师风格
-                - 精简：避免堆叠重复/无意义 tags，描述清楚构图即可
-                示例：masterpiece, best quality, {人物 [1girl, solo, long hair, blue eyes, source#hug], {位置左}, ntags = [lowres, bad anatomy] 人物}, {人物 [1boy, short hair, target#hug], {位置右} 人物}, outdoor, sunset, artist:wlop
+            prompt(string): 英文逗号分隔的 NovelAI V4.5 / V5 提示词，请先阅读 nai-prompting Skill 再填写；启用内置法典词库时可直接使用【法典:词条名】自动展开。
             style(string): 画风。可选：vertical(韩漫小清新风) / comicDoujin(漫画同人风) / r18(2.5D唯美风) / lolita25d(2.5D唯美风（萝）) / anime(本子里番风) / galgame(GalGame风) / custom(自定义)。留空使用插件设置的默认画风。
-            size_cn(string): 图片尺寸，留空使用插件设置的默认尺寸。OpenAI 兼容调用模式下为像素分辨率 "宽x高"（如 832x1216，宽高须为 64 的倍数）；传统 GET 模式下为分档名：竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图
-            char1_prompt(string): 【角色块1】只写第一个角色自身的标签：外貌、发色瞳色、表情、姿势动作、穿着及其局部状态（如 1girl, solo, long hair, blue eyes, smile, sitting）。留空表示画面只有一个角色。不要把场景、构图、画风写在这里。
-            char2_prompt(string): 【角色块2】第二个角色自身的标签，写法同上。填写后两个角色会分别放到画面左右，各自独立不串色；双人互动时用 source#动作 / target#动作 表示发起方与承受方。
+            size_cn(string): 图片尺寸，留空使用插件设置的默认尺寸。官方协议调用模式下为像素分辨率 "宽x高"（如 832x1216，宽高须为 64 的倍数）；直连模式下为分档名：竖图 / 横图 / 方图 / 2K竖图 / 2K横图 / 2K方图 / 4K竖图 / 4K横图 / 4K方图
+            char1_prompt(string): 【角色块1】只写第一个角色自身的标签（外貌、表情、穿着与动作），不要写场景或画风。留空表示单人或不使用分框。
+            char2_prompt(string): 【角色块2】第二个角色自身的标签，写法同上；填写后与角色1分置画面左右，互动写法见 nai-prompting Skill。
         """
         prompt = normalize_prompt(self._expand_grimoire(prompt))
         if not self.enable_llm_tool:

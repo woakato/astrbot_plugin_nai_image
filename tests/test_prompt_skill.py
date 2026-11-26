@@ -98,3 +98,9 @@ def test_nsfw_lint_enforces_adult_guard_on_explicit_prompts():
         negative="loli, child, bad hands, censored",
     )
     assert errors_ok == []
+
+
+def test_llm_tool_docstring_delegates_prompt_rules_to_skill():
+    doc = NAIGenerateImagePlugin.NAI_Generate_Image.__doc__ or ""
+    assert "nai-prompting" in doc
+    assert "(tag:1.5)" not in doc
