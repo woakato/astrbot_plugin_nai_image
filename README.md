@@ -2,7 +2,7 @@
 
 AstrBot 的 NovelAI 生图插件。支持 `nai.sta1n.cn` 直连与第三方 NovelAI 官方 `/ai/` 协议接口（如星桥及已切至官方协议的中转站），带聊天指令、LLM 工具、网页测试面板与内置画廊，也能给陪伴插件当生图后端。
 
-当前版本 v2.10.2，改动记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 v3.0.0，改动记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 上手
 

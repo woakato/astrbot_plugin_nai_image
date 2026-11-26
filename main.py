@@ -702,7 +702,7 @@ def migrate_invalid_call_mode(config: dict) -> str | None:
     "astrbot_plugin_nai_image",
     "缪缪的小水泡",
     "基于 nai.sta1n.cn 的 NovelAI 生图插件",
-    "2.10.2",
+    "3.0.0",
 )
 class NAIGenerateImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
