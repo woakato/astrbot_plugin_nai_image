@@ -41,10 +41,10 @@ def test_normalize_model_ver_separates_v45_from_v5(model, expected):
     assert normalize_model_ver(model) == expected
 
 
-def test_search_grimoire_is_locked_to_current_model_version():
+def test_search_grimoire_prefers_current_model_version():
     hits = search_grimoire("白丝", 5, "nai-diffusion-4-5-full")
     assert hits, "V4.5 词库应当能检索到词条"
-    assert all(item["model_ver"] == "NAI4.5" for item in hits)
+    assert hits[0]["model_ver"] == "NAI4.5"
 
 
 def test_expand_grimoire_macros_replaces_macro_with_tags():
@@ -411,11 +411,11 @@ def test_grimoire_tool_has_no_scope_param():
 
 
 # ---------------------------------------------------------------------------
-# 版本回退：V5 兼容 V4.5 词条，V4.5 用不了 V5 专属词条
+# Both source volumes remain searchable; the current model determines ranking.
 # ---------------------------------------------------------------------------
 def test_allowed_model_vers_fallback_chain():
     assert grimoire.allowed_model_vers("nai-diffusion-5-full") == ["NAI5", "NAI4.5"]
-    assert grimoire.allowed_model_vers("nai-diffusion-4-5-full") == ["NAI4.5"]
+    assert grimoire.allowed_model_vers("nai-diffusion-4-5-full") == ["NAI4.5", "NAI5"]
     assert grimoire.allowed_model_vers(None) == []
 
 
@@ -427,10 +427,61 @@ def test_v5_search_falls_back_to_v45_entries():
     assert any(item["model_ver"] == "NAI4.5" for item in hits)
 
 
-def test_v45_search_cannot_reach_v5_only_entries():
-    # 「ZUN绘」只存在于 V5 卷；V4.5 模型检索不应返回任何 V5 词条
+def test_v45_search_includes_entries_collected_in_v5_volume():
+    # A source-volume label alone does not establish exclusive model support.
     hits = search_grimoire("ZUN绘", 5, "nai-diffusion-4-5-full")
-    assert all(item["model_ver"] == "NAI4.5" for item in hits)
+    assert any(
+        item["title"] == "ZUN绘" and item["model_ver"] == "NAI5" for item in hits
+    )
+
+
+def test_v45_macros_expand_entries_from_v5_volume():
+    hits = search_grimoire("ZUN绘", 1, "nai-diffusion-4-5-full")
+    assert hits
+    assert (
+        expand_grimoire_macros("【法典:ZUN绘】", "nai-diffusion-4-5-full")
+        == hits[0]["clean_tags"]
+    )
+
+
+def test_v45_translation_hints_include_entries_from_v5_volume():
+    hint = grimoire.build_grimoire_translation_hint(
+        "请使用ZUN绘画风", model_ver="nai-diffusion-4-5-full"
+    )
+    assert "《ZUN绘》" in hint
+
+
+def test_translation_hints_deduplicate_duplicate_titles_across_volumes():
+    import sqlite3
+
+    db_path = grimoire.get_grimoire_db_path()
+    assert db_path is not None
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        """
+        SELECT title FROM grimoire_entries
+        WHERE model_ver = 'NAI5' AND length(title) BETWEEN 2 AND 14
+        INTERSECT
+        SELECT title FROM grimoire_entries
+        WHERE model_ver = 'NAI4.5' AND length(title) BETWEEN 2 AND 14
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+    assert row, "词库应存在两卷同名词条"
+    title = row[0]
+
+    hint = grimoire.build_grimoire_translation_hint(
+        f"请画出{title}风格的少女", max_matches=5, model_ver="nai-diffusion-5-full"
+    )
+    assert hint.count(f"《{title}》") == 1
+
+
+@pytest.mark.parametrize("model", ["nai-diffusion-4-5-full", "nai-diffusion-5-full"])
+def test_unfiltered_search_prefers_selected_source_volume(model):
+    hits = search_grimoire("", 5, model)
+    assert hits
+    assert all(item["model_ver"] == normalize_model_ver(model) for item in hits)
 
 
 def test_v5_prefers_own_volume_on_duplicate_titles():

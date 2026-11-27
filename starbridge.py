@@ -7,6 +7,7 @@ import io
 import json
 import math
 import secrets
+import zipfile
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -22,6 +23,24 @@ MODEL_ALIASES = {
     "nai5": "nai-diffusion-5-full",
     "nai5-curated": "nai-diffusion-5-curated",
 }
+SAMPLERS = {
+    "k_euler_ancestral",
+    "k_euler",
+    "k_dpmpp_2s_ancestral",
+    "k_dpmpp_2m_sde",
+    "k_dpmpp_2m",
+    "k_dpmpp_sde",
+    "k_dpm_2",
+    "k_dpm_2_ancestral",
+    "k_lms",
+}
+NOISE_SCHEDULES = {"native", "karras", "exponential", "polyexponential"}
+MAX_PIXELS = 3_145_728
+MAX_REFERENCE_BYTES = 20 * 1024 * 1024
+MAX_REFERENCE_PIXELS = 36_000_000
+MAX_PROMPT_UTF8_BYTES = 51_200
+MAX_ZIP_IMAGES = 6
+MAX_ZIP_TOTAL_BYTES = 128 * 1024 * 1024
 TOOL_ACTIONS = {"bg-removal", "lineart", "sketch", "colorize", "emotion", "declutter"}
 EMOTIONS = set(
     "neutral happy sad angry scared surprised tired excited nervous thinking confused shy disgusted smug bored laughing irritated aroused embarrassed worried love determined hurt playful".split()
@@ -84,9 +103,19 @@ def _image(value: str, size: tuple[int, int] | None = None, *, precise=False) ->
     try:
         if value.startswith("data:"):
             value = value.split(",", 1)[1]
-        with Image.open(io.BytesIO(base64.b64decode(value, validate=True))) as source:
+        if len(value) > ((MAX_REFERENCE_BYTES + 2) // 3) * 4:
+            raise ValueError("Reference exceeds 20 MB")
+        raw = base64.b64decode(value, validate=True)
+        if len(raw) > MAX_REFERENCE_BYTES:
+            raise ValueError("Reference exceeds 20 MB")
+        with Image.open(io.BytesIO(raw)) as source:
             if source.format not in {"PNG", "JPEG", "WEBP"}:
                 raise ValueError("Unsupported reference format")
+            if (
+                getattr(source, "n_frames", 1) != 1
+                or source.width * source.height > MAX_REFERENCE_PIXELS
+            ):
+                raise ValueError("Animated or oversized reference")
             source.load()
             image = source.convert("RGB")
         if precise:
@@ -113,6 +142,8 @@ def _image(value: str, size: tuple[int, int] | None = None, *, precise=False) ->
             image = image.resize(size, Image.Resampling.LANCZOS)
         output = io.BytesIO()
         image.save(output, format="PNG")
+        if output.tell() > MAX_REFERENCE_BYTES:
+            raise ValueError("Prepared reference exceeds 20 MB")
         return base64.b64encode(output.getvalue()).decode("ascii")
     except (
         ValueError,
@@ -122,7 +153,44 @@ def _image(value: str, size: tuple[int, int] | None = None, *, precise=False) ->
         AttributeError,
         Image.DecompressionBombError,
     ) as error:
-        raise StarbridgeError("参考图必须是有效的 PNG、JPEG 或 WebP 图片。") from error
+        raise StarbridgeError(
+            "参考图必须是有效的静态 PNG、JPEG 或 WebP 图片，且不超过 20 MB。"
+        ) from error
+
+
+def _validate_generation(params: dict, prompt: str, width: int, height: int) -> None:
+    """Check the native generation contract before paid reference encoding."""
+    if width < 64 or height < 64 or width % 64 or height % 64:
+        raise StarbridgeError("生图宽高必须至少为 64，且为 64 的整数倍。")
+    if width * height > MAX_PIXELS:
+        raise StarbridgeError(
+            f"NovelAI 生图面积不能超过 {MAX_PIXELS} 像素，请减小尺寸。"
+        )
+    if params.get("sampler", "k_euler_ancestral") not in SAMPLERS:
+        raise StarbridgeError(
+            "当前采样器不受 V4.5/V5 支持，请选择 Euler、DPM++、DPM2 或 LMS。"
+        )
+    if params.get("noise_schedule", "karras") not in NOISE_SCHEDULES:
+        raise StarbridgeError(
+            "噪声计划请选择 native、karras、exponential 或 polyexponential。"
+        )
+    texts = [prompt, params.get("negative_prompt", "")]
+    for key in ("v4_prompt", "v4_negative_prompt"):
+        block = params.get(key)
+        caption = block.get("caption", {}) if isinstance(block, dict) else {}
+        if not isinstance(caption, dict):
+            continue
+        texts.append(caption.get("base_caption", ""))
+        for item in caption.get("char_captions", []):
+            if isinstance(item, dict):
+                texts.append(item.get("char_caption", ""))
+    if any(
+        isinstance(text, str) and len(text.encode("utf-8")) >= MAX_PROMPT_UTF8_BYTES
+        for text in texts
+    ):
+        raise StarbridgeError(
+            f"每段正负提示词和角色提示词必须小于 {MAX_PROMPT_UTF8_BYTES} 个 UTF-8 字节。"
+        )
 
 
 async def prepare_starbridge_request(
@@ -146,7 +214,10 @@ async def prepare_starbridge_request(
         raise StarbridgeError(
             "星桥适配仅支持 V4.5/V5 的 Full、Curated 生图型号，请检查模型设置。"
         )
-    width, height = (int(value) for value in payload["size"].split("x", 1))
+    try:
+        width, height = (int(value) for value in payload["size"].split("x", 1))
+    except (KeyError, AttributeError, TypeError, ValueError) as error:
+        raise StarbridgeError("请使用有效的像素尺寸，例如 832x1216。") from error
     count = payload.get("n", 1)
     maximum = 6 if width * height <= 393216 else 4
     if (
@@ -203,27 +274,80 @@ async def prepare_starbridge_request(
             )
         if params.get("noise_schedule", "karras") != "karras":
             raise StarbridgeError("V5 仅支持 Karras 噪声计划，请调整设置。")
-    for keys in (
+    for required, optional in (
         (
-            "reference_image_multiple",
-            "reference_strength_multiple",
-            "reference_information_extracted_multiple",
+            (
+                "reference_image_multiple",
+                "reference_strength_multiple",
+                "reference_information_extracted_multiple",
+            ),
+            (),
         ),
         (
-            "director_reference_images",
-            "director_reference_descriptions",
-            "director_reference_strength_values",
-            "director_reference_secondary_strength_values",
-            "director_reference_information_extracted",
+            (
+                "director_reference_images",
+                "director_reference_descriptions",
+                "director_reference_strength_values",
+                "director_reference_information_extracted",
+            ),
+            ("director_reference_secondary_strength_values",),
         ),
     ):
+        keys = required + optional
         arrays = [params[key] for key in keys if key in params]
         if arrays and (
             any(not isinstance(value, list) for value in arrays)
             or len(arrays[0]) > 8
             or any(len(value) != len(arrays[0]) for value in arrays)
+            or (bool(arrays[0]) and any(key not in params for key in required))
         ):
             raise StarbridgeError("参考图及逐图参数必须按顺序对应，且最多 8 张。")
+    for key in (
+        "reference_strength_multiple",
+        "reference_information_extracted_multiple",
+    ):
+        for amount in params.get(key, []):
+            if (
+                isinstance(amount, bool)
+                or not isinstance(amount, (int, float))
+                or not math.isfinite(amount)
+                or not 0 <= amount <= 1
+            ):
+                raise StarbridgeError(
+                    "参考图的信息提取和强度必须是 0 到 1 之间的有效数值。"
+                )
+    if precise:
+        for description in params.get("director_reference_descriptions", []):
+            caption = (
+                description.get("caption") if isinstance(description, dict) else None
+            )
+            if (
+                not isinstance(caption, dict)
+                or not isinstance(caption.get("base_caption"), str)
+                or not caption["base_caption"].strip()
+            ):
+                raise StarbridgeError("精准参考描述必须包含 caption.base_caption。")
+        if not model.startswith("nai-diffusion-5-"):
+            for key in (
+                "director_reference_strength_values",
+                "director_reference_secondary_strength_values",
+            ):
+                for amount in params.get(key, []):
+                    if (
+                        isinstance(amount, bool)
+                        or not isinstance(amount, (int, float))
+                        or not math.isfinite(amount)
+                        or not 0 <= amount <= 1
+                    ):
+                        raise StarbridgeError(
+                            "参考图的信息提取和强度必须是 0 到 1 之间的有效数值。"
+                        )
+            if any(
+                isinstance(amount, bool) or amount != 1
+                for amount in params.get("director_reference_information_extracted", [])
+            ):
+                raise StarbridgeError("精准参考的信息提取参数必须为 1.0。")
+    _validate_generation(params, prompt, width, height)
 
     params.update(width=width, height=height, n_samples=count)
     params.setdefault("seed", secrets.randbits(32))
@@ -357,3 +481,36 @@ def normalize_starbridge_response(body: object) -> dict:
             and image["image"]
         ]
     }
+
+
+def decode_native_response(raw: bytes) -> dict:
+    """Accept both the official ZIP response and native JSON images."""
+    if not raw.startswith(b"PK"):
+        return json.loads(raw)
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            files = [
+                item
+                for item in archive.infolist()
+                if not item.is_dir()
+                and item.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+            ]
+            if (
+                not files
+                or len(files) > MAX_ZIP_IMAGES
+                or sum(item.file_size for item in files) > MAX_ZIP_TOTAL_BYTES
+            ):
+                raise ValueError("Invalid image archive")
+            decoded_images: list[dict[str, str]] = []
+            total_bytes = 0
+            for item in files:
+                content = archive.read(item)
+                total_bytes += len(content)
+                if not content or total_bytes > MAX_ZIP_TOTAL_BYTES:
+                    raise ValueError("Invalid image archive size")
+                decoded_images.append(
+                    {"image": base64.b64encode(content).decode("ascii")}
+                )
+            return {"images": decoded_images}
+    except (zipfile.BadZipFile, ValueError, RuntimeError, OSError) as error:
+        raise StarbridgeError("NovelAI 返回的图片压缩包无效。") from error
