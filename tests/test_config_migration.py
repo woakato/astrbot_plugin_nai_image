@@ -58,3 +58,24 @@ def test_migrate_invalid_call_mode_keeps_direct():
     config = {"call_mode": "direct"}
     assert migrate_invalid_call_mode(config) is None
     assert config["call_mode"] == "direct"
+
+
+def test_migrate_invalid_call_mode_maps_legacy_novelai_to_openai():
+    config = {
+        "call_mode": "novelai",
+        "novelai_service": "starbride",
+        "starbride_api_base_url": "https://api.starbridge.zone",
+        "starbride_api_key": "synthetic-key",
+    }
+    assert migrate_invalid_call_mode(config) == "openai"
+    assert config["call_mode"] == "openai"
+
+
+def test_migrate_invalid_call_mode_keeps_openai_with_starbride_credentials():
+    config = {
+        "call_mode": "openai",
+        "starbride_api_base_url": "https://api.starbridge.zone",
+        "starbride_api_key": "synthetic-key",
+    }
+    assert migrate_invalid_call_mode(config) is None
+    assert config["call_mode"] == "openai"

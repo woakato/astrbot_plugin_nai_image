@@ -12,7 +12,13 @@ import pytest
 from PIL import Image
 
 from main import NAIGenerateImagePlugin, _format_generate_error
-from starbridge import StarbridgeError, native_endpoint, prepare_starbridge_request
+from starbridge import (
+    MAX_REFERENCE_BYTES,
+    StarbridgeError,
+    decode_native_response,
+    native_endpoint,
+    prepare_starbridge_request,
+)
 
 
 def png(size=(16, 8), color="red"):
@@ -485,3 +491,150 @@ def test_request_conversion_does_not_mutate_caller_payload():
     )
     assert body == before
     assert prepared.payload["parameters"]["seed"] == 0
+
+
+@pytest.mark.parametrize(
+    "size, overrides",
+    [
+        ("100x100", {}),
+        ("2048x2048", {}),
+        ("832x1216", {"sampler": "ddim"}),
+        ("832x1216", {"noise_schedule": "invalid"}),
+        ("832x1216", {"v4_prompt": {"caption": {"base_caption": "中" * 18000}}}),
+    ],
+)
+def test_invalid_generation_parameters_fail_before_vibe_encoding(size, overrides):
+    value = Session()
+    body = dict(
+        model="nai-diffusion-4-5-full",
+        prompt="apple",
+        action="generate",
+        size=size,
+        n=1,
+        parameters=dict(
+            reference_image_multiple=[base64.b64encode(png()).decode()],
+            reference_strength_multiple=[0.6],
+            reference_information_extracted_multiple=[0.7],
+            **overrides,
+        ),
+    )
+    with pytest.raises(StarbridgeError):
+        asyncio.run(
+            prepare_starbridge_request(
+                value, "https://api.almoons.xyz", body, headers={}, timeout=None
+            )
+        )
+    assert value.calls == []
+
+
+@pytest.mark.parametrize("amount", [float("nan"), float("inf"), True, -0.1, 1.1])
+def test_invalid_vibe_strengths_fail_before_paid_encoding(amount):
+    value = Session()
+    body = dict(
+        model="nai-diffusion-4-5-full",
+        prompt="apple",
+        size="512x512",
+        parameters=dict(
+            reference_image_multiple=[base64.b64encode(png()).decode()],
+            reference_strength_multiple=[amount],
+            reference_information_extracted_multiple=[0.7],
+        ),
+    )
+    with pytest.raises(StarbridgeError):
+        asyncio.run(
+            prepare_starbridge_request(
+                value, "https://api.almoons.xyz", body, headers={}, timeout=None
+            )
+        )
+    assert value.calls == []
+
+
+def test_missing_vibe_strength_array_fails_before_paid_encoding():
+    value = Session()
+    body = dict(
+        model="nai-diffusion-4-5-full",
+        prompt="apple",
+        size="512x512",
+        parameters=dict(
+            reference_image_multiple=[base64.b64encode(png()).decode()],
+            reference_information_extracted_multiple=[0.7],
+        ),
+    )
+    with pytest.raises(StarbridgeError):
+        asyncio.run(
+            prepare_starbridge_request(
+                value, "https://api.almoons.xyz", body, headers={}, timeout=None
+            )
+        )
+    assert value.calls == []
+
+
+def test_animated_and_oversized_references_rejected_before_paid_encoding():
+    frames = [Image.new("RGB", (8, 8), "red"), Image.new("RGB", (8, 8), "blue")]
+    animated_buf = io.BytesIO()
+    frames[0].save(
+        animated_buf,
+        format="WEBP",
+        save_all=True,
+        append_images=frames[1:],
+        duration=100,
+    )
+    animated_b64 = base64.b64encode(animated_buf.getvalue()).decode("ascii")
+
+    for bad_ref in (animated_b64, "A" * (((MAX_REFERENCE_BYTES + 2) // 3) * 4 + 4)):
+        value = Session()
+        body = {
+            "model": "nai-diffusion-4-5-full",
+            "prompt": "apple",
+            "size": "512x512",
+            "parameters": {
+                "reference_image_multiple": [bad_ref],
+                "reference_strength_multiple": [0.6],
+                "reference_information_extracted_multiple": [0.7],
+            },
+        }
+        with pytest.raises(StarbridgeError, match="20 MB"):
+            asyncio.run(
+                prepare_starbridge_request(
+                    value, "https://api.almoons.xyz", body, headers={}, timeout=None
+                )
+            )
+        assert value.calls == []
+
+
+def test_official_zip_response_is_decoded_end_to_end():
+    import zipfile
+
+    img1 = png((16, 8), "red")
+    img2 = png((8, 16), "blue")
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as archive:
+        archive.writestr("image_0.png", img1)
+        archive.writestr("image_1.png", img2)
+    zip_bytes = zip_buf.getvalue()
+
+    decoded = decode_native_response(zip_bytes)
+    assert len(decoded["images"]) == 2
+
+    value = plugin(handler=lambda _ep, _body: Response(raw=zip_bytes, status=200))
+    images, reason = generate(value, n=2)
+    assert reason == "ok" and images == [img1, img2]
+
+
+def test_corrupt_or_oversized_zip_response_is_rejected_cleanly():
+    import zipfile
+
+    bad_zip = b"PK\x03\x04corrupt-zip-data"
+    with pytest.raises(StarbridgeError, match="压缩包无效"):
+        decode_native_response(bad_zip)
+
+    too_many = io.BytesIO()
+    with zipfile.ZipFile(too_many, "w") as archive:
+        for i in range(7):
+            archive.writestr(f"image_{i}.png", png())
+    with pytest.raises(StarbridgeError, match="压缩包无效"):
+        decode_native_response(too_many.getvalue())
+
+    value = plugin(handler=lambda _ep, _body: Response(raw=bad_zip, status=200))
+    images, reason = generate(value, n=1)
+    assert images == [] and reason.startswith("starbridge | ")

@@ -86,7 +86,7 @@
             "backup"
         ],
         "labels": [
-            "渠道 1（apiauto.starbridge.zone）",
+            "渠道 1（主用）",
             "渠道 2（备选）"
         ],
         "condition": {
@@ -166,6 +166,96 @@
         "type": "string",
         "default": "",
         "description": "旧版星桥 API Key（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_service": {
+        "type": "string",
+        "default": "",
+        "description": "旧版 NovelAI 服务商（已自动迁移）",
+        "invisible": true
+    },
+    "starbride_api_base_url": {
+        "type": "string",
+        "default": "",
+        "description": "旧版 Starbride 接口地址（已自动迁移）",
+        "invisible": true
+    },
+    "starbride_api_key": {
+        "type": "string",
+        "default": "",
+        "description": "旧版 Starbride API Key（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_official_api_base_url": {
+        "type": "string",
+        "default": "",
+        "description": "旧版 NovelAI 官方接口地址（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_official_api_key": {
+        "type": "string",
+        "default": "",
+        "description": "旧版 NovelAI 官方 API Key（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_api_model": {
+        "type": "string",
+        "default": "",
+        "description": "旧版 NovelAI 生图模型（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_image_size": {
+        "type": "string",
+        "default": "",
+        "description": "旧版 NovelAI 默认尺寸（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_reference_mode": {
+        "type": "string",
+        "default": "",
+        "description": "旧版 NovelAI 参考图模式（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_director_caption": {
+        "type": "string",
+        "default": "",
+        "description": "旧版 NovelAI 精准参考保留内容（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_vibe_strength": {
+        "type": "float",
+        "default": -1,
+        "description": "旧版 NovelAI Vibe 参考权重（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_director_strength": {
+        "type": "float",
+        "default": -1,
+        "description": "旧版 NovelAI 精准参考权重（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_director_secondary_strength": {
+        "type": "float",
+        "default": -1,
+        "description": "旧版 NovelAI 精准参考次级权重（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_director_fallback_images": {
+        "type": "list",
+        "default": [],
+        "description": "旧版 NovelAI 精准参考兜底参考图（已自动迁移）",
+        "invisible": true
+    },
+    "novelai_seed": {
+        "type": "int",
+        "default": -2,
+        "description": "旧版 NovelAI 随机种子（已自动迁移）",
+        "invisible": true
+    },
+    "_novelai_config_version": {
+        "type": "int",
+        "default": 0,
+        "description": "旧版 NovelAI 配置版本（已自动迁移）",
         "invisible": true
     },
     "_api_credentials_version": {
@@ -305,18 +395,16 @@
             "4",
             "5",
             "6",
-            "7",
-            "8"
+            "7"
         ],
         "labels": [
-            "1. 2.5D唯美风（萝）",
-            "2. 韩漫小清新风",
-            "3. 漫画同人风",
-            "4. 2.5D唯美风",
+            "1. 韩漫小清新风",
+            "2. 漫画同人风",
+            "3. 2.5D唯美风",
+            "4. 2.5D唯美风（萝）",
             "5. 本子里番风",
             "6. GalGame风",
-            "7. 群友画风",
-            "8. 最精美"
+            "7. 自定义"
         ]
     },
     "image_style": {

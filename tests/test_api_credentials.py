@@ -404,3 +404,226 @@ def test_test_panel_config_exposes_sanitized_channels_and_switches_default(
         == "https://api1.syuan.org/ai/generate-image"
     )
     assert plugin._session.calls[0]["headers"]["Authorization"] == "Bearer syuan-secret"
+
+
+def test_v211_starbride_novelai_config_migrates_losslessly_from_disk_and_is_idempotent(
+    load_plugin, tmp_path
+):
+    """Simulate a real sanitized v2.11.1 Starbride config loaded via AstrBotConfig."""
+    config_path = tmp_path / f"{PLUGIN_NAME}_config.json"
+    v211_disk_config = {
+        "call_mode": "novelai",
+        "image_gen_key": "",
+        "base_url": "https://nai.sta1n.cn",
+        "request_timeout": 180,
+        "novelai_service": "starbride",
+        "starbride_api_base_url": "https://api.starbridge.zone",
+        "starbride_api_key": "synthetic-starbride-key",
+        "novelai_official_api_base_url": "https://image.novelai.net",
+        "novelai_official_api_key": "",
+        "novelai_api_model": "nai-diffusion-5-curated",
+        "novelai_image_size": "832x1216",
+        "novelai_reference_model": "nai-diffusion-4-5-full",
+        "_novelai_config_version": 1,
+        "openai_api_base_url": "",
+        "openai_api_key": "",
+        "_api_credentials_version": 1,
+        "openai_api_model": "nai-diffusion-4-5-full",
+        "image_size": "竖图",
+        "openai_reference_mode": "vibe",
+        "novelai_reference_mode": "director",
+        "openai_director_caption": "character",
+        "novelai_director_caption": "character&style",
+        "openai_vibe_strength": 0.4,
+        "novelai_vibe_strength": 0.65,
+        "openai_director_strength": 1.0,
+        "novelai_director_strength": 0.75,
+        "openai_director_secondary_strength": 0.5,
+        "novelai_director_secondary_strength": 0.45,
+        "openai_director_fallback_images": ["stale-fallback.png"],
+        "novelai_director_fallback_images": [],
+        "openai_seed": 42,
+        "novelai_seed": -1,
+        "starbridge_api_base_url": "",
+        "starbridge_api_key": "",
+    }
+    config_path.write_text(
+        json.dumps(v211_disk_config, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    plugin, saved = load_plugin()
+
+    assert plugin.call_mode == saved["call_mode"] == "openai"
+    assert plugin.openai_api_base_url == "https://api.starbridge.zone"
+    assert plugin.openai_api_key == "synthetic-starbride-key"
+    assert saved["openai_api_base_url"] == "https://api.starbridge.zone"
+    assert saved["openai_api_key"] == "synthetic-starbride-key"
+    # Empty-key default official URL must not pollute backup channel.
+    assert saved["openai_backup_base_url"] == ""
+    assert saved["openai_backup_key"] == ""
+    assert plugin.openai_api_model == saved["openai_api_model"] == "nai-diffusion-5-curated"
+    assert plugin.image_size == saved["image_size"] == "竖图"
+    assert plugin.openai_reference_mode == saved["openai_reference_mode"] == "director"
+    assert plugin.openai_director_caption == saved["openai_director_caption"] == "character&style"
+    assert plugin.openai_vibe_strength == saved["openai_vibe_strength"] == 0.65
+    assert plugin.openai_director_strength == saved["openai_director_strength"] == 0.75
+    assert (
+        plugin.openai_director_secondary_strength
+        == saved["openai_director_secondary_strength"]
+        == 0.45
+    )
+    assert plugin.openai_director_fallback_images == saved["openai_director_fallback_images"] == []
+    assert plugin.openai_seed == saved["openai_seed"] == -1
+    assert saved["_api_credentials_version"] == 2
+    # Legacy secret fields are cleared after migration.
+    assert saved["starbride_api_base_url"] == ""
+    assert saved["starbride_api_key"] == ""
+    assert saved["novelai_official_api_base_url"] == ""
+    assert saved["novelai_official_api_key"] == ""
+    assert plugin._openai_channels()[0]["name"] == "星桥"
+
+    # End-to-end generation uses the migrated endpoint and key immediately.
+    plugin._session = Session()
+    images, reason = asyncio.run(plugin._openai_generate("1girl", "832x1216", n=1))
+    assert images and reason == "ok"
+    assert (
+        plugin._session.calls[0]["endpoint"]
+        == "https://api.starbridge.zone/ai/generate-image"
+    )
+    assert (
+        plugin._session.calls[0]["headers"]["Authorization"]
+        == "Bearer synthetic-starbride-key"
+    )
+
+    # Subsequent manual user edits must NOT be overwritten on reload.
+    edited, saved_after_edit = load_plugin(
+        {
+            "openai_reference_mode": "vibe",
+            "openai_director_strength": 2.25,
+            "openai_seed": 12345,
+        }
+    )
+    assert edited.openai_reference_mode == saved_after_edit["openai_reference_mode"] == "vibe"
+    assert edited.openai_director_strength == saved_after_edit["openai_director_strength"] == 2.25
+    assert edited.openai_seed == saved_after_edit["openai_seed"] == 12345
+
+
+def test_v211_novelai_with_existing_openai_moves_starbride_to_active_backup(
+    load_plugin, tmp_path
+):
+    config_path = tmp_path / f"{PLUGIN_NAME}_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "call_mode": "novelai",
+                "novelai_service": "starbride",
+                "openai_api_base_url": "https://api1.syuan.org",
+                "openai_api_key": "syuan-key",
+                "starbride_api_base_url": "https://api.starbridge.zone",
+                "starbride_api_key": "starbride-key",
+                "novelai_reference_mode": "director",
+                "novelai_director_strength": 0.8,
+                "_api_credentials_version": 1,
+                "_novelai_config_version": 1,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    plugin, saved = load_plugin()
+    assert plugin.call_mode == saved["call_mode"] == "openai"
+    assert saved["openai_api_base_url"] == "https://api1.syuan.org"
+    assert saved["openai_api_key"] == "syuan-key"
+    assert saved["openai_backup_base_url"] == "https://api.starbridge.zone"
+    assert saved["openai_backup_key"] == "starbride-key"
+    assert plugin.openai_active_channel == saved["openai_active_channel"] == "backup"
+    assert plugin.openai_api_base_url == "https://api.starbridge.zone"
+    assert plugin.openai_api_key == "starbride-key"
+    assert plugin.openai_reference_mode == "director"
+    assert plugin.openai_director_strength == 0.8
+
+
+def test_v211_official_service_and_size_seed_migrate_cleanly(load_plugin, tmp_path):
+    config_path = tmp_path / f"{PLUGIN_NAME}_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "call_mode": "novelai",
+                "novelai_service": "official",
+                "starbride_api_base_url": "https://api.almoons.xyz",
+                "starbride_api_key": "",
+                "novelai_official_api_base_url": "https://image.novelai.net",
+                "novelai_official_api_key": "official-token",
+                "novelai_image_size": "1216x832",
+                "novelai_seed": 0,
+                "_api_credentials_version": 1,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    plugin, saved = load_plugin()
+    assert plugin.call_mode == "openai"
+    assert plugin.openai_api_base_url == "https://image.novelai.net"
+    assert plugin.openai_api_key == "official-token"
+    assert saved["openai_backup_base_url"] == ""
+    assert plugin.image_size == saved["image_size"] == "横图"
+    assert plugin.openai_seed == saved["openai_seed"] == 0
+
+
+def test_v211_direct_mode_ignores_untouched_default_starbride_urls(
+    load_plugin, tmp_path
+):
+    config_path = tmp_path / f"{PLUGIN_NAME}_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "call_mode": "direct",
+                "image_gen_key": "direct-token",
+                "starbride_api_base_url": "https://api.almoons.xyz",
+                "starbride_api_key": "",
+                "novelai_official_api_base_url": "https://image.novelai.net",
+                "novelai_official_api_key": "",
+                "_api_credentials_version": 1,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    plugin, saved = load_plugin()
+    assert plugin.call_mode == saved["call_mode"] == "direct"
+    assert saved["openai_api_base_url"] == ""
+    assert saved["openai_backup_base_url"] == ""
+    assert saved["_api_credentials_version"] == 2
+
+
+def test_schema_uses_clean_generic_default_labels():
+    assert SCHEMA["openai_active_channel"]["labels"] == [
+        "渠道 1（主用）",
+        "渠道 2（备选）",
+    ]
+    slot_labels = SCHEMA["active_artist_slot"]["labels"]
+    assert len(slot_labels) == len(SCHEMA["active_artist_slot"]["options"]) == 7
+    assert "apiauto.starbridge.zone" not in json.dumps(SCHEMA, ensure_ascii=False)
+    assert "群友画风" not in slot_labels
+    assert "最精美" not in slot_labels
+
+
+def test_image_prompt_spec_path_and_silent_absence(tmp_path, monkeypatch):
+    import main as nai_main
+
+    assert nai_main._IMAGE_PROMPT_SPEC_PATH == (
+        Path(nai_main.__file__).resolve().parent / "image_prompt_spec.txt"
+    )
+    warnings = []
+    monkeypatch.setattr(nai_main.logger, "warning", lambda msg: warnings.append(msg))
+    assert nai_main._load_image_prompt_spec(tmp_path / "missing.txt") == ""
+    assert warnings == []
+
+    spec_file = tmp_path / "image_prompt_spec.txt"
+    spec_file.write_text("  Custom NAI Spec  \n", encoding="utf-8")
+    assert nai_main._load_image_prompt_spec(spec_file) == "Custom NAI Spec"
+    assert warnings == []

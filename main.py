@@ -67,6 +67,7 @@ if __package__:
     )
     from .starbridge import (
         StarbridgeError,
+        decode_native_response,
         native_error,
         normalize_starbridge_response,
         prepare_starbridge_request,
@@ -119,6 +120,7 @@ else:
     )
     from starbridge import (
         StarbridgeError,
+        decode_native_response,
         native_error,
         normalize_starbridge_response,
         prepare_starbridge_request,
@@ -145,17 +147,24 @@ TRANSLATE_GATED_KEYS = (
     "outfit_cache_ttl_seconds",
 )
 
-_IMAGE_PROMPT_SPEC_PATH = Path(__file__).resolve().parents[1] / "image_prompt_spec.txt"
+_IMAGE_PROMPT_SPEC_PATH = Path(__file__).resolve().parent / "image_prompt_spec.txt"
 
 
-def _load_image_prompt_spec() -> str:
-    """Load the verbatim image prompt specification shared by image workflows.
+def _load_image_prompt_spec(path: Path | None = None) -> str:
+    """Load the optional image prompt specification bundled with the plugin.
+
+    Args:
+        path: Optional override path for tests.
 
     Returns:
-        The specification text, or an empty string when the bundled resource is unavailable.
+        The specification text, or an empty string when the optional file is
+        absent or unreadable.
     """
+    spec_path = path if path is not None else _IMAGE_PROMPT_SPEC_PATH
+    if not spec_path.is_file():
+        return ""
     try:
-        return _IMAGE_PROMPT_SPEC_PATH.read_text(encoding="utf-8").strip()
+        return spec_path.read_text(encoding="utf-8").strip()
     except OSError as exc:
         logger.warning(f"{LOG_TAG} image prompt spec unavailable: {exc}")
         return ""
@@ -237,8 +246,8 @@ TRIAL_MAX_USES = 3
 
 # 自然语言 → SD/NAI 标签风格提示词 的转译系统提示
 TRANSLATE_SYSTEM_PROMPT = (
-    f"{IMAGE_PROMPT_SPEC}\n\n"
-    "You translate natural-language descriptions into compact, comma-separated "
+    (f"{IMAGE_PROMPT_SPEC}\n\n" if IMAGE_PROMPT_SPEC else "")
+    + "You translate natural-language descriptions into compact, comma-separated "
     "Stable Diffusion / NovelAI prompt tags. Output ONLY the tags — no "
     "explanations, no markdown, no thinking block, no labels, no preamble.\n"
     "\n"
@@ -669,6 +678,261 @@ def migrate_legacy_translate_config(config: dict) -> str | None:
     return None
 
 
+_LEGACY_STARBRIDE_DEFAULT_URL = "https://api.almoons.xyz"
+_LEGACY_OFFICIAL_DEFAULT_URL = "https://image.novelai.net"
+_LEGACY_NOVELAI_SIZE_TO_TIER = {
+    "832x1216": "竖图",
+    "1216x832": "横图",
+    "1024x1024": "方图",
+    "1088x1920": "2K竖图",
+    "1920x1088": "2K横图",
+    "1472x1472": "2K方图",
+}
+
+
+def _coerce_bounded_float(
+    value: Any, *, min_value: float, max_value: float
+) -> float | None:
+    """Parse a finite non-boolean float within [min_value, max_value]."""
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed or parsed < min_value or parsed > max_value:
+        return None
+    return round(parsed, 2)
+
+
+def _coerce_legacy_seed(value: Any) -> int | None:
+    """Parse a v2.11.x novelai_seed value; values < -1 act as unset sentinels."""
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= -1 else None
+
+
+def migrate_v2_novelai_config(config: dict) -> dict[str, Any]:
+    """Migrate v2.10/v2.11 Starbridge/Starbride/NovelAI settings into v3.0 once.
+
+    Preserves user-selected credentials, active channel, model, image size, and
+    reference parameters (e.g., ``director`` / ``0.75``) when upgrading from
+    ``call_mode == "novelai"`` without overwriting later manual edits on reload.
+
+    Args:
+        config: Plugin configuration mapping, updated in place when migrated.
+
+    Returns:
+        A dictionary of updated configuration keys to persist, or ``{}`` when no
+        migration was needed.
+    """
+    raw_mode = str(config.get("call_mode") or "").strip()
+    try:
+        cred_ver = int(config.get("_api_credentials_version") or 0)
+    except (TypeError, ValueError):
+        cred_ver = 0
+
+    novelai_service = str(config.get("novelai_service") or "").strip().casefold()
+    starbride_url = str(config.get("starbride_api_base_url") or "").strip()
+    starbride_key = str(config.get("starbride_api_key") or "").strip()
+    official_url = str(config.get("novelai_official_api_base_url") or "").strip()
+    official_key = str(config.get("novelai_official_api_key") or "").strip()
+    starbridge_url = str(config.get("starbridge_api_base_url") or "").strip()
+    starbridge_key = str(config.get("starbridge_api_key") or "").strip()
+    primary_url = str(config.get("openai_api_base_url") or "").strip()
+    primary_key = str(config.get("openai_api_key") or "").strip()
+    backup_url = str(config.get("openai_backup_base_url") or "").strip()
+    backup_key = str(config.get("openai_backup_key") or "").strip()
+    direct_key = str(config.get("image_gen_key") or "").strip()
+
+    is_legacy_novelai_mode = raw_mode == "novelai"
+    has_unmigrated_v211_key = bool(starbride_key or official_key)
+    needs_recovery_from_v300_reset = (
+        cred_ver >= 2
+        and raw_mode == "direct"
+        and not direct_key
+        and not primary_url
+        and not primary_key
+        and not backup_url
+        and not backup_key
+        and has_unmigrated_v211_key
+    )
+    if (
+        cred_ver >= 2
+        and not is_legacy_novelai_mode
+        and not needs_recovery_from_v300_reset
+    ):
+        return {}
+
+    updates: dict[str, Any] = {}
+    prefer_novelai = is_legacy_novelai_mode or needs_recovery_from_v300_reset
+
+    starbride_effective_url = starbride_url or (
+        _LEGACY_STARBRIDE_DEFAULT_URL
+        if (starbride_key or (prefer_novelai and novelai_service != "official"))
+        else ""
+    )
+    starbride_configured = bool(starbride_key) or (
+        bool(starbride_url)
+        and (
+            (prefer_novelai and novelai_service != "official")
+            or starbride_url.rstrip("/") != _LEGACY_STARBRIDE_DEFAULT_URL
+        )
+    )
+
+    official_effective_url = official_url or (
+        _LEGACY_OFFICIAL_DEFAULT_URL
+        if (official_key or (prefer_novelai and novelai_service == "official"))
+        else ""
+    )
+    official_configured = bool(official_key) or (
+        bool(official_url)
+        and (
+            (prefer_novelai and novelai_service == "official")
+            or official_url.rstrip("/") != _LEGACY_OFFICIAL_DEFAULT_URL
+        )
+    )
+
+    starbridge_configured = bool(starbridge_url or starbridge_key)
+
+    legacy_candidates: list[tuple[str, str, str]] = []
+    if novelai_service == "official":
+        if official_configured:
+            legacy_candidates.append(
+                ("official", official_effective_url, official_key)
+            )
+        if starbride_configured:
+            legacy_candidates.append(
+                ("starbride", starbride_effective_url, starbride_key)
+            )
+    else:
+        if starbride_configured:
+            legacy_candidates.append(
+                ("starbride", starbride_effective_url, starbride_key)
+            )
+        if official_configured:
+            legacy_candidates.append(
+                ("official", official_effective_url, official_key)
+            )
+    if starbridge_configured:
+        legacy_candidates.append(("starbridge", starbridge_url, starbridge_key))
+
+    active_slot_for_novelai: str | None = None
+    for source_kind, cand_url, cand_key in legacy_candidates:
+        cand_sig = (cand_url.rstrip("/"), cand_key)
+        if (primary_url.rstrip("/"), primary_key) == cand_sig and (
+            primary_url or primary_key
+        ):
+            if active_slot_for_novelai is None and source_kind in (
+                "starbride",
+                "official",
+            ):
+                active_slot_for_novelai = "primary"
+            continue
+        if (backup_url.rstrip("/"), backup_key) == cand_sig and (
+            backup_url or backup_key
+        ):
+            if active_slot_for_novelai is None and source_kind in (
+                "starbride",
+                "official",
+            ):
+                active_slot_for_novelai = "backup"
+            continue
+        if not primary_url and not primary_key:
+            primary_url, primary_key = cand_url, cand_key
+            updates["openai_api_base_url"] = cand_url
+            updates["openai_api_key"] = cand_key
+            if active_slot_for_novelai is None and source_kind in (
+                "starbride",
+                "official",
+            ):
+                active_slot_for_novelai = "primary"
+        elif not backup_url and not backup_key:
+            backup_url, backup_key = cand_url, cand_key
+            updates["openai_backup_base_url"] = cand_url
+            updates["openai_backup_key"] = cand_key
+            if active_slot_for_novelai is None and source_kind in (
+                "starbride",
+                "official",
+            ):
+                active_slot_for_novelai = "backup"
+
+    if starbridge_url or starbridge_key:
+        updates["starbridge_api_base_url"] = ""
+        updates["starbridge_api_key"] = ""
+    if starbride_url or starbride_key:
+        updates["starbride_api_base_url"] = ""
+        updates["starbride_api_key"] = ""
+    if official_url or official_key:
+        updates["novelai_official_api_base_url"] = ""
+        updates["novelai_official_api_key"] = ""
+
+    if prefer_novelai:
+        updates["call_mode"] = "openai"
+        if active_slot_for_novelai == "backup":
+            updates["openai_active_channel"] = "backup"
+
+        legacy_model = str(config.get("novelai_api_model") or "").strip()
+        if legacy_model in OPENAI_COMPATIBLE_MODELS:
+            updates["openai_api_model"] = legacy_model
+
+        legacy_ref_mode = (
+            str(config.get("novelai_reference_mode") or "").strip().casefold()
+        )
+        if legacy_ref_mode in ("img2img", "vibe", "director"):
+            updates["openai_reference_mode"] = legacy_ref_mode
+
+        legacy_caption = str(config.get("novelai_director_caption") or "").strip()
+        if legacy_caption in OPENAI_DIRECTOR_CAPTIONS:
+            updates["openai_director_caption"] = legacy_caption
+
+        vibe_strength = _coerce_bounded_float(
+            config.get("novelai_vibe_strength"), min_value=0.0, max_value=1.0
+        )
+        if vibe_strength is not None:
+            updates["openai_vibe_strength"] = vibe_strength
+
+        director_strength = _coerce_bounded_float(
+            config.get("novelai_director_strength"), min_value=0.0, max_value=5.0
+        )
+        if director_strength is not None:
+            updates["openai_director_strength"] = director_strength
+
+        director_secondary = _coerce_bounded_float(
+            config.get("novelai_director_secondary_strength"),
+            min_value=0.0,
+            max_value=1.0,
+        )
+        if director_secondary is not None:
+            updates["openai_director_secondary_strength"] = director_secondary
+
+        if "novelai_director_fallback_images" in config:
+            raw_fb = config.get("novelai_director_fallback_images")
+            if isinstance(raw_fb, str):
+                raw_fb = [raw_fb]
+            if isinstance(raw_fb, list):
+                cleaned_fb = [str(p).strip() for p in raw_fb if str(p or "").strip()]
+                if cleaned_fb or is_legacy_novelai_mode:
+                    updates["openai_director_fallback_images"] = cleaned_fb
+
+        legacy_seed = _coerce_legacy_seed(config.get("novelai_seed"))
+        if legacy_seed is not None:
+            updates["openai_seed"] = legacy_seed
+
+        legacy_size = str(config.get("novelai_image_size") or "").strip().casefold()
+        mapped_tier = _LEGACY_NOVELAI_SIZE_TO_TIER.get(legacy_size)
+        if mapped_tier:
+            updates["image_size"] = mapped_tier
+
+    updates["_api_credentials_version"] = 2
+    config.update(updates)
+    return updates
+
+
 def migrate_invalid_call_mode(config: dict) -> str | None:
     """Repair invalid modes without overriding a configured native endpoint.
 
@@ -680,10 +944,16 @@ def migrate_invalid_call_mode(config: dict) -> str | None:
         credentials keep their selected mode even when its address is empty.
     """
     mode = str(config.get("call_mode") or "").strip()
+    if mode == "novelai":
+        config["call_mode"] = "openai"
+        return "openai"
     base_url = (
         config.get("openai_api_base_url")
         or config.get("openai_backup_base_url")
         or config.get("starbridge_api_base_url")
+        or config.get("starbride_api_base_url")
+        or config.get("starbride_api_key")
+        or config.get("novelai_official_api_key")
     )
     if (
         mode == "openai"
@@ -792,40 +1062,15 @@ class NAIGenerateImagePlugin(Star):
         self.enable_template: bool = bool(config.get("enable_template", True))
         self.character_preset: str = (config.get("character_preset") or "").strip()
         # 调用模式：direct（传统 GET nai.sta1n.cn）/ openai（第三方 NovelAI 官方 /ai/ 协议）。
-        # 原有适配星渊站的 OpenAI 兼容格式已取消；若旧配置里把地址和密钥保存在
-        # starbridge_api_* 中，启动时一次性合并回 openai_api_*，并默认开启画廊保存。
+        # 兼容 v2.10/v2.11 的 starbridge_api_* / starbride_api_* / novelai_* 配置，
+        # 启动时一次性无损迁移回 openai_*，并默认开启画廊保存。
+        credential_updates: dict[str, Any] = migrate_v2_novelai_config(config)
+        if "image_size" in credential_updates:
+            self.image_size = (
+                normalize_image_size(config.get("image_size")) or self.image_size
+            )
         healed_call_mode = migrate_invalid_call_mode(config)
         self.openai_api_profile: str = "starbridge"
-        credential_updates: dict[str, Any] = {}
-        starbridge_url = str(config.get("starbridge_api_base_url") or "").strip()
-        starbridge_key = str(config.get("starbridge_api_key") or "").strip()
-        if int(config.get("_api_credentials_version") or 0) < 2:
-            if starbridge_url or starbridge_key:
-                primary_url = str(config.get("openai_api_base_url") or "").strip()
-                primary_key = str(config.get("openai_api_key") or "").strip()
-                backup_url = str(config.get("openai_backup_base_url") or "").strip()
-                backup_key = str(config.get("openai_backup_key") or "").strip()
-                if not primary_url and not primary_key:
-                    credential_updates.update(
-                        openai_api_base_url=starbridge_url,
-                        openai_api_key=starbridge_key,
-                        starbridge_api_base_url="",
-                        starbridge_api_key="",
-                    )
-                elif not backup_url and not backup_key:
-                    credential_updates.update(
-                        openai_backup_base_url=starbridge_url,
-                        openai_backup_key=starbridge_key,
-                        starbridge_api_base_url="",
-                        starbridge_api_key="",
-                    )
-                else:
-                    credential_updates.update(
-                        starbridge_api_base_url="",
-                        starbridge_api_key="",
-                    )
-            credential_updates["_api_credentials_version"] = 2
-            config.update(credential_updates)
         if not config.get("_gallery_defaults_version"):
             credential_updates.update(
                 save_image_history=True,
@@ -873,13 +1118,9 @@ class NAIGenerateImagePlugin(Star):
         )
         self.openai_api_name: str = str(config.get("openai_api_name") or "").strip()
         self.openai_primary_base_url: str = (
-            (config.get("openai_api_base_url") or starbridge_url or "")
-            .strip()
-            .rstrip("/")
+            str(config.get("openai_api_base_url") or "").strip().rstrip("/")
         )
-        self.openai_primary_key: str = (
-            config.get("openai_api_key") or starbridge_key or ""
-        ).strip()
+        self.openai_primary_key: str = str(config.get("openai_api_key") or "").strip()
         self.openai_backup_name: str = str(
             config.get("openai_backup_name") or ""
         ).strip()
@@ -1567,7 +1808,7 @@ class NAIGenerateImagePlugin(Star):
                 host = ""
             if "syuan" in host:
                 return "星渊"
-            if "almoon" in host:
+            if "almoon" in host or "starbridge" in host:
                 return "星桥"
             if host:
                 return host
@@ -3356,6 +3597,7 @@ class NAIGenerateImagePlugin(Star):
 
             # ==== 发送请求：付费 POST 不自动重试，也不跟随重定向 ====
             status = 0
+            raw_body = b""
             text = ""
             connect_failed = False
             try:
@@ -3366,10 +3608,14 @@ class NAIGenerateImagePlugin(Star):
                     timeout=timeout,
                     allow_redirects=False,
                 ) as resp:
-                    text = await resp.text()
                     status = resp.status
+                    if hasattr(resp, "read"):
+                        raw_body = await resp.read()
+                    else:
+                        text = await resp.text()
+                        raw_body = text.encode("utf-8")
             except asyncio.TimeoutError:
-                status, text = 0, ""
+                status, raw_body, text = 0, b"", ""
                 logger.warning(
                     f"{LOG_TAG} [openai_generate] 请求超时，上游可能仍在生成（可能已扣费），不再自动重试"
                 )
@@ -3400,6 +3646,8 @@ class NAIGenerateImagePlugin(Star):
             if 300 <= status < 400:
                 return [], "starbridge | 接口发生重定向，请填写最终的 HTTPS 站点地址。"
             if status >= 400:
+                if not text and raw_body:
+                    text = raw_body.decode("utf-8", errors="replace")
                 err_msg = ""
                 try:
                     _err = json.loads(text)
@@ -3423,14 +3671,17 @@ class NAIGenerateImagePlugin(Star):
                     continue
                 return [], reason
 
-            # 手动解析 JSON：上游异常时可能返回 text/html 页面，resp.json()
-            # 会因 mimetype 不匹配抛 ContentTypeError，这里改为读取文本解析。
+            # 同时兼容 NovelAI 官方 ZIP 响应与中转站原生 JSON 响应；
+            # 上游异常时可能返回 text/html 页面，因此不依赖 resp.json()。
             try:
-                _data = json.loads(text)
+                _data = decode_native_response(raw_body)
+            except StarbridgeError as exc:
+                return [], f"starbridge | {exc}"
             except Exception:
+                preview = (text or raw_body.decode("utf-8", errors="replace"))[:300]
                 logger.warning(
-                    f"{LOG_TAG} [openai_generate] 响应非 JSON（status={status}） | "
-                    f"body={text[:300]}"
+                    f"{LOG_TAG} [openai_generate] 响应非有效 JSON/ZIP（status={status}） | "
+                    f"body={preview}"
                 )
                 return [], "invalid_response"
 
