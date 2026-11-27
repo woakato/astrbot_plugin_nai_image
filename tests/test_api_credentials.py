@@ -627,3 +627,108 @@ def test_image_prompt_spec_path_and_silent_absence(tmp_path, monkeypatch):
     spec_file.write_text("  Custom NAI Spec  \n", encoding="utf-8")
     assert nai_main._load_image_prompt_spec(spec_file) == "Custom NAI Spec"
     assert warnings == []
+
+
+def test_v211_migration_preserves_unmigrated_legacy_keys_when_both_slots_occupied(
+    load_plugin, tmp_path
+):
+    """When primary & backup are already occupied by other channels, do not wipe unmigrated legacy API keys."""
+    config_path = tmp_path / f"{PLUGIN_NAME}_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "call_mode": "novelai",
+                "novelai_service": "starbride",
+                "openai_api_base_url": "https://api1.syuan.org",
+                "openai_api_key": "syuan-key",
+                "openai_backup_base_url": "https://api2.example.com",
+                "openai_backup_key": "backup-key",
+                "starbride_api_base_url": "https://api.starbridge.zone",
+                "starbride_api_key": "unmigrated-starbride-key",
+                "novelai_official_api_base_url": "https://image.novelai.net",
+                "novelai_official_api_key": "",
+                "starbridge_api_base_url": "https://legacy.starbridge.example",
+                "starbridge_api_key": "unmigrated-starbridge-key",
+                "_api_credentials_version": 1,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    plugin, saved = load_plugin()
+    assert plugin.call_mode == saved["call_mode"] == "openai"
+    assert saved["openai_api_key"] == "syuan-key"
+    assert saved["openai_backup_key"] == "backup-key"
+    # Non-empty unmigrated legacy credentials must remain intact instead of being wiped.
+    assert saved["starbride_api_base_url"] == "https://api.starbridge.zone"
+    assert saved["starbride_api_key"] == "unmigrated-starbride-key"
+    assert saved["starbridge_api_base_url"] == "https://legacy.starbridge.example"
+    assert saved["starbridge_api_key"] == "unmigrated-starbridge-key"
+    # Untouched empty-key default official URL is still cleaned up.
+    assert saved["novelai_official_api_base_url"] == ""
+    assert saved["novelai_official_api_key"] == ""
+
+
+def test_v211_migration_resets_active_channel_to_primary_and_clears_fallback_on_v300_recovery(
+    load_plugin, tmp_path
+):
+    """prefer_novelai resets stale backup active channel to primary and honors empty fallback list on v3.0.0 recovery."""
+    # Case 1: legacy novelai channel matches primary while stale openai_active_channel was "backup".
+    config_path = tmp_path / f"{PLUGIN_NAME}_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "call_mode": "novelai",
+                "novelai_service": "starbride",
+                "openai_active_channel": "backup",
+                "openai_api_base_url": "https://api.starbridge.zone",
+                "openai_api_key": "starbride-key",
+                "openai_backup_base_url": "https://api1.syuan.org",
+                "openai_backup_key": "syuan-key",
+                "starbride_api_base_url": "https://api.starbridge.zone",
+                "starbride_api_key": "starbride-key",
+                "_api_credentials_version": 1,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    plugin, saved = load_plugin()
+    assert plugin.openai_active_channel == saved["openai_active_channel"] == "primary"
+    assert plugin.openai_api_base_url == "https://api.starbridge.zone"
+    assert saved["starbride_api_key"] == ""
+
+    # Case 2: v3.0.0 reset recovery (cred_ver==2, call_mode=="direct", empty openai slots, intact starbride key)
+    # should also honor empty novelai_director_fallback_images instead of keeping stale openai fallback list.
+    config_path.write_text(
+        json.dumps(
+            {
+                "call_mode": "direct",
+                "image_gen_key": "",
+                "novelai_service": "starbride",
+                "starbride_api_base_url": "https://api.starbridge.zone",
+                "starbride_api_key": "recovered-starbride-key",
+                "openai_active_channel": "backup",
+                "openai_api_base_url": "",
+                "openai_api_key": "",
+                "openai_backup_base_url": "",
+                "openai_backup_key": "",
+                "openai_director_fallback_images": ["stale-portrait.png"],
+                "novelai_director_fallback_images": [],
+                "_api_credentials_version": 2,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    recovered, saved_recovered = load_plugin()
+    assert recovered.call_mode == saved_recovered["call_mode"] == "openai"
+    assert recovered.openai_active_channel == saved_recovered["openai_active_channel"] == "primary"
+    assert recovered.openai_api_key == "recovered-starbride-key"
+    assert (
+        recovered.openai_director_fallback_images
+        == saved_recovered["openai_director_fallback_images"]
+        == []
+    )
+

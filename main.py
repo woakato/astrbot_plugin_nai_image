@@ -822,11 +822,13 @@ def migrate_v2_novelai_config(config: dict) -> dict[str, Any]:
         legacy_candidates.append(("starbridge", starbridge_url, starbridge_key))
 
     active_slot_for_novelai: str | None = None
+    migrated_sources: set[str] = set()
     for source_kind, cand_url, cand_key in legacy_candidates:
         cand_sig = (cand_url.rstrip("/"), cand_key)
         if (primary_url.rstrip("/"), primary_key) == cand_sig and (
             primary_url or primary_key
         ):
+            migrated_sources.add(source_kind)
             if active_slot_for_novelai is None and source_kind in (
                 "starbride",
                 "official",
@@ -836,6 +838,7 @@ def migrate_v2_novelai_config(config: dict) -> dict[str, Any]:
         if (backup_url.rstrip("/"), backup_key) == cand_sig and (
             backup_url or backup_key
         ):
+            migrated_sources.add(source_kind)
             if active_slot_for_novelai is None and source_kind in (
                 "starbride",
                 "official",
@@ -846,6 +849,7 @@ def migrate_v2_novelai_config(config: dict) -> dict[str, Any]:
             primary_url, primary_key = cand_url, cand_key
             updates["openai_api_base_url"] = cand_url
             updates["openai_api_key"] = cand_key
+            migrated_sources.add(source_kind)
             if active_slot_for_novelai is None and source_kind in (
                 "starbride",
                 "official",
@@ -855,26 +859,33 @@ def migrate_v2_novelai_config(config: dict) -> dict[str, Any]:
             backup_url, backup_key = cand_url, cand_key
             updates["openai_backup_base_url"] = cand_url
             updates["openai_backup_key"] = cand_key
+            migrated_sources.add(source_kind)
             if active_slot_for_novelai is None and source_kind in (
                 "starbride",
                 "official",
             ):
                 active_slot_for_novelai = "backup"
 
-    if starbridge_url or starbridge_key:
+    if (starbridge_url or starbridge_key) and (
+        "starbridge" in migrated_sources or not starbridge_key
+    ):
         updates["starbridge_api_base_url"] = ""
         updates["starbridge_api_key"] = ""
-    if starbride_url or starbride_key:
+    if (starbride_url or starbride_key) and (
+        "starbride" in migrated_sources or not starbride_key
+    ):
         updates["starbride_api_base_url"] = ""
         updates["starbride_api_key"] = ""
-    if official_url or official_key:
+    if (official_url or official_key) and (
+        "official" in migrated_sources or not official_key
+    ):
         updates["novelai_official_api_base_url"] = ""
         updates["novelai_official_api_key"] = ""
 
     if prefer_novelai:
         updates["call_mode"] = "openai"
-        if active_slot_for_novelai == "backup":
-            updates["openai_active_channel"] = "backup"
+        if active_slot_for_novelai in ("primary", "backup"):
+            updates["openai_active_channel"] = active_slot_for_novelai
 
         legacy_model = str(config.get("novelai_api_model") or "").strip()
         if legacy_model in OPENAI_COMPATIBLE_MODELS:
@@ -916,7 +927,7 @@ def migrate_v2_novelai_config(config: dict) -> dict[str, Any]:
                 raw_fb = [raw_fb]
             if isinstance(raw_fb, list):
                 cleaned_fb = [str(p).strip() for p in raw_fb if str(p or "").strip()]
-                if cleaned_fb or is_legacy_novelai_mode:
+                if cleaned_fb or prefer_novelai:
                     updates["openai_director_fallback_images"] = cleaned_fb
 
         legacy_seed = _coerce_legacy_seed(config.get("novelai_seed"))
