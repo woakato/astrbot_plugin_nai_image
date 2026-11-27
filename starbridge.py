@@ -7,6 +7,7 @@ import io
 import json
 import math
 import secrets
+import zipfile
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -357,3 +358,23 @@ def normalize_starbridge_response(body: object) -> dict:
             and image["image"]
         ]
     }
+
+
+ZIP_MAGIC = b"PK\x03\x04"
+
+
+def extract_zip_images(raw: bytes) -> list[bytes]:
+    """Extract image entries from a NovelAI native ZIP response.
+
+    部分中转（如星渊 /ai/generate-image）原样透传官方二进制 ZIP，其中除
+    PNG/JPEG 图片外还可能带 metadata 等非图片文件，这里按文件魔数过滤。
+    """
+    images: list[bytes] = []
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            data = zf.read(info)
+            if data[:8] == b"\x89PNG\r\n\x1a\n" or data[:3] == b"\xff\xd8\xff":
+                images.append(data)
+    return images

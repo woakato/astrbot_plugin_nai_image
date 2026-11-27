@@ -1,5 +1,9 @@
 # 更新日志
 
+## v3.0.1 (2026-11-27)
+
+- 修复 openai 双渠道生图在渠道原样透传 NovelAI 官方二进制 ZIP 响应（如星渊 `/ai/generate-image`）时抛 `UnicodeDecodeError` 的问题：改为二进制读取后按 `PK\x03\x04` 魔数嗅探，ZIP 解包提取其中 PNG/JPEG 图片（过滤 metadata 等非图片条目），JSON 渠道流程不变，两路统一走既有归档与用量统计；HTTP 错误正文改用容错解码，日志不再因二进制正文二次报错。
+
 ## v3.0.0 (2026-11-27)
 
 - 第三方接口统一升级为 NovelAI 官方 `/ai/` 原生协议（移除旧版 OpenAI 兼容格式），全面支持 V4.5 / V5 的 Full 与 Curated 模型及 `director-tools` 图片处理。

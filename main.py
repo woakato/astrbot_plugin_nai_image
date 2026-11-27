@@ -67,6 +67,8 @@ if __package__:
     )
     from .starbridge import (
         StarbridgeError,
+        ZIP_MAGIC,
+        extract_zip_images,
         native_error,
         normalize_starbridge_response,
         prepare_starbridge_request,
@@ -119,6 +121,8 @@ else:
     )
     from starbridge import (
         StarbridgeError,
+        ZIP_MAGIC,
+        extract_zip_images,
         native_error,
         normalize_starbridge_response,
         prepare_starbridge_request,
@@ -3355,8 +3359,10 @@ class NAIGenerateImagePlugin(Star):
             )
 
             # ==== 发送请求：付费 POST 不自动重试，也不跟随重定向 ====
+            # 部分渠道（如星渊）原样透传 NovelAI 官方二进制 ZIP 响应，按文本
+            # 读会在 ZIP 头字节处抛 UnicodeDecodeError，必须先读原始字节再分流。
             status = 0
-            text = ""
+            raw = b""
             connect_failed = False
             try:
                 async with self._session.post(
@@ -3366,10 +3372,10 @@ class NAIGenerateImagePlugin(Star):
                     timeout=timeout,
                     allow_redirects=False,
                 ) as resp:
-                    text = await resp.text()
+                    raw = await resp.read()
                     status = resp.status
             except asyncio.TimeoutError:
-                status, text = 0, ""
+                status, raw = 0, b""
                 logger.warning(
                     f"{LOG_TAG} [openai_generate] 请求超时，上游可能仍在生成（可能已扣费），不再自动重试"
                 )
@@ -3400,6 +3406,7 @@ class NAIGenerateImagePlugin(Star):
             if 300 <= status < 400:
                 return [], "starbridge | 接口发生重定向，请填写最终的 HTTPS 站点地址。"
             if status >= 400:
+                text = raw.decode("utf-8", errors="replace")
                 err_msg = ""
                 try:
                     _err = json.loads(text)
@@ -3423,77 +3430,94 @@ class NAIGenerateImagePlugin(Star):
                     continue
                 return [], reason
 
-            # 手动解析 JSON：上游异常时可能返回 text/html 页面，resp.json()
-            # 会因 mimetype 不匹配抛 ContentTypeError，这里改为读取文本解析。
-            try:
-                _data = json.loads(text)
-            except Exception:
-                logger.warning(
-                    f"{LOG_TAG} [openai_generate] 响应非 JSON（status={status}） | "
-                    f"body={text[:300]}"
-                )
-                return [], "invalid_response"
-
-            _data = normalize_starbridge_response(_data)
-            items = _data.get("data") if isinstance(_data, dict) else []
-            if not isinstance(items, list) or not items:
-                return [], "empty_response"
-
+            # 响应二选一：NovelAI 原生二进制 ZIP（星渊等透传官方格式），或
+            # OpenAI 兼容 JSON 文本，按 ZIP 魔数分流后统一走下方归档逻辑。
             images: list[bytes] = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                b64 = str(item.get("b64_json") or "").strip()
-                url = str(item.get("url") or "").strip()
-                if b64:
-                    # 文档要求 b64_json 不带 data URI 前缀（§12），但部分中转会
-                    # 原样透传 data:image/...;base64, 前缀，这里兼容两种情况。
-                    if b64.startswith("data:"):
-                        b64 = b64.split(",", 1)[-1]
-                    try:
-                        decoded = base64.b64decode(b64)
-                        if decoded:
-                            images.append(decoded)
-                        else:
-                            logger.warning(
-                                f"{LOG_TAG} [openai_generate] b64_json 解码结果为空"
-                            )
-                    except Exception as exc:
-                        logger.warning(
-                            f"{LOG_TAG} [openai_generate] b64_json 解码失败: {type(exc).__name__}"
-                        )
-                elif url:
-                    if url.startswith("data:"):
+            if raw[:4] == ZIP_MAGIC:
+                try:
+                    images = extract_zip_images(raw)
+                except Exception as exc:
+                    logger.warning(
+                        f"{LOG_TAG} [openai_generate] 渠道 {cand_name} ZIP 解包失败: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    return [], "invalid_response"
+                logger.info(
+                    f"{LOG_TAG} [openai_generate] 渠道 {cand_name} 返回 NovelAI 原生 "
+                    f"ZIP，解包得到 {len(images)} 张图片"
+                )
+            else:
+                text = raw.decode("utf-8", errors="replace")
+                # 手动解析 JSON：上游异常时可能返回 text/html 页面，resp.json()
+                # 会因 mimetype 不匹配抛 ContentTypeError，这里改为读取文本解析。
+                try:
+                    _data = json.loads(text)
+                except Exception:
+                    logger.warning(
+                        f"{LOG_TAG} [openai_generate] 响应非 JSON（status={status}） | "
+                        f"body={text[:300]}"
+                    )
+                    return [], "invalid_response"
+
+                _data = normalize_starbridge_response(_data)
+                items = _data.get("data") if isinstance(_data, dict) else []
+                if not isinstance(items, list) or not items:
+                    return [], "empty_response"
+
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    b64 = str(item.get("b64_json") or "").strip()
+                    url = str(item.get("url") or "").strip()
+                    if b64:
+                        # 文档要求 b64_json 不带 data URI 前缀（§12），但部分中转会
+                        # 原样透传 data:image/...;base64, 前缀，这里兼容两种情况。
+                        if b64.startswith("data:"):
+                            b64 = b64.split(",", 1)[-1]
                         try:
-                            decoded = base64.b64decode(url.split(",", 1)[-1])
+                            decoded = base64.b64decode(b64)
                             if decoded:
                                 images.append(decoded)
                             else:
                                 logger.warning(
-                                    f"{LOG_TAG} [openai_generate] data URI 内容为空"
+                                    f"{LOG_TAG} [openai_generate] b64_json 解码结果为空"
                                 )
                         except Exception as exc:
                             logger.warning(
-                                f"{LOG_TAG} [openai_generate] data URI 解码失败: "
-                                f"{type(exc).__name__}"
+                                f"{LOG_TAG} [openai_generate] b64_json 解码失败: {type(exc).__name__}"
                             )
-                        continue
-                    try:
-                        async with self._session.get(
-                            url, timeout=aiohttp.ClientTimeout(total=60)
-                        ) as dl_resp:
-                            if dl_resp.status == 200:
-                                downloaded = await dl_resp.read()
-                                if downloaded:
-                                    images.append(downloaded)
+                    elif url:
+                        if url.startswith("data:"):
+                            try:
+                                decoded = base64.b64decode(url.split(",", 1)[-1])
+                                if decoded:
+                                    images.append(decoded)
                                 else:
                                     logger.warning(
-                                        f"{LOG_TAG} [openai_generate] url 下载内容为空"
+                                        f"{LOG_TAG} [openai_generate] data URI 内容为空"
                                     )
-                    except Exception as exc:
-                        logger.warning(
-                            f"{LOG_TAG} [openai_generate] 下载 url 失败: {type(exc).__name__}"
-                        )
+                            except Exception as exc:
+                                logger.warning(
+                                    f"{LOG_TAG} [openai_generate] data URI 解码失败: "
+                                    f"{type(exc).__name__}"
+                                )
+                            continue
+                        try:
+                            async with self._session.get(
+                                url, timeout=aiohttp.ClientTimeout(total=60)
+                            ) as dl_resp:
+                                if dl_resp.status == 200:
+                                    downloaded = await dl_resp.read()
+                                    if downloaded:
+                                        images.append(downloaded)
+                                    else:
+                                        logger.warning(
+                                            f"{LOG_TAG} [openai_generate] url 下载内容为空"
+                                        )
+                        except Exception as exc:
+                            logger.warning(
+                                f"{LOG_TAG} [openai_generate] 下载 url 失败: {type(exc).__name__}"
+                            )
             if images:
                 # OpenAI 兼容端点的实际计费由中转站决定，这里按像素画幅推断档位，
                 # 仅作为用量统计的估算值（与直连档位表口径不同，分开记录）。
