@@ -576,3 +576,116 @@ def test_pure_edit_explicit_size_coerces_non_64_multiples_and_invalid_dimensions
     assert params["width"] % 64 == 0 and params["height"] % 64 == 0
     assert params["width"] * params["height"] <= 3_145_728
 
+
+@pytest.mark.parametrize(
+    ("ratio", "expected_w", "expected_h"),
+    [
+        ("1:1", 1024, 1024),
+        ("2:3", 832, 1216),
+        ("3:2", 1216, 832),
+        ("3:4", 896, 1152),
+        ("4:3", 1152, 896),
+        ("9:16", 768, 1344),
+        ("16:9", 1344, 768),
+    ],
+)
+def test_companion_openai_ratio_maps_to_exact_1mp_64_multiple_resolution(
+    tmp_path, ratio, expected_w, expected_h
+):
+    plugin = make_openai_plugin()
+    api = NAIImageCompanionExtensionAPI(plugin)
+    api._save_companion_image = AsyncMock(return_value=tmp_path / "out.png")
+
+    res = asyncio.run(
+        api.generate_for_companion(
+            None,
+            {
+                "workflow_kind": "generate",
+                "prompt_text": "1girl, landscape cafe",
+                "ratio": ratio,
+                "character_source": "companion",
+            },
+        )
+    )
+
+    assert res["handled"] is True
+    params = plugin._session.calls[0]["body"]["parameters"]
+    assert (params["width"], params["height"]) == (expected_w, expected_h)
+    assert params["width"] % 64 == 0 and params["height"] % 64 == 0
+    assert params["width"] * params["height"] <= 1_048_576
+    assert res["metadata"]["size"] == f"{expected_w}x{expected_h}"
+
+
+def test_companion_ratio_preserves_direct_tiers_and_edit_override(tmp_path):
+    plugin_direct = make_openai_plugin()
+    plugin_direct.call_mode = "direct"
+    api_direct = NAIImageCompanionExtensionAPI(plugin_direct)
+    assert api_direct._coerce_size("16:9") == "横图"
+    assert api_direct._coerce_size("9:16") == "竖图"
+    assert api_direct._coerce_size("1:1") == "方图"
+    assert api_direct._coerce_size("16:9", openai_mode=True) == "1344x768"
+
+    # Explicit ratio on pure edit_source overrides source aspect ratio cleanly.
+    src = tmp_path / "portrait.png"
+    src.write_bytes(make_png((832, 1216)))
+    plugin_openai = make_openai_plugin()
+    api_openai = NAIImageCompanionExtensionAPI(plugin_openai)
+    api_openai._save_companion_image = AsyncMock(return_value=tmp_path / "edit_out.png")
+    res = asyncio.run(
+        api_openai.generate_for_companion(
+            None,
+            {
+                "workflow_kind": "edit",
+                "prompt_text": "extend into wide scene",
+                "reference_image_paths": [str(src)],
+                "reference_roles": ["edit_source"],
+                "ratio": "3:2",
+            },
+        )
+    )
+    assert res["handled"] is True
+    params = plugin_openai._session.calls[0]["body"]["parameters"]
+    assert (params["width"], params["height"]) == (1216, 832)
+
+
+def test_nai_generate_image_tool_attaches_zero_coupling_outbound_metadata():
+    class FakeEvent:
+        def __init__(self):
+            self.extras = {}
+            self.sent = []
+
+        def get_extra(self, key, default=None):
+            return self.extras.get(key, default)
+
+        def set_extra(self, key, value):
+            self.extras[key] = value
+
+        async def send(self, chain):
+            self.sent.append(chain)
+
+    plugin = make_openai_plugin(model="nai-diffusion-5-curated")
+    plugin.enable_llm_tool = True
+    plugin.enable_tool_style = True
+    plugin.enable_character_blocks = False
+    event = FakeEvent()
+
+    async def _run():
+        outputs = []
+        async for chunk in plugin.NAI_Generate_Image(
+            event, prompt="1girl, solo, landscape park", style="custom", size_cn="1216x832"
+        ):
+            outputs.append(chunk)
+        return outputs
+
+    outputs = asyncio.run(_run())
+    assert len(event.sent) == 1
+    assert any("图片已生成并发送给用户" in item for item in outputs)
+    meta = getattr(event.sent[0], "_companion_generated_image_meta", None)
+    assert isinstance(meta, dict)
+    assert meta["source_plugin"] == "astrbot_plugin_nai_image"
+    assert meta["tool_name"] == "NAI_Generate_Image"
+    assert meta["action"] == "image.generate"
+    assert meta["model"] == "nai-diffusion-5-curated"
+    assert meta["size"] == "1216x832"
+    assert "landscape park" in meta["prompt"]
+

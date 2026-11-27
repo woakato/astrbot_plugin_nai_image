@@ -33,7 +33,7 @@ _LOG_TAG = "[NAI-Image][companion]"
 _PROMPT_FORMAT_NATURAL = "natural_language"
 _PROMPT_FORMAT_NAI = "nai"
 
-# 陪伴插件常见比例写法 → NAI 尺寸键。
+# 陪伴插件常见比例写法 → NAI 尺寸键（传统 GET 直连分档）。
 _COMPANION_RATIO_SIZES = {
     "1:1": "方图",
     "2:3": "竖图",
@@ -42,6 +42,18 @@ _COMPANION_RATIO_SIZES = {
     "3:2": "横图",
     "4:3": "横图",
     "16:9": "横图",
+}
+
+# 陪伴插件常见比例写法 → OpenAI/官方 /ai/ 协议下的 NAI 1MP 标准 64 倍数分辨率
+# （所有档位均 <= 1,048,576 像素，与默认 832x1216 / 1216x832 / 1024x1024 同计费档）。
+_COMPANION_OPENAI_RATIO_SIZES = {
+    "1:1": "1024x1024",
+    "2:3": "832x1216",
+    "3:2": "1216x832",
+    "3:4": "896x1152",
+    "4:3": "1152x896",
+    "9:16": "768x1344",
+    "16:9": "1344x768",
 }
 
 # OpenAI 风格的 "1024x1024" 尺寸写法。
@@ -337,14 +349,14 @@ class NAIImageCompanionExtensionAPI:
                     req_w, req_h
                 ) or self._coerce_size("")
             elif explicit_size:
-                size = self._coerce_size(explicit_size)
+                size = self._coerce_size(explicit_size, openai_mode=True)
             else:
                 matched_size = await asyncio.to_thread(
                     self._resolve_edit_source_size, reference_paths[0]
                 )
                 size = matched_size or self._coerce_size("")
         else:
-            size = self._coerce_size(explicit_size)
+            size = self._coerce_size(explicit_size, openai_mode=is_openai_mode)
 
         # 把背景信息与需求合并成最终提示词。nai tag 模式按标签规则归一化；
         # 自然语言模式保留英文句子原样（新版 NAI 已支持英文自然语言直接
@@ -865,8 +877,8 @@ class NAIImageCompanionExtensionAPI:
             return key
         return plugin.image_style
 
-    def _coerce_size(self, value: str) -> str:
-        """把陪伴尺寸/比例值归一化为 NAI 尺寸键，未命中回退插件默认尺寸。"""
+    def _coerce_size(self, value: str, *, openai_mode: bool = False) -> str:
+        """把陪伴尺寸/比例值归一化为 NAI 尺寸键或 OpenAI 1MP 像素尺寸，未命中回退插件默认尺寸。"""
         plugin = self._plugin
         text = str(value or "").strip()
         if not text:
@@ -874,7 +886,12 @@ class NAIImageCompanionExtensionAPI:
         key = normalize_image_size(text)
         if key:
             return key
-        ratio = _COMPANION_RATIO_SIZES.get(text.replace(" ", "").casefold())
+        ratio_key = text.replace(" ", "").casefold()
+        if openai_mode:
+            openai_ratio = _COMPANION_OPENAI_RATIO_SIZES.get(ratio_key)
+            if openai_ratio:
+                return openai_ratio
+        ratio = _COMPANION_RATIO_SIZES.get(ratio_key)
         if ratio:
             return ratio
         match = _WH_SIZE_RE.match(text)

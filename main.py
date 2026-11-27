@@ -6872,7 +6872,23 @@ class NAIGenerateImagePlugin(Star):
             logger.info(
                 f"{LOG_TAG} [tool:NAI_Generate_Image] 图片发送 | bytes={len(img_bytes)}"
             )
-            await event.send(MessageChain(chain=[Img.fromBytes(img_bytes)]))
+            effective_model = slot_model or (
+                getattr(self, "openai_api_model", "")
+                if self.call_mode == "openai"
+                else getattr(self, "model", "")
+            )
+            chain = MessageChain(chain=[Img.fromBytes(img_bytes)])
+            # 零依赖出站元数据：供宿主或陪伴插件识别该图片为生图工具产出，不引入跨插件耦合。
+            chain._companion_generated_image_meta = {
+                "source_plugin": "astrbot_plugin_nai_image",
+                "tool_name": "NAI_Generate_Image",
+                "action": "image.generate",
+                "prompt": prompt[:900],
+                "style": style,
+                "size": size,
+                "model": str(effective_model or ""),
+            }
+            await event.send(chain)
             logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 完成 | 成功")
             yield "图片已生成并发送给用户，请根据本次请求继续回复。"
             return
