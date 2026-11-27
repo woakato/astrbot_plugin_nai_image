@@ -7,11 +7,27 @@ import base64
 import copy
 import io
 import json
+import sys
+import types
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from PIL import Image
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_PARENT = _REPO_ROOT.parent
+for _entry in (str(_REPO_ROOT), str(_REPO_PARENT)):
+    if _entry not in sys.path:
+        sys.path.insert(0, _entry)
+if (
+    "astrbot_plugin_nai_image" not in sys.modules
+    and _REPO_ROOT.name != "astrbot_plugin_nai_image"
+):
+    _pkg = types.ModuleType("astrbot_plugin_nai_image")
+    _pkg.__path__ = [str(_REPO_ROOT)]
+    _pkg.__file__ = str(_REPO_ROOT / "__init__.py")
+    sys.modules["astrbot_plugin_nai_image"] = _pkg
 
 from astrbot_plugin_nai_image.companion_api import NAIImageCompanionExtensionAPI
 from main import NAIGenerateImagePlugin
@@ -516,3 +532,47 @@ def test_companion_empty_prompt_and_save_error_structured_fields():
     assert save_res["reason"] == "save_failed"
     assert save_res["http_status"] == 0
     assert save_res["retryable"] is False
+
+
+@pytest.mark.parametrize(
+    ("explicit_size", "expected_w", "expected_h"),
+    [
+        ("1920x1080", 1344, 768),
+        ("1200x900", 1088, 832),
+        ("4096x4096", 1024, 1024),
+        ("1536x2048", 832, 1088),
+        ("1024x1536", 1024, 1536),
+        ("1024x1024", 1024, 1024),
+        ("0x0", 832, 1216),
+    ],
+)
+def test_pure_edit_explicit_size_coerces_non_64_multiples_and_invalid_dimensions(
+    tmp_path, explicit_size, expected_w, expected_h
+):
+    src = tmp_path / "source.png"
+    src.write_bytes(make_png((1200, 800)))
+    plugin = make_openai_plugin()
+    api = NAIImageCompanionExtensionAPI(plugin)
+    api._save_companion_image = AsyncMock(return_value=tmp_path / "out.png")
+
+    res = asyncio.run(
+        api.generate_for_companion(
+            None,
+            {
+                "workflow_kind": "edit",
+                "prompt_text": "add soft sunset lighting",
+                "reference_image_paths": [str(src)],
+                "reference_roles": ["edit_source"],
+                "size": explicit_size,
+            },
+        )
+    )
+
+    assert res["handled"] is True
+    assert res["image_path"] == str(tmp_path / "out.png")
+    params = plugin._session.calls[0]["body"]["parameters"]
+    assert params["width"] == expected_w
+    assert params["height"] == expected_h
+    assert params["width"] % 64 == 0 and params["height"] % 64 == 0
+    assert params["width"] * params["height"] <= 3_145_728
+

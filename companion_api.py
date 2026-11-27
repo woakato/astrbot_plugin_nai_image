@@ -64,6 +64,7 @@ _VALID_REFERENCE_MODES = frozenset({"img2img", "vibe", "director"})
 
 # 纯改图自动匹配原图比例的像素约束（保持在 NovelAI 标准计费面积上限内）。
 _EDIT_STANDARD_MAX_AREA = 1_048_576
+_EDIT_MAX_VALID_PIXELS = 3_145_728
 _EDIT_MAX_SIDE = 1920
 _EDIT_MIN_SIDE = 64
 _EDIT_EXACT_MIN_SIDE = 512
@@ -331,7 +332,10 @@ class NAIImageCompanionExtensionAPI:
             if explicit_size and _WH_SIZE_RE.match(explicit_size):
                 match = _WH_SIZE_RE.match(explicit_size)
                 assert match is not None
-                size = f"{int(match.group(1))}x{int(match.group(2))}"
+                req_w, req_h = int(match.group(1)), int(match.group(2))
+                size = self._coerce_edit_explicit_dimensions(
+                    req_w, req_h
+                ) or self._coerce_size("")
             elif explicit_size:
                 size = self._coerce_size(explicit_size)
             else:
@@ -706,6 +710,26 @@ class NAIImageCompanionExtensionAPI:
         if raw_preserve is False or raw_apply_prefix is True:
             return False
         return subject_mode == "edit_preserve"
+
+    @classmethod
+    def _coerce_edit_explicit_dimensions(cls, width: int, height: int) -> str:
+        """规范化纯改图请求显式传入的 WxH 像素尺寸。
+
+        合法的 64 倍数且在 NovelAI 最大像素上限（3,145,728 px）内时原样保留；
+        非 64 倍数或超限时按原比例映射到最接近的合法 64 倍数尺寸；非正值返回空串。
+        """
+        if width <= 0 or height <= 0:
+            return ""
+        if (
+            width >= _EDIT_MIN_SIDE
+            and height >= _EDIT_MIN_SIDE
+            and max(width, height) <= _EDIT_MAX_SIDE
+            and width % 64 == 0
+            and height % 64 == 0
+            and width * height <= _EDIT_MAX_VALID_PIXELS
+        ):
+            return f"{width}x{height}"
+        return cls._match_edit_source_dimensions(width, height)
 
     @staticmethod
     def _match_edit_source_dimensions(width: int, height: int) -> str:
