@@ -12,6 +12,7 @@ OpenAI 兼容代理即可完成生图。
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import time
 from pathlib import Path
@@ -32,7 +33,7 @@ _LOG_TAG = "[NAI-Image][companion]"
 _PROMPT_FORMAT_NATURAL = "natural_language"
 _PROMPT_FORMAT_NAI = "nai"
 
-# 陪伴插件常见比例写法 → NAI 尺寸键。
+# 陪伴插件常见比例写法 → NAI 尺寸键（传统 GET 直连分档）。
 _COMPANION_RATIO_SIZES = {
     "1:1": "方图",
     "2:3": "竖图",
@@ -43,11 +44,44 @@ _COMPANION_RATIO_SIZES = {
     "16:9": "横图",
 }
 
+# 陪伴插件常见比例写法 → OpenAI/官方 /ai/ 协议下的 NAI 1MP 标准 64 倍数分辨率
+# （所有档位均 <= 1,048,576 像素，与默认 832x1216 / 1216x832 / 1024x1024 同计费档）。
+_COMPANION_OPENAI_RATIO_SIZES = {
+    "1:1": "1024x1024",
+    "2:3": "832x1216",
+    "3:2": "1216x832",
+    "3:4": "896x1152",
+    "4:3": "1152x896",
+    "9:16": "768x1344",
+    "16:9": "1344x768",
+}
+
 # OpenAI 风格的 "1024x1024" 尺寸写法。
 _WH_SIZE_RE = re.compile(r"^\s*(\d{1,5})\s*[x×*]\s*(\d{1,5})\s*$", re.IGNORECASE)
 
 # 自然语言模式下的空白折叠（保留句子结构，不注入逗号）。
 _WHITESPACE_RE = re.compile(r"\s+")
+
+# 从底层 reason 提取 HTTP 状态码（兼容 http_502 与 HTTP 502 两种格式）。
+_HTTP_STATUS_REASON_RE = re.compile(
+    r"\bhttp_(\d{3})\b|\bHTTP\s+(\d{3})\b", re.IGNORECASE
+)
+_RETRYABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504})
+_RETRYABLE_REASONS = frozenset({"web_job_failed", "empty_response"})
+_MAYBE_BILLED_MARKERS = ("可能计费", "可能已计费", "可能已扣费")
+
+# 陪伴请求中的主体/参考模式契约常量。
+_NON_CHARACTER_SUBJECT_MODES = frozenset({"scene_only", "edit_preserve"})
+_VALID_REFERENCE_MODES = frozenset({"img2img", "vibe", "director"})
+
+# 纯改图自动匹配原图比例的像素约束（保持在 NovelAI 标准计费面积上限内）。
+_EDIT_STANDARD_MAX_AREA = 1_048_576
+_EDIT_MAX_VALID_PIXELS = 3_145_728
+_EDIT_MAX_SIDE = 1920
+_EDIT_MIN_SIDE = 64
+_EDIT_EXACT_MIN_SIDE = 512
+_EXIF_ORIENTATION_TAG = 274
+_EXIF_TRANSPOSE_ORIENTATIONS = frozenset({5, 6, 7, 8})
 
 
 def _first_text(*values: Any) -> str:
@@ -73,20 +107,39 @@ class NAIImageCompanionExtensionAPI:
 
     # ==== 状态查询 ====
 
+    def _credential_status(self) -> tuple[bool, str]:
+        """检查当前调用模式的地址与密钥就绪状态，不泄露凭据明文。"""
+        plugin = self._plugin
+        call_mode = str(getattr(plugin, "call_mode", "direct") or "direct")
+        if call_mode == "openai":
+            resolver = getattr(plugin, "_resolve_openai_channel_candidates", None)
+            if callable(resolver):
+                candidates, resolve_err = resolver()
+                if not candidates:
+                    return False, resolve_err or "openai_not_configured"
+                if not any(
+                    bool(str(ch.get("api_key") or "").strip())
+                    or bool(ch.get("has_key"))
+                    for ch in candidates
+                ):
+                    return False, "openai_key_missing"
+                return True, "ready"
+            base_url = str(getattr(plugin, "openai_api_base_url", "") or "").strip()
+            api_key = str(getattr(plugin, "openai_api_key", "") or "").strip()
+            if not base_url:
+                return False, "openai_not_configured"
+            if not api_key:
+                return False, "openai_key_missing"
+            return True, "ready"
+        if str(getattr(plugin, "image_gen_key", "") or "").strip():
+            return True, "ready"
+        return False, "no_token"
+
     def status(self) -> dict[str, Any]:
         """返回插件直连状态快照，供陪伴插件面板与状态查询使用。"""
         plugin = self._plugin
         call_mode = str(getattr(plugin, "call_mode", "direct") or "direct")
-        if call_mode == "openai":
-            # OpenAI 兼容模式只需要接口地址；直连 token 不参与生图。
-            has_channel = getattr(plugin, "_has_openai_channel", None)
-            credential_configured = (
-                bool(has_channel())
-                if callable(has_channel)
-                else bool(getattr(plugin, "openai_api_base_url", ""))
-            )
-        else:
-            credential_configured = bool(plugin.image_gen_key)
+        credential_configured, credential_reason = self._credential_status()
         slot_model = getattr(plugin, "_slot_model", lambda: "")()
         slot = (
             getattr(plugin, "_active_artist_slot", lambda: None)()
@@ -108,6 +161,8 @@ class NAIImageCompanionExtensionAPI:
             # 是否就绪看 credential_configured。
             "token_configured": bool(plugin.image_gen_key),
             "credential_configured": credential_configured,
+            "credential_reason": credential_reason,
+            "operations": self.capability_status(None)["operations"],
             "base_url": plugin.base_url,
             "default_style": plugin.image_style,
             "artist_slot_name": str(slot.get("name", ""))
@@ -143,23 +198,13 @@ class NAIImageCompanionExtensionAPI:
                 "selected_backend": "nai",
                 "backup_external_note": "disabled",
                 "backends": {},
+                "operations": [],
             }
         # 只做本地就绪检查，不探测上游：上游可达性探测每次约 1 秒以上，
         # 而陪伴插件会高频轮询本接口，预检会拖慢主动链路；真实失败会由
         # 生图结果以明确的错误信息返回。
         call_mode = str(getattr(plugin, "call_mode", "direct") or "direct")
-        if call_mode == "openai":
-            # OpenAI 兼容模式不依赖直连 token，接口地址缺失才是未就绪。
-            has_channel = getattr(plugin, "_has_openai_channel", None)
-            credential_ok = (
-                bool(has_channel())
-                if callable(has_channel)
-                else bool(getattr(plugin, "openai_api_base_url", ""))
-            )
-            credential_reason = "openai_not_configured"
-        else:
-            credential_ok = bool(plugin.image_gen_key)
-            credential_reason = "no_token"
+        credential_ok, credential_reason = self._credential_status()
         session_ok = plugin._session is not None and not plugin._session.closed
         nai_ready = credential_ok and session_ok
         if not credential_ok:
@@ -180,6 +225,11 @@ class NAIImageCompanionExtensionAPI:
                 "external": nai_ready,
                 "proxy": plugin.proxy_runner is not None,
             },
+            "operations": (
+                (["generate", "edit"] if call_mode == "openai" else ["generate"])
+                if nai_ready
+                else []
+            ),
         }
 
     async def maintenance(self, owner: Any) -> dict[str, Any]:
@@ -256,17 +306,57 @@ class NAIImageCompanionExtensionAPI:
             :340
         ]
         reference_paths = self._resolve_reference_paths(req)
+        reference_roles = self._resolve_reference_roles(req)
         strength = self._coerce_strength(req.get("strength"))
+        subject_mode = _first_text(req.get("subject_mode")).casefold()
+        is_pure_edit = self._is_pure_edit_request(
+            workflow_kind=workflow_kind,
+            reference_paths=reference_paths,
+            reference_roles=reference_roles,
+            subject_mode=subject_mode,
+        )
+        reference_mode_override = self._resolve_reference_mode_override(
+            req, is_pure_edit=is_pure_edit
+        )
+        allow_fallback_references = self._resolve_allow_fallback_references(
+            req,
+            subject_mode=subject_mode,
+            is_pure_edit=is_pure_edit,
+        )
+        preserve_source_style = self._resolve_preserve_source_style(
+            req,
+            subject_mode=subject_mode,
+        )
+
         if reference_paths:
             logger.info(
                 f"{_LOG_TAG} 本次直连请求携带参考图 | kind={workflow_kind} "
+                f"roles={reference_roles} ref_override={reference_mode_override or 'default'} "
                 f"refs={len(reference_paths)} first={reference_paths[0][:160]} "
                 f"strength={strength}"
             )
 
         prompt_format = self._resolve_prompt_format(req)
         style = self._coerce_style(req.get("style"))
-        size = self._coerce_size(_first_text(req.get("size"), req.get("ratio")))
+        explicit_size = _first_text(req.get("size"), req.get("ratio"))
+        is_openai_mode = getattr(plugin, "call_mode", "direct") == "openai"
+        if is_openai_mode and reference_mode_override == "img2img" and reference_paths:
+            if explicit_size and _WH_SIZE_RE.match(explicit_size):
+                match = _WH_SIZE_RE.match(explicit_size)
+                assert match is not None
+                req_w, req_h = int(match.group(1)), int(match.group(2))
+                size = self._coerce_edit_explicit_dimensions(
+                    req_w, req_h
+                ) or self._coerce_size("")
+            elif explicit_size:
+                size = self._coerce_size(explicit_size, openai_mode=True)
+            else:
+                matched_size = await asyncio.to_thread(
+                    self._resolve_edit_source_size, reference_paths[0]
+                )
+                size = matched_size or self._coerce_size("")
+        else:
+            size = self._coerce_size(explicit_size, openai_mode=is_openai_mode)
 
         # 把背景信息与需求合并成最终提示词。nai tag 模式按标签规则归一化；
         # 自然语言模式保留英文句子原样（新版 NAI 已支持英文自然语言直接
@@ -286,44 +376,59 @@ class NAIImageCompanionExtensionAPI:
                 "backend": "NAI 生图",
                 "image_path": "",
                 "note": "提示词为空，未发起生图。",
+                "reason": "empty_prompt",
+                "http_status": 400,
+                "retryable": False,
                 "metadata": {},
             }
         logger.info(
             f"{_LOG_TAG} 直连生图({prompt_format}) | kind={workflow_kind} "
-            f"style={style} size={size} background={len(background)} "
-            f"prompt='{prepared_prompt[:60]}...'"
+            f"subject={subject_mode or 'default'} preserve_style={preserve_source_style} "
+            f"allow_fallback={allow_fallback_references} style={style} size={size} "
+            f"background={len(background)} prompt='{prepared_prompt[:60]}...'"
         )
 
         negative = req.get("negative")
         if not isinstance(negative, str) or not negative.strip():
             negative = section_negative or None
         # Companion owns its subject and clothing; render settings stay in NAI.
-        subject_options = (
+        subject_options: dict[str, Any] = (
             {"enable_template": False, "apply_outfit": False}
             if req.get("character_source") == "companion"
             else {}
         )
+        if preserve_source_style:
+            # 跳过带作品/角色偏置的全局画风槽位或回退画师串。
+            subject_options["custom_artists"] = ""
 
         try:
-            if getattr(plugin, "call_mode", "direct") == "openai":
-                # OpenAI 兼容模式：有参考图按插件「参考图使用模式」路由
-                # （vibe/img2img/director），否则文生图；画师串并入 prompt
+            if is_openai_mode:
+                # OpenAI/官方 /ai/ 协议模式：纯 edit_source 改图自动走 img2img，
+                # 其余按插件「参考图使用模式」（vibe/img2img/director）路由。
                 if reference_paths:
                     logger.info(
                         f"{_LOG_TAG} 调用模式 OpenAI，携带 {len(reference_paths)} 张"
                         f"参考图 | kind={workflow_kind} "
+                        f"ref_mode={reference_mode_override or getattr(plugin, 'openai_reference_mode', 'vibe')} "
                         f"first={reference_paths[0][:160]} strength={strength}"
                     )
                 openai_prompt, _, _ = await plugin._prepare_openai_prompt(
                     prepared_prompt, style, **subject_options
                 )
+                openai_kwargs: dict[str, Any] = {
+                    "n": 1,
+                    "reference_image_paths": reference_paths or None,
+                    "strength": strength,
+                    "negative": negative,
+                }
+                if reference_mode_override is not None:
+                    openai_kwargs["reference_mode"] = reference_mode_override
+                if not allow_fallback_references:
+                    openai_kwargs["allow_fallback_references"] = False
                 images, reason = await plugin._openai_generate(
                     openai_prompt,
                     size,
-                    n=1,
-                    reference_image_paths=reference_paths or None,
-                    strength=strength,
-                    negative=negative,
+                    **openai_kwargs,
                 )
                 img_bytes = images[0] if images else None
             else:
@@ -344,13 +449,17 @@ class NAIImageCompanionExtensionAPI:
                 "backend": "NAI 生图",
                 "image_path": "",
                 "note": "NAI 生图服务执行失败，请查看 AstrBot 日志。",
+                "reason": "exception",
+                "http_status": 0,
+                "retryable": False,
                 "metadata": {},
             }
 
         if not img_bytes:
             from .main import _format_generate_error
 
-            note = _format_generate_error(reason)
+            err_reason, http_status, retryable = self._classify_generation_error(reason)
+            note = _format_generate_error(err_reason)
             self._note_generation(
                 workflow_kind, prompt_format, style, size, "", False, note
             )
@@ -359,6 +468,9 @@ class NAIImageCompanionExtensionAPI:
                 "backend": "NAI 生图",
                 "image_path": "",
                 "note": note,
+                "reason": err_reason,
+                "http_status": http_status,
+                "retryable": retryable,
                 "metadata": {},
             }
 
@@ -371,6 +483,9 @@ class NAIImageCompanionExtensionAPI:
                 "backend": "NAI 生图",
                 "image_path": "",
                 "note": "图片已生成但保存失败，请检查插件数据目录权限。",
+                "reason": "save_failed",
+                "http_status": 0,
+                "retryable": False,
                 "metadata": {},
             }
 
@@ -540,6 +655,189 @@ class NAIImageCompanionExtensionAPI:
             return _PROMPT_FORMAT_NAI
         return _PROMPT_FORMAT_NATURAL
 
+    @staticmethod
+    def _resolve_reference_roles(request: dict[str, Any]) -> list[str]:
+        """归一化陪伴请求中的参考图角色列表。"""
+        raw = request.get("reference_roles")
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple)):
+            return []
+        return [
+            str(item or "").strip().casefold()
+            for item in raw
+            if str(item or "").strip()
+        ]
+
+    @staticmethod
+    def _is_pure_edit_request(
+        *,
+        workflow_kind: str,
+        reference_paths: list[str],
+        reference_roles: list[str],
+        subject_mode: str,
+    ) -> bool:
+        """判断本次请求是否为不带角色参考的纯原图编辑。"""
+        if workflow_kind.casefold() != "edit" or not reference_paths:
+            return False
+        if reference_roles:
+            return all(role == "edit_source" for role in reference_roles)
+        return subject_mode == "edit_preserve"
+
+    @staticmethod
+    def _resolve_reference_mode_override(
+        request: dict[str, Any], *, is_pure_edit: bool
+    ) -> str | None:
+        """决定是否需要覆盖全局参考图模式。"""
+        explicit = _first_text(request.get("reference_mode")).casefold()
+        if explicit in _VALID_REFERENCE_MODES:
+            return explicit
+        if is_pure_edit:
+            return "img2img"
+        return None
+
+    @staticmethod
+    def _resolve_allow_fallback_references(
+        request: dict[str, Any], *, subject_mode: str, is_pure_edit: bool
+    ) -> bool:
+        """决定是否允许在未带参考图时注入精准参考兜底人物图。"""
+        raw_allow = request.get("allow_fallback_references")
+        if raw_allow is False:
+            return False
+        if subject_mode in _NON_CHARACTER_SUBJECT_MODES or is_pure_edit:
+            return False
+        if raw_allow is True:
+            return True
+        return True
+
+    @staticmethod
+    def _resolve_preserve_source_style(
+        request: dict[str, Any], *, subject_mode: str
+    ) -> bool:
+        """决定是否跳过带作品/角色偏置的画风槽位与回退画师串。"""
+        raw_preserve = request.get("preserve_source_style")
+        raw_apply_prefix = request.get("apply_style_prefix")
+        if raw_preserve is True or raw_apply_prefix is False:
+            return True
+        if raw_preserve is False or raw_apply_prefix is True:
+            return False
+        return subject_mode == "edit_preserve"
+
+    @classmethod
+    def _coerce_edit_explicit_dimensions(cls, width: int, height: int) -> str:
+        """规范化纯改图请求显式传入的 WxH 像素尺寸。
+
+        合法的 64 倍数且在 NovelAI 最大像素上限（3,145,728 px）内时原样保留；
+        非 64 倍数或超限时按原比例映射到最接近的合法 64 倍数尺寸；非正值返回空串。
+        """
+        if width <= 0 or height <= 0:
+            return ""
+        if (
+            width >= _EDIT_MIN_SIDE
+            and height >= _EDIT_MIN_SIDE
+            and max(width, height) <= _EDIT_MAX_SIDE
+            and width % 64 == 0
+            and height % 64 == 0
+            and width * height <= _EDIT_MAX_VALID_PIXELS
+        ):
+            return f"{width}x{height}"
+        return cls._match_edit_source_dimensions(width, height)
+
+    @staticmethod
+    def _match_edit_source_dimensions(width: int, height: int) -> str:
+        """把原图宽高匹配为最接近且合法的 64 倍数 NAI 像素尺寸。
+
+        优先保持原图比例并将总像素控制在标准计费上限（1024×1024）内；
+        若原图本身已是合规的 64 倍数且不低于 512 边长，直接沿用原尺寸。
+        """
+        if width <= 0 or height <= 0:
+            return ""
+        if (
+            width % 64 == 0
+            and height % 64 == 0
+            and min(width, height) >= _EDIT_EXACT_MIN_SIDE
+            and max(width, height) <= _EDIT_MAX_SIDE
+            and width * height <= _EDIT_STANDARD_MAX_AREA
+        ):
+            return f"{width}x{height}"
+        ratio = width / height
+        ideal_w = math.sqrt(_EDIT_STANDARD_MAX_AREA * ratio)
+        ideal_h = math.sqrt(_EDIT_STANDARD_MAX_AREA / ratio)
+        if max(ideal_w, ideal_h) > _EDIT_MAX_SIDE:
+            shrink = _EDIT_MAX_SIDE / max(ideal_w, ideal_h)
+            ideal_w *= shrink
+            ideal_h *= shrink
+
+        max_steps = _EDIT_MAX_SIDE // 64
+        w_base = max(1, min(max_steps, int(ideal_w // 64)))
+        h_base = max(1, min(max_steps, int(ideal_h // 64)))
+        w_options = sorted(
+            {max(1, min(max_steps, step)) * 64 for step in (w_base - 1, w_base, w_base + 1)}
+        )
+        h_options = sorted(
+            {max(1, min(max_steps, step)) * 64 for step in (h_base - 1, h_base, h_base + 1)}
+        )
+
+        best: tuple[float, int, int, int] | None = None
+        for cand_w in w_options:
+            for cand_h in h_options:
+                area = cand_w * cand_h
+                if area > _EDIT_STANDARD_MAX_AREA:
+                    continue
+                err = abs((cand_w / cand_h) / ratio - 1.0)
+                score = (err, -area, cand_w, cand_h)
+                if best is None or score < best:
+                    best = score
+        if best is not None:
+            return f"{best[2]}x{best[3]}"
+        # 极端长宽比保底收缩到 64 倍数且不超过面积上限。
+        fallback_w = max(_EDIT_MIN_SIDE, min(_EDIT_MAX_SIDE, w_base * 64))
+        fallback_h = max(_EDIT_MIN_SIDE, min(_EDIT_MAX_SIDE, h_base * 64))
+        while fallback_w * fallback_h > _EDIT_STANDARD_MAX_AREA and max(
+            fallback_w, fallback_h
+        ) > _EDIT_MIN_SIDE:
+            if fallback_w >= fallback_h:
+                fallback_w -= 64
+            else:
+                fallback_h -= 64
+        return f"{fallback_w}x{fallback_h}"
+
+    @classmethod
+    def _resolve_edit_source_size(cls, image_path: str) -> str:
+        """读取原图尺寸并计算最接近的 64 倍数改图分辨率；失败时返回空串。"""
+        try:
+            from PIL import Image
+
+            path = Path(image_path)
+            if not path.is_file():
+                return ""
+            with Image.open(path) as img:
+                width, height = img.size
+                try:
+                    exif = img.getexif()
+                    orientation = exif.get(_EXIF_ORIENTATION_TAG) if exif else None
+                except Exception:
+                    orientation = None
+                if orientation in _EXIF_TRANSPOSE_ORIENTATIONS:
+                    width, height = height, width
+            return cls._match_edit_source_dimensions(width, height)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _classify_generation_error(reason: Any) -> tuple[str, int, bool]:
+        """从生图失败 reason 提取结构化 (reason, http_status, retryable)。"""
+        raw_reason = str(reason or "").strip() or "unknown"
+        match = _HTTP_STATUS_REASON_RE.search(raw_reason)
+        http_status = int(match.group(1) or match.group(2)) if match else 0
+        if any(marker in raw_reason for marker in _MAYBE_BILLED_MARKERS):
+            retryable = False
+        elif raw_reason in _RETRYABLE_REASONS or http_status in _RETRYABLE_HTTP_STATUSES:
+            retryable = True
+        else:
+            retryable = False
+        return raw_reason, http_status, retryable
+
     def _resolve_reference_paths(self, request: dict[str, Any]) -> list[str]:
         """从陪伴请求中解析参考图路径列表。
 
@@ -579,8 +877,8 @@ class NAIImageCompanionExtensionAPI:
             return key
         return plugin.image_style
 
-    def _coerce_size(self, value: str) -> str:
-        """把陪伴尺寸/比例值归一化为 NAI 尺寸键，未命中回退插件默认尺寸。"""
+    def _coerce_size(self, value: str, *, openai_mode: bool = False) -> str:
+        """把陪伴尺寸/比例值归一化为 NAI 尺寸键或 OpenAI 1MP 像素尺寸，未命中回退插件默认尺寸。"""
         plugin = self._plugin
         text = str(value or "").strip()
         if not text:
@@ -588,7 +886,12 @@ class NAIImageCompanionExtensionAPI:
         key = normalize_image_size(text)
         if key:
             return key
-        ratio = _COMPANION_RATIO_SIZES.get(text.replace(" ", "").casefold())
+        ratio_key = text.replace(" ", "").casefold()
+        if openai_mode:
+            openai_ratio = _COMPANION_OPENAI_RATIO_SIZES.get(ratio_key)
+            if openai_ratio:
+                return openai_ratio
+        ratio = _COMPANION_RATIO_SIZES.get(ratio_key)
         if ratio:
             return ratio
         match = _WH_SIZE_RE.match(text)

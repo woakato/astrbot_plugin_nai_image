@@ -2900,6 +2900,7 @@ class NAIGenerateImagePlugin(Star):
         director_captions: Sequence[str] | None = None,
         characters: Sequence[tuple[str, float, float]] | None = None,
         channel: str | None = None,
+        allow_fallback_references: bool = True,
     ) -> tuple[list[bytes], str]:
         """官方 /ai/ 协议生图（文生图 / 图生图 / 参考图 / 图片处理），支持主备渠道切换。"""
         import json
@@ -2962,9 +2963,9 @@ class NAIGenerateImagePlugin(Star):
         if (is_director or ref_mode == "director") and not ref_bytes_list:
             # 兜底参考图：director 模式且请求未带图时（聊天指令/陪伴联动），
             # 按设置里的文件顺序全部启用直至上限；director-tools 仍需显式
-            # 提供待处理图。设置页上传的文件存的是相对插件数据目录的路径，
-            # 绝对路径（用户手填）则原样使用。
-            if not is_director:
+            # 提供待处理图。请求显式禁用兜底（如纯风景/纯改图）时跳过注入。
+            # 设置页上传的文件存的是相对插件数据目录的路径，绝对路径原样使用。
+            if not is_director and allow_fallback_references:
                 _data_dir = StarTools.get_data_dir(PLUGIN_NAME)
                 for _fb_path in self.openai_director_fallback_images:
                     if len(ref_bytes_list) >= OPENAI_MAX_REFERENCE_IMAGES:
@@ -2991,6 +2992,10 @@ class NAIGenerateImagePlugin(Star):
                         f"{LOG_TAG} [openai_generate] 精准参考模式未带参考图且"
                         "未配置兜底参考图，回退纯文生图"
                     )
+            elif not is_director:
+                logger.info(
+                    f"{LOG_TAG} [openai_generate] 请求已禁用兜底参考图，直接走纯文生图"
+                )
             if not ref_bytes_list and is_director:
                 return [], "no_reference_image"
 
@@ -6891,7 +6896,23 @@ class NAIGenerateImagePlugin(Star):
             logger.info(
                 f"{LOG_TAG} [tool:NAI_Generate_Image] 图片发送 | bytes={len(img_bytes)}"
             )
-            await event.send(MessageChain(chain=[Img.fromBytes(img_bytes)]))
+            effective_model = slot_model or (
+                getattr(self, "openai_api_model", "")
+                if self.call_mode == "openai"
+                else getattr(self, "model", "")
+            )
+            chain = MessageChain(chain=[Img.fromBytes(img_bytes)])
+            # 零依赖出站元数据：供宿主或陪伴插件识别该图片为生图工具产出，不引入跨插件耦合。
+            chain._companion_generated_image_meta = {
+                "source_plugin": "astrbot_plugin_nai_image",
+                "tool_name": "NAI_Generate_Image",
+                "action": "image.generate",
+                "prompt": prompt[:900],
+                "style": style,
+                "size": size,
+                "model": str(effective_model or ""),
+            }
+            await event.send(chain)
             logger.info(f"{LOG_TAG} [tool:NAI_Generate_Image] 完成 | 成功")
             yield "图片已生成并发送给用户，请根据本次请求继续回复。"
             return
